@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "backend",
+      "runtimeExecutable": "uvicorn",
+      "runtimeArgs": ["backend.main:app", "--reload", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "streamlit",
+      "runtimeExecutable": "streamlit",
+      "runtimeArgs": ["run", "frontend/app.py", "--server.port", "8501"],
+      "port": 8501
+    }
+  ]
+}
