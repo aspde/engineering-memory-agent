@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ema-postgres
+    environment:
+      POSTGRES_USER: ema
+      POSTGRES_PASSWORD: ema123
+      POSTGRES_DB: memory
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
