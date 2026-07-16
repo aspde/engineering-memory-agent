@@ -32,3 +32,6 @@ build/
 # Node (frontend later)
 node_modules/
 .next/
+
+# Claude Code local settings
+.claude/settings.local.json
