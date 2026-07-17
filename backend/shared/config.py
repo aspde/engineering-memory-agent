@@ -13,6 +13,8 @@ load_dotenv()
 @dataclass
 class EmbeddingConfig:
     provider: str = field(default_factory=lambda: os.getenv("EMBEDDING_PROVIDER", "local"))
+    api_key: str = field(default_factory=lambda: os.getenv("EMBEDDING_API_KEY", ""))
+    base_url: str = field(default_factory=lambda: os.getenv("EMBEDDING_BASE_URL", ""))
     model: str = field(default_factory=lambda: os.getenv("EMBEDDING_MODEL", "BAAI/bge-m3"))
 
     @property
