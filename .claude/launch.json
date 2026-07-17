@@ -3,15 +3,21 @@
   "configurations": [
     {
       "name": "backend",
-      "runtimeExecutable": "uvicorn",
+      "runtimeExecutable": ".venv/Scripts/uvicorn.exe",
       "runtimeArgs": ["backend.main:app", "--reload", "--port", "8000"],
-      "port": 8000
+      "port": 8000,
+      "env": {
+        "PYTHONPATH": "."
+      }
     },
     {
       "name": "streamlit",
-      "runtimeExecutable": "streamlit",
-      "runtimeArgs": ["run", "frontend/app.py", "--server.port", "8501"],
-      "port": 8501
+      "runtimeExecutable": ".venv/Scripts/streamlit.exe",
+      "runtimeArgs": ["run", "frontend/app.py", "--server.port", "8501", "--server.headless", "true"],
+      "port": 8501,
+      "env": {
+        "PYTHONPATH": "."
+      }
     }
   ]
 }
