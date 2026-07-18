@@ -4,7 +4,7 @@
 
 LangGraph — 单 Agent 架构，状态机驱动的 workflow 编排。
 
-## Agent Workflow (planned)
+## Agent Workflow
 
 ```
 User Query
@@ -26,18 +26,17 @@ LangGraph 管理 Agent 状态流转：
 - 节点职责清晰
 - 支持条件分支和循环
 
-## Capabilities (planned)
+## Capabilities
 
 | Capability | Description | Status |
 |-----------|-------------|--------|
-| Code Search | 查询代码仓库 | 🔜 |
-| Git History Search | Commit / Diff / Author / File History | 🔜 |
-| Memory Search | 检索历史研发知识 | 🔜 |
-| Answer Generation | 结合上下文生成回答 | 🔜 |
+| Code Search | 查询代码仓库 | 待实现 |
+| Git History Search | Commit / Diff / Author / File History | 待实现 |
+| Memory Search | 检索历史研发知识 | 待实现 |
+| Answer Generation | 结合上下文生成回答 | 待实现 |
 
 ## Constraints
 
-- 单 Agent 架构，禁止 Multi-Agent
-- 禁止使用 LangChain Agent（仅用 LangGraph）
-- Tool 与 Agent 解耦，通过接口调用
+硬约束见 [.claude/rules/constraints.md](../.claude/rules/constraints.md)。补充约束：
+
 - 避免依赖真实 LLM 响应进行测试

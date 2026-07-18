@@ -75,12 +75,9 @@ pytest
 
 | 文档 | 内容 |
 |---|---|
-| [系统架构](docs/architecture.md) | 整体架构与分层设计 |
-| [技术选型](docs/tech-stack.md) | 各层技术决策与理由 |
+| [系统架构](docs/architecture.md) | 整体架构、分层设计、技术选型 |
 | [Agent 设计](docs/agent-design.md) | LangGraph 工作流设计 |
-| [记忆系统](docs/memory-system.md) | 多层记忆架构 |
-| [RAG 设计](docs/rag-design.md) | 检索增强生成管线 |
-| [Git 知识提取](docs/git-knowledge.md) | 代码仓库数据摄入 |
+| [记忆系统](docs/memory-system.md) | 记忆架构（含 RAG 检索、Git 知识提取） |
 | [部署](docs/deployment.md) | Docker Compose 与运行配置 |
 | [ADR](docs/decisions/) | 架构决策记录 |
 

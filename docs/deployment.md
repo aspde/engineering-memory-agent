@@ -15,9 +15,9 @@ services:
 
 | Service | Image | Status |
 |---------|-------|--------|
-| postgres | pgvector/pgvector:pg16 | ✅ |
-| backend | FastAPI (TBD) | 🔜 |
-| frontend | Streamlit (TBD) | 🔜 |
+| postgres | pgvector/pgvector:pg16 | 已就绪 |
+| backend | FastAPI | 待容器化 |
+| frontend | Streamlit | 待容器化 |
 
 ## Configuration
 
