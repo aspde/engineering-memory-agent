@@ -1,113 +1,18 @@
-# Engineering Memory Agent
+# EMA — Engineering Memory Agent
 
-## 项目目标
+面向研发团队的长期记忆智能体。自动从 Git、代码和文档中提取知识，转化为可检索的长期记忆。
 
-构建面向研发团队的长期记忆智能体。
+## 绝对约束
 
-核心目标：
+1. **Agent**：LangGraph 单 Agent 架构，禁止 Multi-Agent、禁止 LangChain Agent
+2. **存储**：PostgreSQL + pgvector 作为唯一数据存储方案，禁止引入或替换为其他数据库
+3. **LLM**：通过 LLMProvider 抽象接口调用，业务代码禁止直接依赖具体 SDK
+4. **异步**：所有 IO 操作（API 调用、数据库访问、文件 IO）优先使用 async/await
 
-- 沉淀研发过程中的技术知识
-- 理解代码、文档和历史记录
-- 提供团队知识检索能力
-- 提升研发协作效率
+## 规则
 
+详见 `.claude/rules/`。
 
----
+## 文档
 
-# Rule 文件
-
-项目规则统一存放：
-
-```
-.claude/rules/
-```
-
-
-## 开发规则
-
-详细开发规范：
-
-```
-.claude/rules/development.md
-```
-
-负责：
-
-- 修改前方案设计
-- 用户确认机制
-- 依赖管理
-- 代码修改规范
-
-
-## 架构规则
-
-详细架构约束：
-
-```
-.claude/rules/architecture.md
-```
-
-负责：
-
-- 系统分层
-- Agent 设计
-- Memory 设计
-- 数据存储约束
-
-
-## 测试规则
-
-详细测试规范：
-
-```
-.claude/rules/testing.md
-```
-
-负责：
-
-- 单元测试
-- API 测试
-- Agent 测试
-- Memory 测试
-
-
-## Git 工作流规则
-
-Git 管理规范：
-
-```
-.claude/rules/git-workflow.md
-```
-
-负责：
-
-- Commit 规范
-- 分支管理
-- 提交检查
-
-
-## 文档维护规则
-
-文档管理规范：
-
-```
-.claude/rules/documentation.md
-```
-
-负责：
-
-- 文档目录结构
-- 文档更新规则
-- ADR 规范
-- Claude 行为要求
-
-
----
-
-# 修改要求
-
-详见 [development.md](.claude/rules/development.md)：
-
-- 修改前必须规划 → 输出实施方案
-- 修改前分析要求 → 理解实现、分析影响
-- 用户确认机制 → 等待确认后方可执行
+系统设计与技术决策见 `docs/`。
