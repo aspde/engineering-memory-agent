@@ -14,28 +14,6 @@
 
 ---
 
-# 核心架构约束
-
-
-必须遵循：
-
-- LangGraph 负责 Agent 工作流编排
-- Memory System 作为独立能力模块
-- PostgreSQL + pgvector 作为数据和向量存储
-- LLM 调用统一封装
-- 技术组件保持可替换
-
-
-禁止：
-
-- ChromaDB
-- MongoDB
-- LangChain Agent
-- Multi-Agent 架构
-
-
----
-
 # Rule 文件
 
 
