@@ -1,95 +1,45 @@
 # Git Knowledge Extraction
 
-
 ## Library
 
+GitPython — 当前使用，用于解析 Git 仓库。
 
-MVP:
+## Extract Information
 
-GitPython
+支持提取：
 
-
-Future:
-
-pygit2
-
-
----
-
-# Extract Information
-
-
-支持：
-
-- Commit 记录
-- Diff 变化
-- Author 信息
+- Commit 记录（message、author、date）
+- Diff 变更内容
+- 文件变更列表
 - Branch 信息
 - Tag 信息
 - 文件历史
 
-
----
-
-# Development Roadmap
-
-
-## Phase 1 MVP
-
-
-获取：
-
-- commit message
-- author
-- changed files
-
-
----
-
-## Phase 2
-
-
-增加：
-
-- commit diff
-- LLM 总结
-- Memory 生成
-
-
----
-
-## Phase 3
-
-
-增加：
-
-- Issue
-- Pull Request
-- Code Review
-- ADR
-
-
----
-
-# Final Goal
-
+## Pipeline
 
 ```
-代码知识
-
-+
-
-提交历史
-
-+
-
-设计决策
-
-+
-
-故障经验
-
-=
-
-研发团队长期记忆
+Git Repo → GitPython → Parse → Chunk → Embedding → Store → Retrieval
 ```
+
+## Development Phases
+
+### Phase 1 ✅
+
+获取基础信息：commit message、author、changed files
+
+### Phase 2 🔜
+
+- Commit diff 解析
+- LLM 总结 commit 内容
+- 自动生成 Memory
+
+### Phase 3 🔜
+
+扩展到 Issue、Pull Request、Code Review、ADR
+
+## Integration with Memory
+
+Git 提取的知识通过 Memory Pipeline 存入长期记忆：
+
+- 结构化信息 → PostgreSQL
+- 语义内容 → pgvector Embedding

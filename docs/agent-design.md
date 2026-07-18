@@ -1,83 +1,43 @@
 # Agent Design
 
-
 ## Framework
 
-LangGraph
+LangGraph — 单 Agent 架构，状态机驱动的 workflow 编排。
 
-
----
-
-# Agent Workflow
-
+## Agent Workflow (planned)
 
 ```
-用户问题
-
- ↓
-
-Intent Classification
-
- ↓
-
-Agent Planning
-
- ↓
-
-Tool Execution
-
- ↓
-
-Memory Retrieval
-
- ↓
-
-Context Assembly
-
- ↓
-
-LLM Generation
+User Query
+    ↓
+Intent Classification → Router
+    ↓
+Tool Selection → Tool Execution
+    ↓
+Memory Retrieval → Context Assembly
+    ↓
+LLM Generation → Response
 ```
 
+## State Management
 
----
+LangGraph 管理 Agent 状态流转：
 
-# Agent Capabilities
+- 状态定义明确
+- 节点职责清晰
+- 支持条件分支和循环
 
+## Capabilities (planned)
 
-## Code Search
+| Capability | Description | Status |
+|-----------|-------------|--------|
+| Code Search | 查询代码仓库 | 🔜 |
+| Git History Search | Commit / Diff / Author / File History | 🔜 |
+| Memory Search | 检索历史研发知识 | 🔜 |
+| Answer Generation | 结合上下文生成回答 | 🔜 |
 
-查询代码仓库。
+## Constraints
 
-
-## Git History Search
-
-查询：
-
-- Commit
-- Diff
-- Author
-- File History
-
-
-## Memory Search
-
-查询历史研发知识。
-
-
-## Answer Generation
-
-结合上下文生成回答。
-
-
----
-
-# Design Goals
-
-
-支持：
-
-- 多步骤任务
-- 状态管理
-- Tool Calling
-- Long-term Memory
+- 单 Agent 架构，禁止 Multi-Agent
+- 禁止使用 LangChain Agent（仅用 LangGraph）
+- Tool 与 Agent 解耦，通过接口调用
+- 避免依赖真实 LLM 响应进行测试

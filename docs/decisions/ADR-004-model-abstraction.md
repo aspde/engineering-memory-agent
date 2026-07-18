@@ -1,63 +1,32 @@
-# ADR-004 Model Provider Abstraction
-
+# ADR-004: Model Provider Abstraction
 
 ## Status
 
 Accepted
 
-
 ## Context
 
-LLM 和 Embedding 模型会持续变化。
-
-
-不应该让业务代码绑定具体模型。
-
-
----
+LLM 和 Embedding 模型会持续变化，不应让业务代码绑定具体模型。
 
 ## Decision
 
+通过抽象接口统一封装：
 
-增加抽象层：
+- `LLMProvider` — LLM 调用抽象
+- `EmbeddingProvider` — Embedding 抽象
 
-```
-ModelProvider
+业务代码只依赖接口，不直接依赖具体 SDK。
 
-EmbeddingService
-```
+## Implementation
 
+| Interface | Implementations |
+|-----------|----------------|
+| `LLMProvider` | `OpenAICompatibleProvider` (DeepSeek/OpenAI), `AnthropicProvider` |
+| `EmbeddingProvider` | `BGEEmbeddingProvider` |
 
-业务代码只依赖接口。
-
-
----
-
-## Benefits
-
-
-支持切换：
-
-- DeepSeek
-- OpenAI
-- Claude
-- Local Model
-
-
-降低模型迁移成本。
-
-
----
+通过环境变量 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 切换实现。
 
 ## Consequences
 
-
-增加：
-
-- 接口设计成本
-
-
-获得：
-
-- 更好的扩展性
-- 更强的工程能力展示
+- ✅ 支持多 provider 切换，降低迁移成本，更好的扩展性
+- ⚠️ 接口设计需要一定前期投入

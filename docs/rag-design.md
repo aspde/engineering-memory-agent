@@ -1,87 +1,46 @@
 # RAG Design
 
-
 ## Architecture
 
+自行控制 RAG 全流程，不完全依赖黑盒框架：
 
 ```
-LangGraph
-
-+
-
+LangGraph Orchestrator
+       +
 Custom Retriever
-
-+
-
-PostgreSQL pgvector
+       +
+PostgreSQL + pgvector
 ```
 
+## Design Principle
 
----
+每个环节可控、可调优、可替换：
 
-# Design Principle
+- Chunk 策略
+- Embedding 模型
+- Retrieval 算法
+- Rerank 策略
+- Context Assembly 方式
 
-
-不完全依赖黑盒 RAG。
-
-
-自行控制：
-
-- Chunk
-- Embedding
-- Retrieval
-- Rerank
-- Context Assembly
-
-
----
-
-# Retrieval Pipeline
-
+## Retrieval Pipeline
 
 ```
-Query
-
- ↓
-
-Embedding
-
- ↓
-
-Vector Search
-
- ↓
-
-Reranker
-
- ↓
-
-LLM
+Query → Embedding → Vector Search (pgvector) → Reranker → Context → LLM
 ```
 
+## Embedding
 
----
+当前实现：
 
-# Reranker
+- BGE-M3 (sentence-transformers)，本地部署
+- 通过 `EmbeddingProvider` 抽象接口，可替换为 OpenAI Embedding 等
 
+## Reranker
 
-后期加入：
+后期加入 bge-reranker，提升召回结果相关性。
 
-bge-reranker
+## Goals
 
-
-作用：
-
-提升召回结果相关性。
-
-
----
-
-# Goals
-
-
-实现：
-
-- 可解释检索
-- 可调优流程
+- 可解释的检索过程
+- 可调优的检索流程
 - 企业级 RAG 架构

@@ -1,91 +1,55 @@
 # Deployment
 
-
 ## Container
 
+Docker Compose 编排：
 
-使用：
+```yaml
+services:
+  postgres:      # PostgreSQL + pgvector
+```
 
-Docker Compose
+当前仅包含数据库容器。后续将加入 backend、frontend 等服务。
 
+## Services
 
-包含：
+| Service | Image | Status |
+|---------|-------|--------|
+| postgres | pgvector/pgvector:pg16 | ✅ |
+| backend | FastAPI (TBD) | 🔜 |
+| frontend | Streamlit (TBD) | 🔜 |
 
+## Configuration
 
-## backend
+通过 `.env` 文件管理环境变量：
 
-FastAPI 服务
+- `LLM_*` — LLM provider 配置
+- `EMBEDDING_*` — Embedding 模型配置
+- `DATABASE_URL` — PostgreSQL 连接
+- `APP_ENV` — 运行环境 (development / test / production)
 
-
-## postgres
-
-PostgreSQL
-
-+
-
-pgvector
-
-
-## redis
-
-应用缓存
-
-
----
-
-# Cache Strategy
-
-
-## LLM Prefix Cache
-
-
-由模型服务提供。
-
-
-作用：
-
-- 减少重复 Prompt 成本
-- 提升模型处理速度
-
-
-无需业务实现。
-
-
----
-
-## Application Cache
-
-
-Redis 实现。
-
-
-用途：
-
-- Memory 查询缓存
-- 重复计算缓存
-- Session 状态保存
-
-
-需要业务代码实现。
-
-
----
-
-# Runtime Architecture
-
+## Runtime Architecture
 
 ```
-FastAPI
+FastAPI (Backend)
+    ↓
+PostgreSQL + pgvector (Storage)
+    ↓
+LLM Provider (External API)
+```
 
- ↓
+## Development
 
-Redis
+```bash
+# Start database
+docker compose up -d
 
- ↓
+# Run backend
+uvicorn backend.main:app --reload
 
-PostgreSQL
+# Run frontend
+streamlit run frontend/app.py
 
- ↓
-
-pgvector
+# Run tests
+pytest
 ```
