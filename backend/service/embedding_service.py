@@ -14,20 +14,34 @@ logger = logging.getLogger(__name__)
 class BGEEmbeddingProvider(EmbeddingProvider):
     """BGE-M3 via sentence-transformers."""
 
-    def __init__(self, model_name: str) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        normalize: bool = True,
+        batch_size: int = 32,
+    ) -> None:
         from sentence_transformers import SentenceTransformer
 
         logger.info("Loading embedding model: %s", model_name)
         self._model = SentenceTransformer(model_name)
+        self._normalize = normalize
+        self._batch_size = batch_size
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         embeddings = await asyncio.to_thread(
-            self._model.encode, texts, normalize_embeddings=True
+            self._model.encode,
+            texts,
+            normalize_embeddings=self._normalize,
+            batch_size=self._batch_size,
         )
         return embeddings.tolist()
 
     def embed_sync(self, texts: list[str]) -> list[list[float]]:
-        embeddings = self._model.encode(texts, normalize_embeddings=True)
+        embeddings = self._model.encode(
+            texts,
+            normalize_embeddings=self._normalize,
+            batch_size=self._batch_size,
+        )
         return embeddings.tolist()
 
     @property
@@ -45,7 +59,11 @@ def get_embedding_provider() -> EmbeddingProvider:
         return _provider
 
     if config.embedding.provider == "local":
-        _provider = BGEEmbeddingProvider(config.embedding.model)
+        _provider = BGEEmbeddingProvider(
+            model_name=config.embedding.model,
+            normalize=config.embedding.normalize,
+            batch_size=config.embedding.batch_size,
+        )
     else:
         raise ValueError(f"Unsupported embedding provider: {config.embedding.provider}")
 

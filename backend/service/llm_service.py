@@ -13,15 +13,31 @@ logger = logging.getLogger(__name__)
 class OpenAICompatibleProvider(LLMProvider):
     """Generic provider for any OpenAI-compatible API (DeepSeek, OpenAI, etc.)."""
 
-    def __init__(self, api_key: str, base_url: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> None:
         from openai import AsyncOpenAI, OpenAI
 
         self._model = model
-        self._async_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
-        self._sync_client = OpenAI(api_key=api_key, base_url=base_url)
+        self._temperature = temperature
+        self._max_tokens = max_tokens
+        self._async_client = AsyncOpenAI(
+            api_key=api_key, base_url=base_url, timeout=timeout
+        )
+        self._sync_client = OpenAI(
+            api_key=api_key, base_url=base_url, timeout=timeout
+        )
         logger.info("LLM provider ready: %s @ %s", model, base_url)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
         response = await self._async_client.chat.completions.create(
             model=self._model,
             messages=messages,  # type: ignore[arg-type]
@@ -30,6 +46,8 @@ class OpenAICompatibleProvider(LLMProvider):
         return response.choices[0].message.content or ""
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
         response = self._sync_client.chat.completions.create(
             model=self._model,
             messages=messages,  # type: ignore[arg-type]
@@ -45,19 +63,28 @@ class OpenAICompatibleProvider(LLMProvider):
 class AnthropicProvider(LLMProvider):
     """Provider for Anthropic Claude API."""
 
-    def __init__(self, api_key: str, model: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        max_tokens: int = 4096,
+        timeout: int = 60,
+    ) -> None:
         from anthropic import Anthropic, AsyncAnthropic
 
         self._model = model
-        self._async_client = AsyncAnthropic(api_key=api_key)
-        self._sync_client = Anthropic(api_key=api_key)
+        self._max_tokens = max_tokens
+        self._async_client = AsyncAnthropic(
+            api_key=api_key, timeout=timeout
+        )
+        self._sync_client = Anthropic(api_key=api_key, timeout=timeout)
         logger.info("Anthropic provider ready: %s", model)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
         system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
         response = await self._async_client.messages.create(
             model=self._model,
-            max_tokens=kwargs.pop("max_tokens", 4096),
             system=system,
             messages=user_messages,  # type: ignore[arg-type]
             **kwargs,
@@ -66,9 +93,9 @@ class AnthropicProvider(LLMProvider):
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
         response = self._sync_client.messages.create(
             model=self._model,
-            max_tokens=kwargs.pop("max_tokens", 4096),
             system=system,
             messages=user_messages,  # type: ignore[arg-type]
             **kwargs,
@@ -117,11 +144,16 @@ def get_llm_provider() -> LLMProvider:
         _provider = AnthropicProvider(
             api_key=config.llm.api_key,
             model=config.llm.model,
+            max_tokens=config.llm.max_tokens,
+            timeout=config.llm.timeout,
         )
     else:
         _provider = OpenAICompatibleProvider(
             api_key=config.llm.api_key,
             base_url=config.llm.base_url,
             model=config.llm.model,
+            temperature=config.llm.temperature,
+            max_tokens=config.llm.max_tokens,
+            timeout=config.llm.timeout,
         )
     return _provider
