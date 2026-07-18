@@ -29,7 +29,7 @@ st.markdown(
 st.markdown(
     '<div class="ema-header">'
     '<h1>🧠 EMA — Engineering Memory Agent</h1>'
-    '<p>研发团队长期记忆智能体</p>'
+    '<p>工程记忆智能体</p>'
     '</div>',
     unsafe_allow_html=True,
 )
