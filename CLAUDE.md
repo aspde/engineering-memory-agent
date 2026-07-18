@@ -86,36 +86,20 @@ Git 管理规范：
 - 提交检查
 
 
----
+## 文档维护规则
 
-# 项目文档
-
-项目设计文档统一存放：
+文档管理规范：
 
 ```
-docs/
+.claude/rules/documentation.md
 ```
 
+负责：
 
-核心设计文档：
-
-- architecture.md
-- agent-design.md
-- memory-system.md
-- rag-design.md
-- tech-stack.md
-- git-knowledge.md
-- deployment.md
-
-
-技术决策记录：
-
-```
-docs/decisions/
-```
-
-
-架构或技术方案发生变化时，需要同步更新相关文档。
+- 文档目录结构
+- 文档更新规则
+- ADR 规范
+- Claude 行为要求
 
 
 ---
