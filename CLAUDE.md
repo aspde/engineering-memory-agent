@@ -14,45 +14,6 @@
 
 ---
 
-# 核心技术栈
-
-
-## Backend
-
-- Python 3.12
-- FastAPI
-
-
-## Agent
-
-- LangGraph
-
-
-## LLM
-
-- OpenAI SDK
-- DeepSeek API
-
-
-## Database
-
-- PostgreSQL
-- pgvector
-
-
-## Frontend
-
-MVP:
-
-- Streamlit
-
-Production:
-
-- React
-
-
----
-
 # 核心架构约束
 
 
