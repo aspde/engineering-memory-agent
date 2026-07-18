@@ -16,6 +16,12 @@
 
 # Rule 文件
 
+项目规则统一存放：
+
+```
+.claude/rules/
+```
+
 
 ## 开发规则
 
@@ -25,8 +31,7 @@
 .claude/rules/development.md
 ```
 
-
-包含：
+负责：
 
 - 修改前方案设计
 - 用户确认机制
@@ -42,8 +47,7 @@
 .claude/rules/architecture.md
 ```
 
-
-包含：
+负责：
 
 - 系统分层
 - Agent 设计
@@ -59,8 +63,7 @@
 .claude/rules/testing.md
 ```
 
-
-包含：
+负责：
 
 - 单元测试
 - API 测试
@@ -76,12 +79,43 @@ Git 管理规范：
 .claude/rules/git-workflow.md
 ```
 
-
-包含：
+负责：
 
 - Commit 规范
 - 分支管理
 - 提交检查
+
+
+---
+
+# 项目文档
+
+项目设计文档统一存放：
+
+```
+docs/
+```
+
+
+核心设计文档：
+
+- architecture.md
+- agent-design.md
+- memory-system.md
+- rag-design.md
+- tech-stack.md
+- git-knowledge.md
+- deployment.md
+
+
+技术决策记录：
+
+```
+docs/decisions/
+```
+
+
+架构或技术方案发生变化时，需要同步更新相关文档。
 
 
 ---
