@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "skills": {
+    "find-skills": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/find-skills/SKILL.md",
+      "computedHash": "c1d9628984991d7ed59ab3a7bf6a4dad3d731ef68c71f409f64a0ca258e8028e"
+    },
+    "skill-creator": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/skill-creator/SKILL.md",
+      "computedHash": "dcd4803e61e913e6fc27294184cd3a71f09f5e924ff20c8a9a20173e7b3c2bcf"
+    },
+    "async-python-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/python-development/skills/async-python-patterns/SKILL.md",
+      "computedHash": "15eb61c8d5c4870d57044cfb199d0aa028d8e1e73e9bb8cb6122da32c76efb77"
+    },
+    "code-review-and-quality": {
+      "source": "addyosmani/agent-skills",
+      "sourceType": "github",
+      "skillPath": "skills/code-review-and-quality/SKILL.md",
+      "computedHash": "ae7a873053c84dd5a76f70c05a21efc4095017e95b8f5db778eb826809859cac"
+    },
+    "developing-with-streamlit": {
+      "source": "streamlit/agent-skills",
+      "sourceType": "github",
+      "skillPath": "developing-with-streamlit/SKILL.md",
+      "computedHash": "128c0acf5db60266b0fb0440c4064fccb7adba0a90d07259b4adddf0e4f39c78"
+    },
+    "fastapi-templates": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/api-scaffolding/skills/fastapi-templates/SKILL.md",
+      "computedHash": "e28ca940d4a3a85eaa9150f0d4c0cc36c16de33368963b7f9da5875842b328b4"
+    },
+    "postgresql-table-design": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/database-design/skills/postgresql/SKILL.md",
+      "computedHash": "d7d040ee506a300c08a64b9ef6de9aa677b6d7251e33c3c87e0608f821a9506d"
+    },
+    "python-testing-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/python-development/skills/python-testing-patterns/SKILL.md",
+      "computedHash": "f4de9bdbf2db1c1f8e8211e6af463ad49956f15aa604e2f08ae716c71e71f64b"
+    }
+  }
+}
