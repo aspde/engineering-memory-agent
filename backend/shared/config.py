@@ -22,6 +22,9 @@ class EmbeddingConfig:
     normalize: bool = field(
         default_factory=lambda: os.getenv("EMBEDDING_NORMALIZE", "true").lower() == "true"
     )
+    hf_endpoint: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_HF_ENDPOINT", "https://hf-mirror.com")
+    )
 
     @property
     def dimension(self) -> int:

@@ -138,16 +138,14 @@ def get_llm_provider() -> LLMProvider:
     if _provider is not None:
         return _provider
 
-    provider_name = config.llm.provider
-
-    if provider_name == "anthropic":
+    if config.llm.provider == "anthropic":
         _provider = AnthropicProvider(
             api_key=config.llm.api_key,
             model=config.llm.model,
             max_tokens=config.llm.max_tokens,
             timeout=config.llm.timeout,
         )
-    else:
+    elif config.llm.provider in ("deepseek", "openai"):
         _provider = OpenAICompatibleProvider(
             api_key=config.llm.api_key,
             base_url=config.llm.base_url,
@@ -156,4 +154,6 @@ def get_llm_provider() -> LLMProvider:
             max_tokens=config.llm.max_tokens,
             timeout=config.llm.timeout,
         )
+    else:
+        raise ValueError(f"Unsupported LLM provider: {config.llm.provider}")
     return _provider

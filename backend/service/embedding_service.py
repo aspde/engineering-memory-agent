@@ -19,10 +19,14 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         model_name: str,
         normalize: bool = True,
         batch_size: int = 32,
+        hf_endpoint: str = "https://hf-mirror.com",
     ) -> None:
+        import os
+
         from sentence_transformers import SentenceTransformer
 
-        logger.info("Loading embedding model: %s", model_name)
+        os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+        logger.info("Loading embedding model: %s (HF_ENDPOINT=%s)", model_name, hf_endpoint)
         self._model = SentenceTransformer(model_name)
         self._normalize = normalize
         self._batch_size = batch_size
@@ -63,6 +67,7 @@ def get_embedding_provider() -> EmbeddingProvider:
             model_name=config.embedding.model,
             normalize=config.embedding.normalize,
             batch_size=config.embedding.batch_size,
+            hf_endpoint=config.embedding.hf_endpoint,
         )
     else:
         raise ValueError(f"Unsupported embedding provider: {config.embedding.provider}")
