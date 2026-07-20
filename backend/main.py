@@ -13,8 +13,21 @@ from backend.db.schema import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: create tables.  Shutdown: close connection pool."""
+    """Startup: init DB tables and PostgresSaver checkpoint table."""
     await init_db()
+
+    # Create checkpoint table for conversation persistence
+    try:
+        from backend.service.agent_service import _setup_checkpointer
+
+        await _setup_checkpointer()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to setup checkpointer — conversations will be ephemeral"
+        )
+
     yield
     await close_db()
 

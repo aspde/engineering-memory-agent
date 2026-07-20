@@ -21,13 +21,14 @@ from agent.state import AgentState
 
 def build_agent_graph(
     tools: list,
-    checkpointer: InMemorySaver | None = None,
+    checkpointer: object | None = None,
 ) -> CompiledStateGraph:
     """Build and compile the EMA agent graph.
 
     Args:
         tools: List of ``@tool``-decorated async functions.
-        checkpointer: Checkpointer for state persistence (default: InMemorySaver).
+        checkpointer: Checkpointer for state persistence
+            (InMemorySaver or PostgresSaver).  Defaults to InMemorySaver.
 
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
