@@ -59,28 +59,23 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
                 final_response = str(m.content)
                 break
 
-    # Extract tool call traces for transparency
+    # Extract tool call traces and sources in a single pass
     tool_call_traces: list[dict] = []
-    for m in result.get("messages", []):
-        if isinstance(m, ToolMessage):
-            tool_call_traces.append({
-                "tool": getattr(m, "name", "unknown"),
-                "content": str(m.content)[:300],
-            })
-
-    # Collect sources from ToolMessages produced by retrieval tools
     sources: list[dict] = []
     for m in result.get("messages", []):
         if not isinstance(m, ToolMessage):
             continue
-        tool_name = getattr(m, "name", "")
+        tool_name = getattr(m, "name", "unknown")
+        tool_call_traces.append({
+            "tool": tool_name,
+            "content": str(m.content)[:300],
+        })
         if tool_name == "search_memories_tool":
             source_type = "memory"
         elif tool_name == "retrieve_chunks_tool":
             source_type = "chunk"
         else:
             continue
-        # Each retrieval tool returns formatted text — capture a preview
         content = str(m.content)[:200] if m.content else ""
         if content:
             sources.append({"type": source_type, "snippet": content})

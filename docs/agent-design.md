@@ -29,7 +29,7 @@ START → call_llm ──(有 tool_calls)──→ tools ──→ call_llm (循
 | 未来场景 | LangGraph 能力 | 何时启用 |
 |---------|---------------|---------|
 | 记忆冲突人工审批 | `interrupt()` / `Command(resume=...)` | 当 `write_memory()` 检测到矛盾时暂停并等待用户确认 |
-| 对话持久化 | `PostgresSaver` | 替换 `InMemorySaver`，利用已有 PostgreSQL 实现跨重启对话恢复 |
+| 对话持久化 | `PostgresSaver` | 已实现，利用已有 PostgreSQL 实现跨重启对话恢复 |
 | 多步自主工作流 | 条件边 + 并行节点 | 当需要"摄取→检索→分析→写入"的多阶段管线时 |
 | 进度流式输出 | `graph.astream()` | 接入 Streamlit 前端展示实时进度 |
 
