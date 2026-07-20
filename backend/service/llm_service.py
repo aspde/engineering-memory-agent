@@ -45,6 +45,39 @@ class OpenAICompatibleProvider(LLMProvider):
         )
         return response.choices[0].message.content or ""
 
+    async def chat_raw(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        **kwargs,
+    ) -> dict[str, object]:
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        create_kwargs: dict[str, object] = {
+            "model": self._model,
+            "messages": messages,
+            **kwargs,
+        }
+        if tools:
+            create_kwargs["tools"] = tools
+
+        response = await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+        msg = response.choices[0].message
+        result: dict[str, object] = {"content": msg.content or ""}
+
+        if msg.tool_calls:
+            import json
+
+            result["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "name": tc.function.name,
+                    "args": json.loads(tc.function.arguments),
+                }
+                for tc in msg.tool_calls
+            ]
+        return result
+
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
@@ -90,6 +123,49 @@ class AnthropicProvider(LLMProvider):
             **kwargs,
         )
         return self._extract_text(response.content)
+
+    async def chat_raw(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        **kwargs,
+    ) -> dict[str, object]:
+        system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        create_kwargs: dict[str, object] = {
+            "model": self._model,
+            "system": system,
+            "messages": user_messages,
+            **kwargs,
+        }
+        if tools:
+            create_kwargs["tools"] = tools
+
+        response = await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
+        content_blocks: list[object] = response.content  # type: ignore[assignment]
+        result: dict[str, object] = {"content": self._extract_text(content_blocks)}
+
+        tool_calls: list[dict[str, object]] = []
+        for block in content_blocks:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": block.get("id", ""),
+                        "name": block.get("name", ""),
+                        "args": block.get("input", {}),
+                    }
+                )
+            elif hasattr(block, "type") and getattr(block, "type", "") == "tool_use":
+                tool_calls.append(
+                    {
+                        "id": getattr(block, "id", ""),
+                        "name": getattr(block, "name", ""),
+                        "args": getattr(block, "input", {}),
+                    }
+                )
+        if tool_calls:
+            result["tool_calls"] = tool_calls
+        return result
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         system, user_messages = self._split_messages(messages)

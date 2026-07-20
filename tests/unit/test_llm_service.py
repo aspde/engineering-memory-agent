@@ -17,6 +17,27 @@ class FakeLLMProvider(LLMProvider):
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         return f"[{self._model}] echo: {messages[-1]['content']}"
 
+    async def chat_raw(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        **kwargs,
+    ) -> dict[str, object]:
+        """Return canned response; if tools are provided, simulate a tool call."""
+        result: dict[str, object] = {"content": ""}
+        if tools:
+            result["content"] = f"[{self._model}] tool call"
+            result["tool_calls"] = [
+                {
+                    "id": "call_fake_1",
+                    "name": tools[0]["function"]["name"],  # type: ignore[index]
+                    "args": {"query": messages[-1]["content"]},
+                }
+            ]
+        else:
+            result["content"] = f"[{self._model}] echo: {messages[-1]['content']}"
+        return result
+
     @property
     def model(self) -> str:
         return self._model

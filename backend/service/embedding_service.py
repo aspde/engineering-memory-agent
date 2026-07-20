@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 
 from backend.model.embedding import EmbeddingProvider
 from backend.shared.config import config
@@ -21,13 +22,17 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         batch_size: int = 32,
         hf_endpoint: str = "https://hf-mirror.com",
     ) -> None:
-        import os
-
         from sentence_transformers import SentenceTransformer
 
+        # Force offline — the model is cached locally.  Both HF_HUB_OFFLINE
+        # (huggingface_hub) and TRANSFORMERS_OFFLINE (transformers) must be
+        # set; otherwise tokenizer loading calls hf.co/api/models/….
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
-        logger.info("Loading embedding model: %s (HF_ENDPOINT=%s)", model_name, hf_endpoint)
-        self._model = SentenceTransformer(model_name)
+
+        logger.info("Loading embedding model: %s (offline)", model_name)
+        self._model = SentenceTransformer(model_name, local_files_only=True)
         self._normalize = normalize
         self._batch_size = batch_size
 
@@ -50,7 +55,10 @@ class BGEEmbeddingProvider(EmbeddingProvider):
 
     @property
     def dimension(self) -> int:
-        return self._model.get_embedding_dimension()
+        # sentence-transformers renamed this method in v4; fall back for compat.
+        if hasattr(self._model, "get_embedding_dimension"):
+            return self._model.get_embedding_dimension()
+        return self._model.get_sentence_embedding_dimension()
 
 
 _provider: EmbeddingProvider | None = None

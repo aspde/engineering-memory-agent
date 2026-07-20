@@ -1,9 +1,14 @@
 """Integration tests for embedding service — requires native runtime (onnxruntime/torch)."""
 
+import os
 import subprocess
 import sys
 
 import pytest
+
+# ── Force offline BEFORE any HF imports ──────────────────────────────
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 # Check native runtime in a subprocess so DLL crashes don't kill the test runner.
