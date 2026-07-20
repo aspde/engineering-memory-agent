@@ -2,14 +2,16 @@
 
 Uses MessagesState pattern — messages accumulate with ID-based
 deduplication via the ``add_messages`` reducer.
+
+Frozen — do not add new fields without a concrete consumer node.
 """
 
 from __future__ import annotations
 
 from typing import Annotated
 
-from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
 from typing_extensions import TypedDict
 
 

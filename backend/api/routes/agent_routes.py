@@ -55,7 +55,11 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     if not final_response:
         # Fallback: extract last AIMessage content if generate_final didn't fire
         for m in reversed(result.get("messages", [])):
-            if hasattr(m, "content") and m.content and not getattr(m, "tool_calls", None):
+            if (
+                hasattr(m, "content")
+                and m.content
+                and not getattr(m, "tool_calls", None)
+            ):
                 final_response = str(m.content)
                 break
 
@@ -75,7 +79,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
         elif tool_name == "retrieve_chunks_tool":
             source_type = "chunk"
         else:
-            continue
+            source_type = "unknown"
         content = str(m.content)[:200] if m.content else ""
         if content:
             sources.append({"type": source_type, "snippet": content})
