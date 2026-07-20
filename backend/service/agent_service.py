@@ -67,16 +67,12 @@ async def _setup_checkpointer() -> None:
 def get_agent() -> CompiledStateGraph:
     """Return a compiled agent graph with all default tools.
 
-    Uses PostgresSaver when the database is available, InMemorySaver
-    otherwise.
+    Uses ``AsyncPostgresSaver`` when the database is reachable,
+    falling back to ``InMemorySaver``.  Different ``thread_id``
+    values in ``ainvoke()`` config are fully isolated.
     """
     return build_agent_graph(tools=ALL_TOOLS, checkpointer=_get_checkpointer())
 
 
-def get_agent_for_thread() -> CompiledStateGraph:
-    """Return a compiled agent with PostgresSaver for durable state.
-
-    Different ``thread_id`` values in ``ainvoke()`` config are fully
-    isolated.
-    """
-    return build_agent_graph(tools=ALL_TOOLS, checkpointer=_get_checkpointer())
+# Alias kept for compatibility — agents are now always per-thread-safe.
+get_agent_for_thread = get_agent
