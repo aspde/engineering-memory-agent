@@ -23,7 +23,7 @@ from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
 
-_checkpointer: object | None = None
+_checkpointer: InMemorySaver | object | None = None
 
 # ── Eager-init embedding provider (ensures offline flags are set) ───
 try:
@@ -48,13 +48,13 @@ def _get_checkpointer() -> InMemorySaver | object:
         )
         _checkpointer = AsyncPostgresSaver.from_conn_string(async_url)
         logger.info("Using AsyncPostgresSaver for checkpoint persistence")
+        return _checkpointer
     except Exception:
         logger.info(
             "AsyncPostgresSaver unavailable, falling back to InMemorySaver"
         )
         _checkpointer = InMemorySaver()
-
-    return _checkpointer
+        return _checkpointer
 
 
 async def _setup_checkpointer() -> None:
