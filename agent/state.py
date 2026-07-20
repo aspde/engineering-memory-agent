@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 
@@ -22,7 +22,9 @@ class AgentState(TypedDict):
     """Conversation history with automatic ID-based dedup."""
 
     final_response: str | None
-    """Final answer set by generate_final_node."""
+    """Final answer set by generate_final_node.  Must be Optional because
+    the initial state has no answer yet — only the terminal node sets it."""
 
     error: str | None
-    """Error state for graceful degradation."""
+    """Error state for graceful degradation.  Set by any node that catches
+    an unrecoverable exception so the caller can inspect what went wrong."""
