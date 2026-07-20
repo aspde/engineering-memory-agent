@@ -16,8 +16,8 @@ services:
 | Service | Image | Status |
 |---------|-------|--------|
 | postgres | pgvector/pgvector:pg16 | 已就绪 |
-| backend | FastAPI | 待容器化 |
-| frontend | Streamlit | 待容器化 |
+| backend | FastAPI | 5 个 API 端点已实现，待容器化 |
+| frontend | Streamlit | 骨架已就绪，交互界面待实现 |
 
 ## Configuration
 
@@ -26,16 +26,22 @@ services:
 - `LLM_*` — LLM provider 配置
 - `EMBEDDING_*` — Embedding 模型配置
 - `DATABASE_URL` — PostgreSQL 连接
+- `MAX_AGENT_STEPS` — Agent 最大工具调用次数
 - `APP_ENV` — 运行环境 (development / test / production)
 
 ## Runtime Architecture
 
 ```
-FastAPI (Backend)
-    ↓
-PostgreSQL + pgvector (Storage)
-    ↓
-LLM Provider (External API)
+Streamlit (Frontend) → FastAPI (Backend) → LangGraph Agent
+                                               ↓
+                                         Memory Layer
+                                               ↓
+                                    PostgreSQL + pgvector
+                                    (chunks + memories + checkpoints)
+                                               ↓
+                                         LLM Provider
+                                               ↓
+                                           Response
 ```
 
 ## Development
@@ -44,7 +50,7 @@ LLM Provider (External API)
 # Start database
 docker compose up -d
 
-# Run backend
+# Run backend (auto-creates pgvector extension + tables + checkpoint tables)
 uvicorn backend.main:app --reload
 
 # Run frontend
