@@ -7,10 +7,12 @@ import logging
 import os
 
 # ── Force offline BEFORE any HF/transformers imports ──────────────────
-# Set these at module load time so they take effect before
-# SentenceTransformer / AutoTokenizer touch the network.
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# Must be at module top-level: when `from backend.service.embedding_service
+# import ...` is executed (by pytest, agent_service eager init, or any
+# caller), these are set before SentenceTransformer / AutoTokenizer sees
+# the module for the first time.
+for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
+    os.environ.setdefault(_k, _v)
 
 from backend.model.embedding import EmbeddingProvider  # noqa: E402
 from backend.shared.config import config  # noqa: E402

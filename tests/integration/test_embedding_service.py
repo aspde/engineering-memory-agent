@@ -1,14 +1,9 @@
 """Integration tests for embedding service — requires native runtime (onnxruntime/torch)."""
 
-import os
 import subprocess
 import sys
 
 import pytest
-
-# ── Force offline BEFORE any HF imports ──────────────────────────────
-os.environ.setdefault("HF_HUB_OFFLINE", "1")
-os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 # Check native runtime in a subprocess so DLL crashes don't kill the test runner.
@@ -38,6 +33,14 @@ class TestBGEEmbeddingProvider:
 
     @pytest.fixture(scope="class")
     def provider(self) -> "BGEEmbeddingProvider":  # noqa: F821
+        import os
+
+        # Must be set BEFORE SentenceTransformer imports — the test
+        # fixture directly constructs the provider, bypassing the
+        # module-level env-var setup in embedding_service.py.
+        os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
         from backend.service.embedding_service import BGEEmbeddingProvider
 
         return BGEEmbeddingProvider("BAAI/bge-m3")

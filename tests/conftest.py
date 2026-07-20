@@ -10,6 +10,9 @@ from httpx import ASGITransport, AsyncClient
 os.environ["APP_ENV"] = "test"
 
 # Force offline before SentenceTransformer imports are triggered
+# during collection of any test module.  Must be in conftest because
+# pytest imports this before any test module, and test collection can
+# trigger chain-imports that reach SentenceTransformer.
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
