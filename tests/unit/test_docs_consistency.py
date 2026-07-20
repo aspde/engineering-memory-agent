@@ -117,7 +117,29 @@ def test_project_structure_matches_docs() -> None:
         if not (PROJECT_ROOT / d).is_dir():
             failures.append(Failure("structure", f"docs references '{d}/' but directory does not exist"))
 
+    # agent/ sub-modules must exist
+    agent_dir = PROJECT_ROOT / "agent"
+    agent_files = ["state.py", "tools.py", "nodes.py", "graph.py"]
+    for f in agent_files:
+        if not (agent_dir / f).exists():
+            failures.append(Failure("structure", f"agent/{f} does not exist"))
+
     assert not failures, _failures_to_message(failures)
+
+
+def test_agent_api_route_declared() -> None:
+    """docs/architecture.md lists /api/agent/chat endpoint → router must register it."""
+    architecture_text = _read_doc("architecture.md")
+    if "/api/agent/chat" not in architecture_text:
+        return  # not claimed in docs, skip
+
+    router = PROJECT_ROOT / "backend" / "api" / "router.py"
+    if not router.exists():
+        return
+
+    router_text = router.read_text()
+    if "agent_routes" not in router_text or "agent_router" not in router_text:
+        assert False, "docs claim /api/agent/chat but router does not register agent routes"
 
 
 def test_pyproject_config_consistent() -> None:
