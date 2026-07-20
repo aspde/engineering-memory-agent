@@ -1,4 +1,4 @@
-"""Database schema via SQLAlchemy ORM declarations.
+"""Database schema — tables created via raw SQL to keep things simple.
 
 Tables:
   - chunks:  document fragments with pgvector embeddings
@@ -7,45 +7,54 @@ Tables:
 
 from __future__ import annotations
 
-import uuid
+from sqlalchemy import text
 
-from pgvector.sqlalchemy import Vector
-from sqlalchemy import Float, Integer, Text, text
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMPTZ, UUID
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from backend.db import _engine
 
-
-class Base(DeclarativeBase):
-    __abstract__ = True
-
-
-class Chunk(Base):
-    __tablename__ = "chunks"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+_STATEMENTS = [
+    """
+    CREATE TABLE IF NOT EXISTS chunks (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        document_id TEXT NOT NULL,
+        content     TEXT NOT NULL,
+        embedding   vector(1024),
+        meta        JSONB DEFAULT '{}',
+        created_at  TIMESTAMPTZ DEFAULT now(),
+        chunk_index INT NOT NULL
     )
-    document_id: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    embedding = mapped_column(Vector(1024), nullable=True)
-    metadata: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
-    created_at = mapped_column(TIMESTAMPTZ(timezone=True), server_default=text("now()"))
-    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
-
-
-class Memory(Base):
-    __tablename__ = "memories"
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_chunks_embedding
+        ON chunks USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memories (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source_type TEXT NOT NULL,
+        summary     TEXT NOT NULL,
+        entities    JSONB DEFAULT '[]',
+        relations   JSONB DEFAULT '[]',
+        embedding   vector(1024),
+        decay_factor FLOAT DEFAULT 1.0,
+        recalled_at TIMESTAMPTZ DEFAULT now(),
+        recall_count INT DEFAULT 0,
+        meta        JSONB DEFAULT '{}',
+        created_at  TIMESTAMPTZ DEFAULT now()
     )
-    source_type: Mapped[str] = mapped_column(Text, nullable=False)
-    summary: Mapped[str] = mapped_column(Text, nullable=False)
-    entities: Mapped[dict] = mapped_column(JSONB, server_default=text("'[]'"))
-    relations: Mapped[dict] = mapped_column(JSONB, server_default=text("'[]'"))
-    embedding = mapped_column(Vector(1024), nullable=True)
-    decay_factor: Mapped[float] = mapped_column(Float, server_default=text("1.0"))
-    recalled_at = mapped_column(TIMESTAMPTZ(timezone=True), server_default=text("now()"))
-    recall_count: Mapped[int] = mapped_column(Integer, server_default=text("0"))
-    metadata: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'"))
-    created_at = mapped_column(TIMESTAMPTZ(timezone=True), server_default=text("now()"))
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_memories_embedding
+        ON memories USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100)
+    """,
+]
+
+
+async def init_db() -> None:
+    """Create tables and indexes if they don't exist."""
+    async with _engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        for stmt in _STATEMENTS:
+            await conn.execute(text(stmt))
+    print("Database initialized (chunks + memories tables ready)")

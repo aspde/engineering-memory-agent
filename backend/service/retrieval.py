@@ -66,7 +66,7 @@ async def write_chunks(
             params[key_idx] = i
 
         sql = (
-            "INSERT INTO chunks (document_id, content, embedding, metadata, chunk_index) VALUES "
+            "INSERT INTO chunks (document_id, content, embedding, meta, chunk_index) VALUES "
             + ", ".join(values_clauses)
         )
         await session.execute(text(sql), params)
@@ -108,14 +108,13 @@ async def vector_search(
         result = await session.execute(
             text(
                 f"""\
-                SELECT id, content, metadata, chunk_index,
+                SELECT id, content, meta, chunk_index,
                        1 - (embedding <=> :vec ::vector) AS similarity
                 FROM chunks
                 WHERE 1 - (embedding <=> :vec ::vector) > :threshold
                 {' ' + ' '.join(filter_clauses) if filter_clauses else ''}
                 ORDER BY embedding <=> :vec ::vector
-                LIMIT :limit
-                """
+                LIMIT :limit"""
             ),
             params,
         )
@@ -173,7 +172,7 @@ async def retrieve(
         RetrievalResult(
             content=candidates[idx]["content"],
             score=score,
-            metadata=candidates[idx].get("metadata") or {},
+            metadata=candidates[idx].get("meta") or {},
         )
         for idx, score in ranked
     ]

@@ -173,7 +173,7 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
                     entities = :entities,
                     relations = :relations,
                     embedding = :embedding,
-                    metadata = :meta
+                    meta = :meta
                 WHERE id = :id
                 """
             ),
@@ -228,7 +228,7 @@ async def _insert_memory(extracted, embedding, source_type, metadata):
         result = await session.execute(
             text(
                 """\
-                INSERT INTO memories (source_type, summary, entities, relations, embedding, metadata)
+                INSERT INTO memories (source_type, summary, entities, relations, embedding, meta)
                 VALUES (:source_type, :summary, :entities, :relations, :embedding, :meta)
                 RETURNING id
                 """

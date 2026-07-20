@@ -97,7 +97,7 @@ async def search_memories(
             text(
                 """\
                 SELECT id, source_type, summary, entities, relations,
-                       decay_factor, recall_count, metadata, created_at,
+                       decay_factor, recall_count, meta, created_at,
                        (1 - (embedding <=> :vec ::vector)) * decay_factor AS weighted_score
                 FROM memories
                 WHERE embedding IS NOT NULL
