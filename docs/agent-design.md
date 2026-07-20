@@ -69,3 +69,4 @@ backend/
 - **Tool 与 Agent 解耦**：Tool 只是现有 service 函数的 `@tool` 包装，零逻辑重复
 - **LLM 调用通过 `LLMProvider` 抽象接口**：节点内调用 `get_llm_provider().chat_raw()` 和 `get_llm_provider().chat()`，不直接依赖 `openai`/`anthropic`
 - **异步优先**：所有节点和 tool 都是 `async` 函数
+- **简单优先**：当前 ReAct 循环本质是一个 while 循环，LangGraph 的大部分能力尚未用到。保留 LangGraph 仅是为人机协同审批 (`interrupt`)、对话持久化 (`PostgresSaver`) 等未来场景预留入口，不做提前设计
