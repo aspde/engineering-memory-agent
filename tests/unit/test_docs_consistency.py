@@ -137,7 +137,7 @@ def test_agent_api_route_declared() -> None:
     if not router.exists():
         return
 
-    router_text = router.read_text()
+    router_text = router.read_text(encoding="utf-8")
     if "agent_routes" not in router_text or "agent_router" not in router_text:
         assert False, "docs claim /api/agent/chat but router does not register agent routes"
 
