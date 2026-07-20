@@ -28,7 +28,7 @@ def build_agent_graph(
     Args:
         tools: List of ``@tool``-decorated async functions.
         checkpointer: Checkpointer for state persistence
-            (InMemorySaver or PostgresSaver).  Defaults to InMemorySaver.
+            (InMemorySaver, PostgresSaver, etc.).  Defaults to InMemorySaver.
 
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
