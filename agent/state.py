@@ -2,13 +2,11 @@
 
 Uses MessagesState pattern — messages accumulate with ID-based
 deduplication via the ``add_messages`` reducer.
-
-Frozen — do not add new fields without a concrete consumer node.
 """
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -28,3 +26,7 @@ class AgentState(TypedDict):
     error: str | None
     """Error state for graceful degradation.  Set by any node that catches
     an unrecoverable exception so the caller can inspect what went wrong."""
+
+    pending_approval: dict[str, Any] | None
+    """Non-None when the graph is paused waiting for human approval.
+    Set by check_approval_node before ``interrupt()``; cleared on resume."""

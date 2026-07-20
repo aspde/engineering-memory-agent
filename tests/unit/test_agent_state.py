@@ -42,3 +42,22 @@ class TestAgentState:
             error="LLM call failed",
         )
         assert state["error"] == "LLM call failed"
+
+    def test_pending_approval_defaults_to_none(self) -> None:
+        state = AgentState(
+            messages=[],
+            final_response=None,
+            error=None,
+            pending_approval=None,
+        )
+        assert state["pending_approval"] is None
+
+    def test_pending_approval_holds_approval_data(self) -> None:
+        data = {"tool_name": "write_memory_tool", "tool_args": {"content": "test"}}
+        state = AgentState(
+            messages=[],
+            final_response=None,
+            error=None,
+            pending_approval=data,
+        )
+        assert state["pending_approval"] == data

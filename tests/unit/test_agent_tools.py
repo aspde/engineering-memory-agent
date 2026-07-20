@@ -84,6 +84,37 @@ class TestWriteMemoryTool:
         assert data["action"] == "inserted"
         assert data["id"] == "abc-123"
 
+    @pytest.mark.asyncio
+    async def test_conflict_returns_structured_data(self, monkeypatch) -> None:
+        """When write_memory detects a conflict, the JSON result includes
+        existing_id, existing_summary, and _deferred for HITL resolution."""
+        from agent import tools as mod
+
+        async def mock_write(content, source_type, metadata):
+            return {
+                "action": "conflict",
+                "summary": "EMA uses MySQL",
+                "existing_id": "mem-456",
+                "existing_summary": "EMA uses PostgreSQL",
+                "entities": [{"name": "EMA", "type": "project"}],
+                "relations": [],
+                "_deferred": {
+                    "extracted": {"summary": "EMA uses MySQL"},
+                    "embedding": "[1.0, 2.0]",
+                    "source_type": "conversation",
+                    "metadata": {"conflicts_with": "mem-456"},
+                },
+            }
+
+        monkeypatch.setattr(mod, "write_memory", mock_write)
+
+        result = await write_memory_tool.ainvoke({"content": "EMA uses MySQL"})
+        data = json.loads(result)
+        assert data["action"] == "conflict"
+        assert data["existing_id"] == "mem-456"
+        assert data["existing_summary"] == "EMA uses PostgreSQL"
+        assert "_deferred" in data
+
 
 class TestExtractMemoryTool:
     @pytest.mark.asyncio

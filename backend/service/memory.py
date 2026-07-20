@@ -61,7 +61,6 @@ async def write_memory(
         return await _merge_memory(existing, extracted, embedding, source_type, metadata)
 
     elif grade >= CONFLICT_CHECK and existing:
-        # Check if this contradicts the existing memory
         has_conflict = await _detect_conflict(existing, extracted)
         if has_conflict:
             return await _mark_conflict(existing, extracted, embedding, source_type, metadata)
@@ -204,12 +203,29 @@ Merged summary:"""
 
 
 async def _mark_conflict(existing, extracted, embedding, source_type, metadata):
-    """Insert new memory and mark it as conflicting with *existing*."""
-    enriched_meta = (metadata or {}) | {
-        "conflicts_with": str(existing["id"]),
-        "conflicting_summary": existing["summary"],
+    """Return conflict data without auto-inserting — defers to HITL.
+
+    The caller (agent check_conflict_node) will pause and let the human
+    choose: keep_existing, overwrite, merge, or keep_both.
+    """
+    return {
+        "action": "conflict",
+        "summary": extracted["summary"],
+        "existing_id": str(existing["id"]),
+        "existing_summary": existing["summary"],
+        "entities": extracted.get("entities", []) or [],
+        "relations": extracted.get("relations", []) or [],
+        # Deferred insert payload — passed along so the resolver can act
+        "_deferred": {
+            "extracted": extracted,
+            "embedding": str(embedding),
+            "source_type": source_type,
+            "metadata": (metadata or {}) | {
+                "conflicts_with": str(existing["id"]),
+                "conflicting_summary": existing["summary"],
+            },
+        },
     }
-    return await _insert_memory(extracted, embedding, source_type, enriched_meta)
 
 
 async def _supplement_memory(existing, extracted, embedding, source_type, metadata):
@@ -247,3 +263,144 @@ async def _insert_memory(extracted, embedding, source_type, metadata):
 
     logger.info("Inserted new memory %s (source=%s)", new_id, source_type)
     return {"id": str(new_id), "action": "inserted", "summary": extracted["summary"]}
+
+
+async def resolve_conflict(
+    resolution: str,
+    existing_id: str,
+    deferred_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a memory conflict per the human's decision.
+
+    Args:
+        resolution: One of ``"keep_existing"``, ``"overwrite"``,
+            ``"merge"``, or ``"keep_both"``.
+        existing_id: The UUID of the conflicting existing memory.
+        deferred_payload: The ``_deferred`` dict carried over from the
+            ``write_memory`` conflict return value.
+
+    Returns:
+        A dict with ``action`` and ``id`` describing what happened.
+    """
+    extracted = deferred_payload["extracted"]
+    embedding = deferred_payload["embedding"]
+    source_type = deferred_payload["source_type"]
+    metadata = deferred_payload["metadata"]
+
+    session_factory = get_session_factory()
+
+    if resolution == "keep_existing":
+        return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
+
+    elif resolution == "overwrite":
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """\
+                    UPDATE memories
+                    SET summary = :summary,
+                        entities = :entities,
+                        relations = :relations,
+                        embedding = :embedding,
+                        meta = :meta,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": existing_id,
+                    "summary": extracted["summary"],
+                    "entities": json.dumps(extracted.get("entities") or [], ensure_ascii=False),
+                    "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
+                    "embedding": str(embedding),
+                    "meta": json.dumps(metadata or {}),
+                },
+            )
+            await session.commit()
+        return {"id": existing_id, "action": "conflict_resolved", "resolution": "overwrite"}
+
+    elif resolution == "merge":
+        from backend.service.llm_service import get_llm_provider
+
+        async with session_factory() as session:
+            result = await session.execute(
+                text("SELECT summary, entities, relations FROM memories WHERE id = :id"),
+                {"id": existing_id},
+            )
+            row = result.fetchone()
+            if row:
+                existing_summary = row[0]
+                existing_entities: list[dict] = (
+                    json.loads(row[1]) if isinstance(row[1], str) else (row[1] or [])
+                )
+                existing_relations: list[dict] = (
+                    json.loads(row[2]) if isinstance(row[2], str) else (row[2] or [])
+                )
+            else:
+                existing_summary = extracted["summary"]
+                existing_entities = []
+                existing_relations = []
+
+        try:
+            llm = get_llm_provider()
+            prompt = _MERGE_PROMPT.format(
+                existing_summary=existing_summary,
+                new_summary=extracted["summary"],
+            )
+            merged_summary = (await llm.chat([{"role": "user", "content": prompt}])).strip()
+        except Exception:
+            merged_summary = extracted["summary"]
+
+        # Merge entities from both sides, preferring new on name conflict
+        seen: dict[str, dict] = {}
+        for e in existing_entities:
+            name = e.get("name", "")
+            if name:
+                seen[name] = e
+        for e in (extracted.get("entities") or []):
+            name = e.get("name", "")
+            if name:
+                seen[name] = e
+        merged_entities = list(seen.values())
+
+        # Merge relations — deduplicate by (subject, predicate, object)
+        rel_seen: set[tuple] = set()
+        merged_relations: list[dict] = []
+        for r in existing_relations + (extracted.get("relations") or []):
+            key = (r.get("subject", ""), r.get("predicate", ""), r.get("object", ""))
+            if key not in rel_seen:
+                rel_seen.add(key)
+                merged_relations.append(r)
+
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """\
+                    UPDATE memories
+                    SET summary = :summary,
+                        entities = :entities,
+                        relations = :relations,
+                        embedding = :embedding,
+                        meta = :meta,
+                        updated_at = NOW()
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": existing_id,
+                    "summary": merged_summary.strip(),
+                    "entities": json.dumps(merged_entities, ensure_ascii=False),
+                    "relations": json.dumps(merged_relations, ensure_ascii=False),
+                    "embedding": str(embedding),
+                    "meta": json.dumps(metadata or {}),
+                },
+            )
+            await session.commit()
+        return {"id": existing_id, "action": "conflict_resolved", "resolution": "merge"}
+
+    elif resolution == "keep_both":
+        return await _insert_memory(extracted, embedding, source_type, metadata)
+
+    else:
+        logger.warning("Unknown conflict resolution '%s', defaulting to keep_existing", resolution)
+        return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}

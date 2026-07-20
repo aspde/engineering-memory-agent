@@ -110,6 +110,19 @@ async def write_memory_tool(
         metadata: Optional extra metadata to store with the memory.
     """
     result = await write_memory(content, source_type=source_type, metadata=metadata)
+    if result.get("action") == "conflict":
+        return json.dumps(
+            {
+                "action": result["action"],
+                "summary": result["summary"],
+                "existing_id": result["existing_id"],
+                "existing_summary": result["existing_summary"],
+                "entities": result.get("entities", []),
+                "relations": result.get("relations", []),
+                "_deferred": result.get("_deferred"),
+            },
+            ensure_ascii=False,
+        )
     return json.dumps(
         {
             "id": result["id"],
