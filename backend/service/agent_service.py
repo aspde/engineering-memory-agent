@@ -14,11 +14,12 @@ from agent.tools import ALL_TOOLS
 
 
 def get_agent() -> CompiledStateGraph:
-    """Return a singleton agent graph (shared InMemorySaver).
+    """Return a compiled agent graph with all default tools.
 
-    Suitable for development and testing where a single conversation
-    thread is sufficient.  For production with multiple concurrent
-    users, use ``get_agent_for_thread()`` instead.
+    Each call returns a *new* graph instance with its own
+    ``InMemorySaver`` — callers should cache the result if they
+    need a shared instance.  For production with multiple
+    concurrent users, use ``get_agent_for_thread()``.
     """
     return build_agent_graph(tools=ALL_TOOLS)
 

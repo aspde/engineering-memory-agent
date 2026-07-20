@@ -14,8 +14,6 @@ class TestAgentChat:
         mock_agent.ainvoke.return_value = {
             "final_response": "Hello! How can I help?",
             "messages": [],
-            "retrieved_chunks": [],
-            "retrieved_memories": [],
         }
 
         monkeypatch.setattr(
@@ -59,8 +57,6 @@ class TestAgentChat:
         mock_agent.ainvoke.return_value = {
             "final_response": "ok",
             "messages": [],
-            "retrieved_chunks": [],
-            "retrieved_memories": [],
         }
 
         monkeypatch.setattr(
@@ -77,19 +73,16 @@ class TestAgentChat:
         assert data["thread_id"]  # should be auto-generated UUID
 
     @pytest.mark.asyncio
-    async def test_includes_sources(self, async_client: AsyncClient, monkeypatch) -> None:
-        """Response includes sources from retrieval."""
+    async def test_includes_tool_call_traces(self, async_client: AsyncClient, monkeypatch) -> None:
+        """Response includes tool call traces from ToolMessages."""
         from unittest.mock import AsyncMock
+        from langchain_core.messages import ToolMessage
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {
             "final_response": "Based on what I found...",
-            "messages": [],
-            "retrieved_chunks": [
-                {"content": "def foo(): pass", "score": 0.92}
-            ],
-            "retrieved_memories": [
-                {"summary": "EMA uses PostgreSQL", "weighted_score": 0.88}
+            "messages": [
+                ToolMessage(content="Found 1 memory: EMA uses PostgreSQL", tool_call_id="call_1", name="search_memories_tool"),
             ],
         }
 
@@ -104,6 +97,5 @@ class TestAgentChat:
         )
         assert response.status_code == 200
         data = response.json()
-        assert len(data["sources"]) == 2
-        assert data["sources"][0]["type"] == "chunk"
-        assert data["sources"][1]["type"] == "memory"
+        assert len(data["tool_calls"]) == 1
+        assert data["tool_calls"][0]["tool"] == "search_memories_tool"

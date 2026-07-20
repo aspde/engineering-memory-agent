@@ -7,7 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from agent.graph import build_agent_graph
-from agent.state import AgentState
 
 
 def _make_fake_tool() -> object:

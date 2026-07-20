@@ -7,6 +7,7 @@ returns a partial state dict.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -63,31 +64,61 @@ def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
     return schemas
 
 
-def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, str]]:
-    """Convert LangChain messages to plain dicts for the LLM provider."""
-    dicts: list[dict[str, str]] = []
+def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
+    """Convert LangChain messages to OpenAI-compatible dicts.
+
+    Preserves ``tool_calls`` on AIMessages and ``tool_call_id`` on
+    ToolMessages so the LLM can track the ReAct conversation loop.
+    """
+    dicts: list[dict[str, object]] = []
     for m in messages:
-        if isinstance(m, (HumanMessage, AIMessage, SystemMessage, ToolMessage)):
+        # 1. Determine role
+        if isinstance(m, SystemMessage):
+            role = "system"
+        elif isinstance(m, AIMessage):
+            role = "assistant"
+        elif isinstance(m, ToolMessage):
+            role = "tool"
+        elif isinstance(m, HumanMessage):
             role = "user"
-            if isinstance(m, SystemMessage):
-                role = "system"
-            elif isinstance(m, AIMessage):
-                role = "assistant"
-            elif isinstance(m, ToolMessage):
-                role = "tool"
-            content: str = ""
-            if isinstance(m.content, str):
-                content = m.content
-            elif isinstance(m.content, list):
-                # Extract text from content blocks
-                parts: list[str] = []
-                for block in m.content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(str(block.get("text", "")))
-                    elif hasattr(block, "text"):
-                        parts.append(str(block.text))  # type: ignore[union-attr]
-                content = " ".join(parts)
-            dicts.append({"role": role, "content": content})
+        else:
+            logger.debug("Skipping unknown message type: %s", type(m).__name__)
+            continue
+
+        # 2. Extract content
+        content: str = ""
+        if isinstance(m.content, str):
+            content = m.content
+        elif isinstance(m.content, list):
+            parts: list[str] = []
+            for block in m.content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(str(block.get("text", "")))
+                elif hasattr(block, "text"):
+                    parts.append(str(block.text))  # type: ignore[union-attr]
+            content = " ".join(parts)
+
+        entry: dict[str, object] = {"role": role, "content": content or ""}
+
+        # 3. Preserve tool_calls on assistant messages (OpenAI API requirement)
+        if isinstance(m, AIMessage) and m.tool_calls:
+            entry["tool_calls"] = [
+                {
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": json.dumps(tc["args"], ensure_ascii=False),
+                    },
+                }
+                for tc in m.tool_calls
+            ]
+
+        # 4. Preserve tool_call_id on tool messages (OpenAI API requirement)
+        if isinstance(m, ToolMessage) and m.tool_call_id:
+            entry["tool_call_id"] = m.tool_call_id
+
+        dicts.append(entry)
     return dicts
 
 
@@ -144,27 +175,22 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
     """Assemble context from retrieved results and produce the final answer.
 
-    Calls the LLM *without* tools so it generates a natural-language
-    response based on the conversation and any retrieved context.
+    Reads tool-call results from the conversation history (ToolMessages)
+    rather than from discrete state fields, so every tool's output is
+    automatically included regardless of which tool was called.
     """
     provider = get_llm_provider()
 
-    # Build context from retrieved items
+    # ── Harvest context from ToolMessages in conversation history ──
     context_parts: list[str] = []
-
-    memories = state.get("retrieved_memories") or []
-    if memories:
-        context_parts.append("### Relevant Memories")
-        for i, m in enumerate(memories):
-            context_parts.append(f"[M{i+1}] {m.get('summary', str(m))}")
-
-    chunks = state.get("retrieved_chunks") or []
-    if chunks:
-        context_parts.append("### Relevant Document Chunks")
-        for i, c in enumerate(chunks):
-            content = c.get("content", str(c))
-            score = c.get("score", c.get("rerank_score", 0))
-            context_parts.append(f"[D{i+1}] (relevance: {float(score):.2f}) {content}")
+    for m in state["messages"]:
+        if not isinstance(m, ToolMessage):
+            continue
+        tool_name = getattr(m, "name", "unknown")
+        content = str(m.content) if m.content else ""
+        if not content.strip():
+            continue
+        context_parts.append(f"### {tool_name}\n{content}")
 
     context_str = "\n\n".join(context_parts) if context_parts else ""
 
@@ -184,9 +210,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     if context_str:
         messages.append({"role": "system", "content": f"Context:\n{context_str}"})
 
-    # Include the conversation history (skip tool messages for brevity)
+    # Include the conversation history (skip tool & system messages)
     for m in state["messages"]:
-        if isinstance(m, ToolMessage):
+        if isinstance(m, (ToolMessage, SystemMessage)):
             continue
         role = "assistant" if isinstance(m, AIMessage) else "user"
         content = m.content if isinstance(m.content, str) else str(m.content)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 
 from backend.model.llm import LLMProvider
@@ -66,8 +67,6 @@ class OpenAICompatibleProvider(LLMProvider):
         result: dict[str, object] = {"content": msg.content or ""}
 
         if msg.tool_calls:
-            import json
-
             result["tool_calls"] = [
                 {
                     "id": tc.id,

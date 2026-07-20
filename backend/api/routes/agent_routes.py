@@ -68,20 +68,22 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
                 "content": str(m.content)[:300],
             })
 
-    # Collect sources
+    # Collect sources from ToolMessages produced by retrieval tools
     sources: list[dict] = []
-    for chunk in result.get("retrieved_chunks", []):
-        sources.append({
-            "type": "chunk",
-            "content": str(chunk.get("content", ""))[:200],
-            "score": chunk.get("score", chunk.get("rerank_score", 0)),
-        })
-    for mem in result.get("retrieved_memories", []):
-        sources.append({
-            "type": "memory",
-            "content": str(mem.get("summary", ""))[:200],
-            "score": mem.get("weighted_score", mem.get("rerank_score", 0)),
-        })
+    for m in result.get("messages", []):
+        if not isinstance(m, ToolMessage):
+            continue
+        tool_name = getattr(m, "name", "")
+        if tool_name == "search_memories_tool":
+            source_type = "memory"
+        elif tool_name == "retrieve_chunks_tool":
+            source_type = "chunk"
+        else:
+            continue
+        # Each retrieval tool returns formatted text — capture a preview
+        content = str(m.content)[:200] if m.content else ""
+        if content:
+            sources.append({"type": source_type, "snippet": content})
 
     return ChatResponse(
         thread_id=req.thread_id,
