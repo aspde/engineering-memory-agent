@@ -3,6 +3,10 @@
 Provides factory functions that the API layer uses to obtain agent
 instances.  Each call to ``get_agent_for_thread()`` creates a fresh
 agent with its own ``InMemorySaver`` for thread-isolated state.
+
+Eagerly initialises the embedding provider singleton on import so
+that the offline-mode environment variables take effect before
+any SentenceTransformer/transformers network access is attempted.
 """
 
 from __future__ import annotations
@@ -11,6 +15,14 @@ from langgraph.graph.state import CompiledStateGraph
 
 from agent.graph import build_agent_graph
 from agent.tools import ALL_TOOLS
+
+# ── Eager-init embedding provider (ensures offline flags are set) ───
+try:
+    from backend.service.embedding_service import get_embedding_provider
+
+    get_embedding_provider()
+except Exception:
+    pass  # will be retried lazily at first tool call
 
 
 def get_agent() -> CompiledStateGraph:

@@ -6,8 +6,14 @@ import asyncio
 import logging
 import os
 
-from backend.model.embedding import EmbeddingProvider
-from backend.shared.config import config
+# ── Force offline BEFORE any HF/transformers imports ──────────────────
+# Set these at module load time so they take effect before
+# SentenceTransformer / AutoTokenizer touch the network.
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+from backend.model.embedding import EmbeddingProvider  # noqa: E402
+from backend.shared.config import config  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +30,6 @@ class BGEEmbeddingProvider(EmbeddingProvider):
     ) -> None:
         from sentence_transformers import SentenceTransformer
 
-        # Force offline — the model is cached locally.  Both HF_HUB_OFFLINE
-        # (huggingface_hub) and TRANSFORMERS_OFFLINE (transformers) must be
-        # set; otherwise tokenizer loading calls hf.co/api/models/….
-        os.environ.setdefault("HF_HUB_OFFLINE", "1")
-        os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
         os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
 
         logger.info("Loading embedding model: %s (offline)", model_name)

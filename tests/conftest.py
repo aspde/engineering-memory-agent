@@ -6,9 +6,12 @@ from collections.abc import AsyncGenerator
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-
 # Set test environment before any imports
 os.environ["APP_ENV"] = "test"
+
+# Force offline before SentenceTransformer imports are triggered
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
 @pytest.fixture
