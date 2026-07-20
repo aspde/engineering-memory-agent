@@ -34,8 +34,8 @@ except Exception:
     pass  # will be retried lazily at first tool call
 
 
-def _get_checkpointer() -> object:
-    """Return PostgresSaver singleton, or InMemorySaver as fallback."""
+def _get_checkpointer() -> InMemorySaver | object:
+    """Return AsyncPostgresSaver singleton, or InMemorySaver as fallback."""
     global _checkpointer
     if _checkpointer is not None:
         return _checkpointer
@@ -43,14 +43,15 @@ def _get_checkpointer() -> object:
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-        # Convert sync pgsql URL to asyncpg
         async_url = config.database_url.replace(
             "postgresql://", "postgresql+asyncpg://", 1
         )
         _checkpointer = AsyncPostgresSaver.from_conn_string(async_url)
         logger.info("Using AsyncPostgresSaver for checkpoint persistence")
     except Exception:
-        logger.info("AsyncPostgresSaver unavailable, falling back to InMemorySaver")
+        logger.info(
+            "AsyncPostgresSaver unavailable, falling back to InMemorySaver"
+        )
         _checkpointer = InMemorySaver()
 
     return _checkpointer
