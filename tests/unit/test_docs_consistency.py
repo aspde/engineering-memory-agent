@@ -164,7 +164,7 @@ def test_pyproject_config_consistent() -> None:
 
 def test_no_deleted_docs_referenced() -> None:
     """No file in the project references docs files that were deleted."""
-    deleted = ["tech-stack.md", "rag-design.md", "git-knowledge.md"]
+    deleted = ["tech-stack.md", "rag-design.md", "git-knowledge.md", "ingestion/__init__.py", "rag/__init__.py"]
     failures: list[Failure] = []
 
     # Only check project-owned markdown files, not .venv
@@ -175,5 +175,11 @@ def test_no_deleted_docs_referenced() -> None:
         for name in deleted:
             if name in text:
                 failures.append(Failure("stale-ref", f"{md.relative_to(PROJECT_ROOT)} still references deleted {name}"))
+
+    # Also check that deleted dirs don't exist
+    import os
+    for d in ["ingestion", "rag"]:
+        if os.path.isdir(PROJECT_ROOT / d):
+            failures.append(Failure("stale-dir", f"'{d}/' should have been deleted"))
 
     assert not failures, _failures_to_message(failures)
