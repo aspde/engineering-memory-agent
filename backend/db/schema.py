@@ -48,6 +48,19 @@ _STATEMENTS = [
         ON memories USING ivfflat (embedding vector_cosine_ops)
         WITH (lists = 100)
     """,
+    """
+    CREATE TABLE IF NOT EXISTS conversations (
+        id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        thread_id   TEXT NOT NULL UNIQUE,
+        title       TEXT NOT NULL DEFAULT '',
+        updated_at  TIMESTAMPTZ DEFAULT now(),
+        created_at  TIMESTAMPTZ DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_conversations_updated
+        ON conversations (updated_at DESC)
+    """,
 ]
 
 
@@ -57,4 +70,4 @@ async def init_db() -> None:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         for stmt in _STATEMENTS:
             await conn.execute(text(stmt))
-    print("Database initialized (chunks + memories tables ready)")
+    print("Database initialized (chunks + memories + conversations tables ready)")

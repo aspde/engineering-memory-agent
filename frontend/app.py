@@ -1,6 +1,7 @@
 """EMA — Engineering Memory Agent — Streamlit MVP.
 
-Chat interface with Human-in-the-Loop approval and streaming responses.
+Chat interface with Human-in-the-Loop approval, streaming responses,
+and conversation history in the sidebar.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ def _init_session() -> None:
         "pending_interrupt": None,  # dict or None
         "waiting_for_approval": False,
         "_stream_interrupt": None,  # internal: interrupt caught during streaming
+        "_threads": None,  # cached list[ThreadInfo] from backend
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -207,7 +209,9 @@ def _render_conflict_resolution(interrupt: dict) -> None:
             st.markdown("**Existing memory**")
             st.warning(existing_summary or "(empty)")
 
-        st.divider()
+        # ── Conflict card divider ──
+    if False:
+        st.divider()  # kept for reference, removed from rendering
 
         cols = st.columns(4)
         with cols[0]:
@@ -266,6 +270,78 @@ def _handle_approval(approved: bool) -> None:
         resume["reason"] = "User rejected the tool call."
 
     _resume(resume)
+
+
+# ── Sidebar: conversation history ───────────────────────────────────
+
+
+def _render_sidebar() -> None:
+    """Render the sidebar with conversation list and new-conversation button."""
+    st.html(
+        "<style>"
+        "[data-testid='stSidebarHeader'] { height: 36px !important; min-height: 36px !important; }"
+        "[data-testid='stSidebarCollapseButton'] { position: relative !important; top: 8px !important; }"
+        "[data-testid='stExpandSidebarButton'] { position: relative !important; top: 8px !important; }"
+        "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; }"
+        ".stSidebar h1 { padding-top: 0 !important; }"
+        ".stSidebar hr { margin-top: 0.5rem; }"
+        "</style>"
+    )
+    st.title("🧠 EMA")
+    st.caption("Engineering Memory Agent")
+
+    # ── New conversation button ──
+    if st.button("🆕 新建对话", use_container_width=True):
+        st.session_state["thread_id"] = str(uuid.uuid4())
+        st.session_state["messages"] = []
+        st.session_state["pending_interrupt"] = None
+        st.session_state["waiting_for_approval"] = False
+        st.rerun()
+
+    st.caption("**对话历史**")
+
+    # ── Thread list ──
+    try:
+        resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=10)
+        if resp.status_code == 200:
+            threads = resp.json()
+            st.session_state["_threads"] = threads
+        else:
+            threads = st.session_state.get("_threads") or []
+    except Exception:
+        threads = st.session_state.get("_threads") or []
+
+    if threads:
+        for t in threads:
+            tid = t["thread_id"]
+            title = t.get("title", tid[:8])
+            active = tid == st.session_state["thread_id"]
+            label = f"{'● ' if active else ''}{title}"
+            if st.button(
+                label,
+                key=f"thread_{tid}",
+                use_container_width=True,
+                disabled=active,
+            ):
+                st.session_state["thread_id"] = tid
+                st.session_state["messages"] = []
+                st.session_state["pending_interrupt"] = None
+                st.session_state["waiting_for_approval"] = False
+                # Load messages from checkpoint
+                try:
+                    import requests
+
+                    r = requests.get(
+                        f"{BACKEND_URL}/api/agent/thread/{tid}",
+                        timeout=10,
+                    )
+                    if r.status_code == 200:
+                        st.session_state["messages"] = r.json().get("messages", [])
+                except Exception:
+                    pass
+                st.rerun()
+    else:
+        st.caption("暂无历史对话")
 
 
 # ── Main UI ──────────────────────────────────────────────────────────
@@ -334,22 +410,48 @@ def main() -> None:
 
     # ── Sidebar ──
     with st.sidebar:
-        st.html(
-            "<style>"
-            "[data-testid='stSidebarHeader'] { height: auto; min-height: unset; padding: 2px 0; }"
-            "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; position: relative; top: -16px; }"
-            ".stSidebar [data-testid='stCaptionContainer'] { margin-bottom: -12px; }"
-            ".stSidebar hr { margin-top: 0.5rem; }"
-            "</style>"
-        )
-        st.title("🧠 EMA")
-        st.caption("Engineering Memory Agent")
-        st.divider()
+        _render_sidebar()
 
-    # ── Chat area ──
-    st.title("EMA — Engineering Memory Agent")
+    # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
+    # Layout strategy
+    # ────────────────────────────────────────────────────────────────
+    # Streamlit renders EVERYTHING into .stMainBlockContainer.
+    # We wrap the bottom section in a container (#bottom-bar-wrap) and use
+    # JS to detach it from the scrollable block and append it outside,
+    # directly under .stMain, so it stays pinned at the bottom of the
+    # viewport while the messages above get overflow-y: auto.
+    # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
 
-    # Render message history
+    st.markdown(
+        "<style>"
+        "  .stMain { display: flex !important; flex-direction: column !important;"
+        "            min-height: 0 !important; }"
+        "  .stMainBlockContainer { flex: 1 1 auto !important; overflow-y: auto !important;"
+        "                          min-height: 0 !important; padding-bottom: 0 !important; }"
+        "  .stMainBlockContainer + div { display: none !important; }"
+        "  #bottom-bar-wrap { flex: 0 0 auto !important; padding: 0.75rem 1rem 1.5rem 1rem;"
+        "                     border: none !important; box-shadow: none !important;"
+        "                     background: transparent !important; }"
+        "  .stMainBlockContainer { border-bottom: none !important; }"
+        "  hr { display: none !important; }"
+        "  #bottom-bar-wrap, #bottom-bar-wrap * {"
+        "      background: transparent !important; border: none !important;"
+        "      box-shadow: none !important; outline: none !important; }"
+        "</style>"
+        "<script>"
+        "  (function moveWrap() {"
+        "    var main = document.querySelector('.stMain');"
+        "    var wrap = document.getElementById('bottom-bar-wrap');"
+        "    if (main && wrap && wrap.parentElement !== main) {"
+        "      main.appendChild(wrap);"
+        "    }"
+        "    requestAnimationFrame(moveWrap);"
+        "  })();"
+        "</script>",
+        unsafe_allow_html=True,
+    )
+
+    # ── Message history ──
     for msg in st.session_state["messages"]:
         _render_message(msg)
 
@@ -357,9 +459,28 @@ def main() -> None:
     if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
         _render_approval(st.session_state["pending_interrupt"])
 
-    # ── Input area: runs in a fragment to avoid full page rerun ──
+    # ── Bottom bar ──
+    st.markdown('<div id="bottom-bar-wrap" style="background:transparent;border:none;">', unsafe_allow_html=True)
+
+    has_messages = len(st.session_state.get("messages", [])) > 0
+
+    col1, col2, col3 = st.columns([1, 3, 1])
+    with col2:
+        if not has_messages:
+            st.markdown(
+                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
+                "EMA — Engineering Memory Agent</h1>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Input area ──
     @st.fragment
     def _chat_fragment() -> None:
         _handle_chat_input()
 
     _chat_fragment()
+
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
+main()

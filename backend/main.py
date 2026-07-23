@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import sys
 from contextlib import asynccontextmanager
+
+# ── Windows: psycopg 3 (used by AsyncPostgresSaver) requires
+#    SelectorEventLoop — ProActorEventLoop is incompatible.
+if sys.platform == "win32":
+    loop = asyncio.SelectorEventLoop()
+    asyncio.set_event_loop(loop)
 
 from fastapi import FastAPI
 
@@ -30,6 +38,16 @@ async def lifespan(app: FastAPI):
 
     yield
     await close_db()
+
+    # Close checkpointer pool on shutdown
+    try:
+        from backend.service.agent_service import _close_checkpointer
+
+        await _close_checkpointer()
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("Failed to close checkpointer pool")
 
 
 app = FastAPI(
