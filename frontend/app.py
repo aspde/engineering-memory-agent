@@ -34,6 +34,15 @@ def _init_session() -> None:
 # ── Streaming helper ─────────────────────────────────────────────────
 
 
+def _node_labels() -> dict[str, str]:
+    return {
+        "call_llm": "思考中…",
+        "tools": "执行工具…",
+        "check_approval": "检查权限…",
+        "check_conflict": "检查冲突…",
+    }
+
+
 def _stream_response(user_input: str = ""):
     """Generator that yields tokens and status strings from the SSE stream.
 
@@ -42,13 +51,6 @@ def _stream_response(user_input: str = ""):
     """
     thread_id = st.session_state["thread_id"]
     payload: dict = {"message": user_input, "thread_id": thread_id}
-
-    node_labels: dict[str, str] = {
-        "call_llm": "思考中…",
-        "tools": "执行工具…",
-        "check_approval": "检查权限…",
-        "check_conflict": "检查冲突…",
-    }
 
     try:
         with httpx.stream(
@@ -76,7 +78,7 @@ def _stream_response(user_input: str = ""):
                     node = event.get("node", "")
                     if node != "generate_final" and node not in yielded_nodes:
                         yielded_nodes.add(node)
-                        label = node_labels.get(node, node)
+                        label = _node_labels().get(node, node)
                         yield f"\n\n> {label}\n\n"
 
                 elif etype == "token":
@@ -269,6 +271,63 @@ def _handle_approval(approved: bool) -> None:
 # ── Main UI ──────────────────────────────────────────────────────────
 
 
+def _handle_chat_input() -> None:
+    """Handles a single chat turn without full-page rerun.
+
+    Uses ``st.fragment`` so Streamlit only re-renders this function's
+    container when changes happen inside it, leaving the sidebar and
+    message history above untouched.
+    """
+    disabled = st.session_state["waiting_for_approval"]
+    user_input = st.chat_input(
+        "Ask EMA anything…" if not disabled else "Waiting for approval…",
+        disabled=disabled,
+    )
+
+    if not user_input or not user_input.strip():
+        return
+
+    # Add user message to history
+    st.session_state["messages"].append({
+        "role": "user",
+        "content": user_input.strip(),
+    })
+
+    # Stream the response — st.write_stream handles the loading state
+    # by rendering each token as it arrives; no spinner needed.
+    with st.chat_message("assistant"):
+        st.session_state["_stream_interrupt"] = None
+        full_response = st.write_stream(
+            _stream_response(user_input=user_input.strip())
+        )
+
+    # Check if streaming was interrupted by an approval gate
+    interrupt = st.session_state.get("_stream_interrupt")
+    if interrupt is not None:
+        st.session_state["pending_interrupt"] = interrupt
+        st.session_state["waiting_for_approval"] = True
+        st.session_state["_stream_interrupt"] = None
+        itype = interrupt.get("type", "")
+        note = (
+            "A memory conflict was detected. Please choose how to resolve it."
+            if itype == "conflict"
+            else "The agent wants to perform a write operation. Please approve or reject."
+        )
+        st.session_state["messages"].append({
+            "role": "system",
+            "content": note,
+        })
+    else:
+        st.session_state["messages"].append({
+            "role": "assistant",
+            "content": full_response or "(no response)",
+            "_meta": {"tool_calls": [], "sources": []},
+        })
+
+    # st.rerun is NOT needed — the fragment itself re-runs, and
+    # Streamlit reconciles the new messages into the history.
+
+
 def main() -> None:
     st.set_page_config(page_title="EMA", page_icon="🧠", layout="wide")
     _init_session()
@@ -298,53 +357,9 @@ def main() -> None:
     if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
         _render_approval(st.session_state["pending_interrupt"])
 
-    # ── Input area ──
-    disabled = st.session_state["waiting_for_approval"]
-    user_input = st.chat_input(
-        "Ask EMA anything…" if not disabled else "Waiting for approval…",
-        disabled=disabled,
-    )
+    # ── Input area: runs in a fragment to avoid full page rerun ──
+    @st.fragment
+    def _chat_fragment() -> None:
+        _handle_chat_input()
 
-    if user_input and user_input.strip():
-        # Add user message to history
-        st.session_state["messages"].append({
-            "role": "user",
-            "content": user_input.strip(),
-        })
-
-        # Stream the response
-        with st.chat_message("assistant"):
-            st.session_state["_stream_interrupt"] = None  # clear previous
-            full_response = st.write_stream(
-                _stream_response(user_input=user_input.strip())
-            )
-
-        # Check if streaming was interrupted by an approval gate
-        interrupt = st.session_state.get("_stream_interrupt")
-        if interrupt is not None:
-            st.session_state["pending_interrupt"] = interrupt
-            st.session_state["waiting_for_approval"] = True
-            st.session_state["_stream_interrupt"] = None
-            itype = interrupt.get("type", "")
-            note = (
-                "A memory conflict was detected. Please choose how to resolve it."
-                if itype == "conflict"
-                else "The agent wants to perform a write operation. Please approve or reject."
-            )
-            st.session_state["messages"].append({
-                "role": "system",
-                "content": note,
-            })
-        else:
-            # Store the completed response
-            st.session_state["messages"].append({
-                "role": "assistant",
-                "content": full_response or "(no response)",
-                "_meta": {"tool_calls": [], "sources": []},
-            })
-
-        st.rerun()
-
-
-if __name__ == "__main__":
-    main()
+    _chat_fragment()
