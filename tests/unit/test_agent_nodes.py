@@ -54,10 +54,11 @@ class TestMessageConversion:
         assert schemas[0]["function"]["name"] == "search_memories_tool"
 
 
-def _make_state(messages=None, final_response=None, error=None, pending_approval=None):
+def _make_state(messages=None, final_response=None, error=None, pending_approval=None, final_prompt=None):
     return AgentState(
         messages=messages or [],
         final_response=final_response,
+        final_prompt=final_prompt,
         error=error,
         pending_approval=pending_approval,
     )
@@ -144,12 +145,8 @@ class TestCallLLMNode:
 
 class TestGenerateFinalNode:
     @pytest.mark.asyncio
-    async def test_produces_final_response(self, monkeypatch) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.chat.return_value = "Here is the final answer."
-
+    async def test_produces_final_prompt(self) -> None:
         import agent.nodes as mod
-        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         state = _make_state(
             messages=[
@@ -169,19 +166,30 @@ class TestGenerateFinalNode:
         )
 
         result = await mod.generate_final_node(state)
-        assert result["final_response"] == "Here is the final answer."
+        assert result["final_prompt"] is not None
+        prompts = result["final_prompt"]
+        assert any("EMA" in p.get("content", "") for p in prompts)
+        # Should include context from the tool message
+        context_block = [p for p in prompts if p["role"] == "system" and "Context" in p["content"]]
+        assert len(context_block) == 1
+        assert "Engineering Memory Agent" in context_block[0]["content"]
 
     @pytest.mark.asyncio
-    async def test_handles_error(self, monkeypatch) -> None:
-        mock_provider = AsyncMock()
-        mock_provider.chat.side_effect = RuntimeError("LLM timeout")
-
+    async def test_no_tools_produces_prompt(self) -> None:
+        """Without any tool results, still produces a valid prompt (no context block)."""
         import agent.nodes as mod
-        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        result = await mod.generate_final_node(_make_state())
-        assert "error" in result["final_response"].lower()
-        assert result["error"] is not None
+        state = _make_state(
+            messages=[
+                HumanMessage(content="hi"),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        assert "final_prompt" in result
+        # No context block since there are no tool messages
+        has_context = any("Context" in p.get("content", "") for p in result["final_prompt"] if p["role"] == "system")
+        assert not has_context
 
 
 class TestCheckApprovalNode:

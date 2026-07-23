@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 
@@ -31,6 +32,17 @@ class LLMProvider(ABC):
         Returns:
             ``{"content": str, "tool_calls": [...] | None}`` where each
             tool_call is ``{"id": str, "name": str, "args": dict}``.
+        """
+        ...
+
+    @abstractmethod
+    async def chat_stream(
+        self, messages: list[dict[str, str]], **kwargs
+    ) -> AsyncIterator[str]:
+        """Send messages and stream response tokens as they arrive.
+
+        Returns an async iterator that yields text deltas as they are
+        produced by the model.
         """
         ...
 

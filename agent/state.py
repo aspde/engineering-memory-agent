@@ -23,6 +23,11 @@ class AgentState(TypedDict):
     """Final answer set by generate_final_node.  Must be Optional because
     the initial state has no answer yet — only the terminal node sets it."""
 
+    final_prompt: list[dict[str, str]] | None
+    """Prompt messages built by generate_final_node for the final answer.
+    The API streaming layer reads this and calls ``chat_stream()``
+    token-by-token, then writes the full text back to ``final_response``."""
+
     error: str | None
     """Error state for graceful degradation.  Set by any node that catches
     an unrecoverable exception so the caller can inspect what went wrong."""

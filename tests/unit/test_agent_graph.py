@@ -51,6 +51,7 @@ class TestGraphStructure:
         state = AgentState(
             messages=[],
             final_response=None,
+            final_prompt=None,
             error=None,
             pending_approval=None,
         )
@@ -63,7 +64,6 @@ class TestGraphRouting:
         """When LLM returns text (no tool_calls), route to generate_final."""
         mock_provider = AsyncMock()
         mock_provider.chat_raw.return_value = {"content": "I can answer that directly."}
-        mock_provider.chat.return_value = "Here is the answer."
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -75,15 +75,15 @@ class TestGraphRouting:
             {"configurable": {"thread_id": "test-1"}},
         )
 
-        assert result["final_response"] == "Here is the answer."
+        # generate_final_node now produces final_prompt instead of calling LLM
+        assert "final_prompt" in result
+        assert len(result["final_prompt"]) > 0
 
     @pytest.mark.asyncio
     async def test_tool_calling_path(self, monkeypatch) -> None:
         """When LLM returns tool_calls, execute tools and loop back."""
         tools = [_make_fake_tool()]
 
-        # First call_llm: LLM returns a tool_call
-        # Second call_llm (after tool): LLM returns final text
         mock_provider = AsyncMock()
         mock_provider.chat_raw.side_effect = [
             {
@@ -98,7 +98,6 @@ class TestGraphRouting:
             },
             {"content": "Based on search results, Python is a programming language."},
         ]
-        mock_provider.chat.return_value = "Python is a programming language."
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -110,8 +109,8 @@ class TestGraphRouting:
             {"configurable": {"thread_id": "test-2"}},
         )
 
-        # The graph should have completed (via generate_final or direct call_llm)
-        assert "final_response" in result
+        # generate_final_node produces final_prompt (not final_response)
+        assert "final_prompt" in result
 
 
 class TestGraphHITLRouting:
@@ -154,7 +153,7 @@ class TestGraphHITLRouting:
         )
 
         # Should complete without interrupt (safe tool passes through)
-        assert "final_response" in result
+        assert "final_prompt" in result
         assert "__interrupt__" not in result
 
     @pytest.mark.asyncio

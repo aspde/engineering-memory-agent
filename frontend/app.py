@@ -1,15 +1,14 @@
 """EMA — Engineering Memory Agent — Streamlit MVP.
 
-Chat interface with Human-in-the-Loop approval: when the agent wants
-to write or ingest, it pauses and asks for confirmation before
-modifying the memory store.
+Chat interface with Human-in-the-Loop approval and streaming responses.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 
-import requests
+import httpx
 import streamlit as st
 
 BACKEND_URL = "http://localhost:8000"
@@ -25,25 +24,81 @@ def _init_session() -> None:
         "messages": [],  # list[dict] with role, content, metadata
         "pending_interrupt": None,  # dict or None
         "waiting_for_approval": False,
+        "_stream_interrupt": None,  # internal: interrupt caught during streaming
     }
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
 
-# ── API helpers ──────────────────────────────────────────────────────
+# ── Streaming helper ─────────────────────────────────────────────────
 
 
-def _call_agent(
-    message: str = "",
-    resume_data: dict | None = None,
-) -> dict:
-    """Send a message (or resume) to the agent and return the parsed response."""
+def _stream_response(user_input: str = ""):
+    """Generator that yields tokens and status strings from the SSE stream.
+
+    If the agent pauses for human approval the interrupt payload is stored
+    in ``_stream_interrupt`` and the generator returns early.
+    """
     thread_id = st.session_state["thread_id"]
-    payload: dict = {
-        "message": message,
-        "thread_id": thread_id,
+    payload: dict = {"message": user_input, "thread_id": thread_id}
+
+    node_labels: dict[str, str] = {
+        "call_llm": "思考中…",
+        "tools": "执行工具…",
+        "check_approval": "检查权限…",
+        "check_conflict": "检查冲突…",
     }
+
+    try:
+        with httpx.stream(
+            "POST",
+            f"{BACKEND_URL}/api/agent/chat/stream",
+            json=payload,
+            timeout=300,
+        ) as resp:
+            if resp.status_code != 200:
+                yield f"*后端错误 ({resp.status_code})*"
+                return
+
+            yielded_nodes: set[str] = set()
+            for line in resp.iter_lines():
+                if not line.startswith("data: "):
+                    continue
+                try:
+                    event = json.loads(line[6:])
+                except json.JSONDecodeError:
+                    continue
+
+                etype = event.get("type", "")
+
+                if etype == "node":
+                    node = event.get("node", "")
+                    if node != "generate_final" and node not in yielded_nodes:
+                        yielded_nodes.add(node)
+                        label = node_labels.get(node, node)
+                        yield f"\n\n> {label}\n\n"
+
+                elif etype == "token":
+                    yield event["content"]
+
+                elif etype == "interrupt":
+                    st.session_state["_stream_interrupt"] = event["data"]
+                    return
+
+                elif etype == "error":
+                    yield f"\n\n*错误: {event.get('message', 'unknown')}*"
+
+    except httpx.RequestError as exc:
+        yield f"\n\n*连接失败: {exc}*"
+
+
+def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) -> dict:
+    """Fallback non-streaming call for simple resume flows (approval / rejection)."""
+    import requests
+
+    thread_id = st.session_state["thread_id"]
+    payload: dict = {"message": message, "thread_id": thread_id}
     if resume_data is not None:
         payload["resume_data"] = resume_data
 
@@ -80,7 +135,6 @@ def _render_message(msg: dict) -> None:
     elif role == "assistant":
         with st.chat_message("assistant"):
             st.markdown(content)
-            # Show tool traces and sources if present
             meta = msg.get("_meta", {})
             tool_calls = meta.get("tool_calls", [])
             sources = meta.get("sources", [])
@@ -99,7 +153,7 @@ def _render_message(msg: dict) -> None:
 
 
 def _render_approval(interrupt: dict) -> None:
-    """Render the approval or conflict-resolution card when the agent is paused."""
+    """Render the approval or conflict-resolution card."""
     itype = interrupt.get("type", "")
 
     if itype == "conflict":
@@ -135,7 +189,7 @@ def _render_tool_approval(interrupt: dict) -> None:
 
 
 def _render_conflict_resolution(interrupt: dict) -> None:
-    """Conflict resolution card — human judges contradicting memories."""
+    """Conflict resolution card."""
     new_summary = interrupt.get("new_summary", "")
     existing_summary = interrupt.get("existing_summary", "")
 
@@ -176,15 +230,15 @@ def _handle_conflict(resolution: str) -> None:
 
 
 def _resume(resume_data: dict) -> None:
-    """Call the backend with resume data and handle the result."""
-    result = _call_agent(resume_data=resume_data)
+    """Resume the agent after approval/rejection/conflict resolution."""
+    result = _call_agent_nonstream(resume_data=resume_data)
 
     if result["status"] == "interrupted":
         st.session_state["pending_interrupt"] = result.get("interrupt")
         st.session_state["waiting_for_approval"] = True
         st.session_state["messages"].append({
             "role": "system",
-            "content": f"Another action needs attention.",
+            "content": "Another action needs attention.",
         })
     else:
         response_text = result.get("response", "")
@@ -221,25 +275,17 @@ def main() -> None:
 
     # ── Sidebar ──
     with st.sidebar:
+        st.html(
+            "<style>"
+            "[data-testid='stSidebarHeader'] { height: auto; min-height: unset; padding: 2px 0; }"
+            "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; position: relative; top: -16px; }"
+            ".stSidebar [data-testid='stCaptionContainer'] { margin-bottom: -12px; }"
+            ".stSidebar hr { margin-top: 0.5rem; }"
+            "</style>"
+        )
         st.title("🧠 EMA")
         st.caption("Engineering Memory Agent")
         st.divider()
-
-        st.write("**Thread ID**")
-        st.code(st.session_state["thread_id"], language=None)
-
-        if st.button("🔄 New Conversation"):
-            st.session_state["thread_id"] = str(uuid.uuid4())
-            st.session_state["messages"] = []
-            st.session_state["pending_interrupt"] = None
-            st.session_state["waiting_for_approval"] = False
-            st.rerun()
-
-        st.divider()
-        st.caption(
-            "Tools requiring approval: write memory, ingest repo, ingest document. "
-            "Search and retrieval run automatically."
-        )
 
     # ── Chat area ──
     st.title("EMA — Engineering Memory Agent")
@@ -266,30 +312,35 @@ def main() -> None:
             "content": user_input.strip(),
         })
 
-        # Send to backend
-        result = _call_agent(message=user_input.strip())
+        # Stream the response
+        with st.chat_message("assistant"):
+            st.session_state["_stream_interrupt"] = None  # clear previous
+            full_response = st.write_stream(
+                _stream_response(user_input=user_input.strip())
+            )
 
-        if result["status"] == "interrupted":
-            st.session_state["pending_interrupt"] = result.get("interrupt")
+        # Check if streaming was interrupted by an approval gate
+        interrupt = st.session_state.get("_stream_interrupt")
+        if interrupt is not None:
+            st.session_state["pending_interrupt"] = interrupt
             st.session_state["waiting_for_approval"] = True
-            itype = result.get("interrupt", {}).get("type", "")
-            if itype == "conflict":
-                note = "A memory conflict was detected. Please choose how to resolve it."
-            else:
-                note = "The agent wants to perform a write operation. Please approve or reject."
+            st.session_state["_stream_interrupt"] = None
+            itype = interrupt.get("type", "")
+            note = (
+                "A memory conflict was detected. Please choose how to resolve it."
+                if itype == "conflict"
+                else "The agent wants to perform a write operation. Please approve or reject."
+            )
             st.session_state["messages"].append({
                 "role": "system",
                 "content": note,
             })
         else:
-            response_text = result.get("response", "")
+            # Store the completed response
             st.session_state["messages"].append({
                 "role": "assistant",
-                "content": response_text or "(no response)",
-                "_meta": {
-                    "tool_calls": result.get("tool_calls", []),
-                    "sources": result.get("sources", []),
-                },
+                "content": full_response or "(no response)",
+                "_meta": {"tool_calls": [], "sources": []},
             })
 
         st.rerun()

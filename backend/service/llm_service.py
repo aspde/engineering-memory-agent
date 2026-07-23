@@ -77,6 +77,25 @@ class OpenAICompatibleProvider(LLMProvider):
             ]
         return result
 
+    async def chat_stream(
+        self, messages: list[dict[str, str]], **kwargs
+    ):
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        stream = await self._async_client.chat.completions.create(
+            model=self._model,
+            messages=messages,  # type: ignore[arg-type]
+            stream=True,
+            **kwargs,
+        )
+        async for chunk in stream:
+            choices = chunk.choices
+            if not choices:
+                continue
+            delta = choices[0].delta
+            if delta and delta.content:
+                yield delta.content
+
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
@@ -165,6 +184,21 @@ class AnthropicProvider(LLMProvider):
         if tool_calls:
             result["tool_calls"] = tool_calls
         return result
+
+    async def chat_stream(
+        self, messages: list[dict[str, str]], **kwargs
+    ):
+        system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        async with self._async_client.messages.stream(
+            model=self._model,
+            system=system,
+            messages=user_messages,  # type: ignore[arg-type]
+            **kwargs,
+        ) as stream:
+            async for event in stream:
+                if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
+                    yield event.delta.text
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         system, user_messages = self._split_messages(messages)

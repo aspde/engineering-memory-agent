@@ -175,14 +175,16 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
-    """Assemble context from retrieved results and produce the final answer.
+    """Assemble context from retrieved results and build the final prompt.
 
     Reads tool-call results from the conversation history (ToolMessages)
     rather than from discrete state fields, so every tool's output is
     automatically included regardless of which tool was called.
-    """
-    provider = get_llm_provider()
 
+    The LLM call is deferred to the API streaming layer so the response
+    can be streamed token-by-token to the client.  The assembled prompt
+    is stored in ``final_prompt``.
+    """
     # ── Harvest context from ToolMessages in conversation history ──
     context_parts: list[str] = []
     for m in state["messages"]:
@@ -222,19 +224,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
             continue  # skip tool_call-only AIMessages
         messages.append({"role": role, "content": content})
 
-    try:
-        response = await provider.chat(messages)
-    except Exception as exc:
-        logger.exception("LLM call failed in generate_final_node")
-        return {
-            "final_response": f"Sorry, I encountered an error: {exc}",
-            "error": str(exc),
-        }
-
-    return {
-        "final_response": response,
-        "messages": [AIMessage(content=response)],
-    }
+    return {"final_prompt": messages}
 
 
 # ── Tools requiring human approval before execution ────────────────────
