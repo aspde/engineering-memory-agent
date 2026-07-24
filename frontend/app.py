@@ -7,6 +7,7 @@ and conversation history in the sidebar.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 
 import httpx
@@ -27,6 +28,7 @@ def _init_session() -> None:
         "waiting_for_approval": False,
         "_stream_interrupt": None,  # internal: interrupt caught during streaming
         "_threads": None,  # cached list[ThreadInfo] from backend
+        "_threads_fetched_at": 0.0,  # timestamp of last fetch
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -296,20 +298,24 @@ def _render_sidebar() -> None:
         st.session_state["messages"] = []
         st.session_state["pending_interrupt"] = None
         st.session_state["waiting_for_approval"] = False
+        st.session_state["_threads_fetched_at"] = 0.0  # invalidate cache
         st.rerun()
 
     st.caption("**对话历史**")
 
-    # ── Thread list ──
-    try:
-        resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=10)
-        if resp.status_code == 200:
-            threads = resp.json()
-            st.session_state["_threads"] = threads
-        else:
-            threads = st.session_state.get("_threads") or []
-    except Exception:
-        threads = st.session_state.get("_threads") or []
+    # ── Thread list (cached — only refetch every 30 s or on explicit invalidate) ──
+    _THREAD_CACHE_TTL = 30.0
+    now = time.monotonic()
+    threads: list[dict] = st.session_state.get("_threads") or []
+    if now - st.session_state.get("_threads_fetched_at", 0.0) > _THREAD_CACHE_TTL:
+        try:
+            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=10)
+            if resp.status_code == 200:
+                threads = resp.json()
+                st.session_state["_threads"] = threads
+                st.session_state["_threads_fetched_at"] = now
+        except Exception:
+            pass  # keep whatever we already have
 
     if threads:
         for t in threads:
@@ -440,10 +446,13 @@ def main() -> None:
         "</style>"
         "<script>"
         "  (function moveWrap() {"
+        "    if (window._emaMoveWrapRan) return;"
         "    var main = document.querySelector('.stMain');"
         "    var wrap = document.getElementById('bottom-bar-wrap');"
         "    if (main && wrap && wrap.parentElement !== main) {"
         "      main.appendChild(wrap);"
+        "      window._emaMoveWrapRan = true;"
+        "      return;"
         "    }"
         "    requestAnimationFrame(moveWrap);"
         "  })();"
