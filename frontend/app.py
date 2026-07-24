@@ -411,7 +411,7 @@ def _handle_chat_input() -> None:
 
 
 def main() -> None:
-    st.set_page_config(page_title="EMA", page_icon="🧠", layout="wide")
+    st.set_page_config(page_title="EMA", page_icon="frontend/static/brain_favicon.png", layout="wide")
     _init_session()
 
     # ── Sidebar ──
@@ -452,7 +452,7 @@ def main() -> None:
             "  .stMainBlockContainer + div { display: none !important; }"
             "  .stMainBlockContainer { border-bottom: none !important; }"
             "  [data-testid='stChatInput'] {"
-            "    max-width: 680px !important;"
+            "    max-width: 720px !important;"
             "    margin: 0 auto !important; }"
             "</style>",
             unsafe_allow_html=True,
