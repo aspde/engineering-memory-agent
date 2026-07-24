@@ -1,7 +1,7 @@
 """EMA — Engineering Memory Agent — Streamlit MVP.
 
-Chat interface with Human-in-the-Loop approval, streaming responses,
-and conversation history in the sidebar.
+Entry point with shared state initialisation, sidebar, and multipage
+navigation via ``st.navigation``. Individual pages live in ``pages/``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,9 @@ import streamlit as st
 BACKEND_URL = "http://localhost:8000"
 
 
-# ── Session state initialisation ─────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Session state (shared across all pages)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def _init_session() -> None:
@@ -36,7 +38,9 @@ def _init_session() -> None:
             st.session_state[key] = value
 
 
-# ── Streaming helper ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Backend communication (shared across pages)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def _node_labels() -> dict[str, str]:
@@ -49,11 +53,7 @@ def _node_labels() -> dict[str, str]:
 
 
 def _stream_response(user_input: str = ""):
-    """Generator that yields tokens and status strings from the SSE stream.
-
-    If the agent pauses for human approval the interrupt payload is stored
-    in ``_stream_interrupt`` and the generator returns early.
-    """
+    """Generator that yields tokens and status strings from the SSE stream."""
     thread_id = st.session_state["thread_id"]
     payload: dict = {"message": user_input, "thread_id": thread_id}
 
@@ -101,7 +101,7 @@ def _stream_response(user_input: str = ""):
 
 
 def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) -> dict:
-    """Fallback non-streaming call for simple resume flows (approval / rejection)."""
+    """Fallback non-streaming call for simple resume flows."""
     thread_id = st.session_state["thread_id"]
     payload: dict = {"message": message, "thread_id": thread_id}
     if resume_data is not None:
@@ -126,7 +126,9 @@ def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) ->
         }
 
 
-# ── UI helpers ───────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# UI helpers (shared across pages)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def _render_message(msg: dict) -> None:
@@ -160,7 +162,6 @@ def _render_message(msg: dict) -> None:
 def _render_approval(interrupt: dict) -> None:
     """Render the approval or conflict-resolution card."""
     itype = interrupt.get("type", "")
-
     if itype == "conflict":
         _render_conflict_resolution(interrupt)
     else:
@@ -273,81 +274,13 @@ def _handle_approval(approved: bool) -> None:
     _resume(resume)
 
 
-# ── Sidebar: conversation history ───────────────────────────────────
-
-
-def _render_sidebar() -> None:
-    """Render the sidebar with conversation list and new-conversation button."""
-    st.html(
-        "<style>"
-        "[data-testid='stSidebarHeader'] { height: 36px !important; min-height: 36px !important; }"
-        "[data-testid='stSidebarCollapseButton'] { position: relative !important; top: 8px !important; }"
-        "[data-testid='stExpandSidebarButton'] { position: relative !important; top: 8px !important; }"
-        "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; }"
-        ".stSidebar h1 { padding-top: 0 !important; }"
-        ".stSidebar hr { margin-top: 0.5rem; }"
-        "</style>"
-    )
-    st.title("🧠 EMA")
-    st.caption("Engineering Memory Agent")
-
-    # ── New conversation button ──
-    if st.button("新建对话", use_container_width=True):
-        st.session_state["thread_id"] = str(uuid.uuid4())
-        st.session_state["messages"] = []
-        st.session_state["pending_interrupt"] = None
-        st.session_state["waiting_for_approval"] = False
-        st.session_state["_threads_fetched_at"] = 0.0  # invalidate cache
-        st.session_state["_loaded_thread_id"] = None
-        st.rerun()
-
-    st.caption("**对话历史**")
-
-    # ── Thread list (cached — only refetch every 30 s or on explicit invalidate) ──
-    _THREAD_CACHE_TTL = 30.0
-    now = time.monotonic()
-    threads: list[dict] = st.session_state.get("_threads") or []
-    if now - st.session_state.get("_threads_fetched_at", 0.0) > _THREAD_CACHE_TTL:
-        try:
-            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=5)
-            if resp.status_code == 200:
-                threads = resp.json()
-                st.session_state["_threads"] = threads
-                st.session_state["_threads_fetched_at"] = now
-        except Exception:
-            pass  # keep whatever we already have
-
-    if threads:
-        for t in threads:
-            tid = t["thread_id"]
-            title = t.get("title", tid[:8])
-            active = tid == st.session_state["thread_id"]
-            label = f"{'● ' if active else ''}{title}"
-            if st.button(
-                label,
-                key=f"thread_{tid}",
-                use_container_width=True,
-                disabled=active,
-            ):
-                st.session_state["thread_id"] = tid
-                st.session_state["messages"] = []
-                st.session_state["pending_interrupt"] = None
-                st.session_state["waiting_for_approval"] = False
-                st.rerun()
-    else:
-        st.caption("暂无历史对话")
-
-
-# ── Main UI ──────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Chat input handler (shared by new_chat + history_chat pages)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def _handle_chat_input() -> None:
-    """Handles a single chat turn without full-page rerun.
-
-    Uses ``st.fragment`` so Streamlit only re-renders this function's
-    container when changes happen inside it, leaving the sidebar and
-    message history above untouched.
-    """
+    """Handles a single chat turn without full-page rerun."""
     disabled = st.session_state["waiting_for_approval"]
     user_input = st.chat_input(
         "Ask EMA anything…" if not disabled else "Waiting for approval…",
@@ -363,8 +296,7 @@ def _handle_chat_input() -> None:
         "content": user_input.strip(),
     })
 
-    # Stream the response — st.write_stream handles the loading state
-    # by rendering each token as it arrives; no spinner needed.
+    # Stream the response
     with st.chat_message("assistant"):
         st.session_state["_stream_interrupt"] = None
         full_response = st.write_stream(
@@ -394,108 +326,94 @@ def _handle_chat_input() -> None:
             "_meta": {"tool_calls": [], "sources": []},
         })
 
-    # st.rerun is NOT needed — the fragment itself re-runs, and
-    # Streamlit reconciles the new messages into the history.
+
+# ═══════════════════════════════════════════════════════════════════════
+# Sidebar (shared across pages)
+# ═══════════════════════════════════════════════════════════════════════
+
+
+def _render_sidebar() -> None:
+    """Render the sidebar with conversation list and new-conversation button."""
+    st.html(
+        "<style>"
+        "[data-testid='stSidebarHeader'] { height: 36px !important; min-height: 36px !important; }"
+        "[data-testid='stSidebarCollapseButton'] { position: relative !important; top: 8px !important; }"
+        "[data-testid='stExpandSidebarButton'] { position: relative !important; top: 8px !important; }"
+        "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; }"
+        ".stSidebar h1 { padding-top: 0 !important; }"
+        ".stSidebar hr { margin-top: 0.5rem; }"
+        "</style>"
+    )
+    st.title("🧠 EMA")
+    st.caption("Engineering Memory Agent")
+
+    # ── New conversation button → switch to new_chat page ──
+    if st.button("新建对话", use_container_width=True, key="sb_new_conv"):
+        st.session_state["thread_id"] = str(uuid.uuid4())
+        st.session_state["messages"] = []
+        st.session_state["pending_interrupt"] = None
+        st.session_state["waiting_for_approval"] = False
+        st.session_state["_threads_fetched_at"] = 0.0
+        st.session_state["_loaded_thread_id"] = None
+        st.switch_page("pages/new_chat.py")
+
+    st.caption("**对话历史**")
+
+    # ── Thread list (cached — 30 s TTL) ──
+    _THREAD_CACHE_TTL = 30.0
+    now = time.monotonic()
+    threads: list[dict] = st.session_state.get("_threads") or []
+    if now - st.session_state.get("_threads_fetched_at", 0.0) > _THREAD_CACHE_TTL:
+        try:
+            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=5)
+            if resp.status_code == 200:
+                threads = resp.json()
+                st.session_state["_threads"] = threads
+                st.session_state["_threads_fetched_at"] = now
+        except Exception:
+            pass
+
+    if threads:
+        for t in threads:
+            tid = t["thread_id"]
+            title = t.get("title", tid[:8])
+            active = tid == st.session_state["thread_id"]
+            label = f"{'● ' if active else ''}{title}"
+            if st.button(
+                label,
+                key=f"thread_{tid}",
+                use_container_width=True,
+                disabled=active,
+            ):
+                st.session_state["thread_id"] = tid
+                st.session_state["messages"] = []
+                st.session_state["pending_interrupt"] = None
+                st.session_state["waiting_for_approval"] = False
+                st.switch_page("pages/history_chat.py")
+    else:
+        st.caption("暂无历史对话")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Entry point
+# ═══════════════════════════════════════════════════════════════════════
 
 
 def main() -> None:
     st.set_page_config(page_title="EMA", page_icon="frontend/static/brain_favicon.png", layout="wide")
     _init_session()
 
-    # ── Base layout CSS ──
-    st.markdown(
-        "<style>"
-        "  hr { display: none !important; }"
-        "  .stMainBlockContainer + div { display: none !important; }"
-        "  .stMainBlockContainer { border-bottom: none !important; }"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-    has_messages = bool(st.session_state.get("messages", []))
+    # ── Navigation ──
+    pages = [
+        st.Page("pages/new_chat.py", title="新建对话", icon=":material/add:"),
+        st.Page("pages/history_chat.py", title="历史对话", icon=":material/history:"),
+    ]
+    pg = st.navigation(pages, position="hidden")
+    pg.run()
 
-    # ── Input fragment definition ──
-    @st.fragment
-    def _chat_fragment() -> None:
-        _handle_chat_input()
-
-    # ── Message history (max 50 most recent to avoid slowdown with long threads) ──
-    _MAX_VISIBLE = 50
-    msgs: list[dict] = st.session_state.get("messages", [])
-
-    # ── Lazy-load messages on thread switch (placed AFTER layout so page
-    #     frame renders instantly; messages fill in on subsequent runs) ──
-    tid = st.session_state["thread_id"]
-    if st.session_state.get("_loaded_thread_id") != tid:
-        known_tids = {t["thread_id"] for t in (st.session_state.get("_threads") or [])}
-        if not known_tids or tid not in known_tids:
-            # New / unknown thread — no checkpoint exists, skip HTTP entirely.
-            st.session_state["messages"] = []
-            st.session_state["_loaded_thread_id"] = tid
-            msgs = []
-        else:
-            try:
-                r = httpx.get(f"{BACKEND_URL}/api/agent/thread/{tid}", timeout=5)
-                if r.status_code == 200:
-                    msgs = r.json().get("messages", [])
-                    st.session_state["messages"] = msgs
-                    st.session_state["_loaded_thread_id"] = tid
-            except Exception:
-                pass  # keep whatever we already have
-
-    visible = msgs[-_MAX_VISIBLE:]
-    has_messages = bool(msgs)
-
-    # ── Conditional CSS: pin input to bottom when messages exist ──
-    if has_messages:
-        st.markdown(
-            "<style>"
-            "  .stMainBlockContainer {"
-            "    padding-top: 0.5rem !important;"
-            "    padding-bottom: 100px !important; }"
-            "  [data-testid='stChatInput'] {"
-            "    position: fixed !important; bottom: 0.1rem !important;"
-            "    z-index: 100 !important;"
-            "    left: 50% !important; transform: translateX(-50%) !important;"
-            "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
-            "    background: var(--default-backgroundColor) !important;"
-            "    padding: 0.75rem 0 0.5rem 0 !important; }"
-            "</style>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            "<style>"
-            "  [data-testid='stChatInput'] {"
-            "    max-width: 720px !important;"
-            "    margin: 0 auto !important; }"
-            "</style>",
-            unsafe_allow_html=True,
-        )
-
-    # ── Title (only when no messages) ──
-    if not has_messages:
-        col1, col2, col3 = st.columns([0.5, 4, 0.5])
-        with col2:
-            st.markdown(
-                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
-                "EMA — Engineering Memory Agent</h1>",
-                unsafe_allow_html=True,
-            )
-
-    # ── Input area ──
-    _chat_fragment()
-
-    if len(msgs) > _MAX_VISIBLE:
-        st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
-    for msg in visible:
-        _render_message(msg)
-
-    # Render pending approval card (if agent is waiting)
-    if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
-        _render_approval(st.session_state["pending_interrupt"])
-
-    # ── Sidebar (rendered LAST so main content appears first) ──
+    # ── Sidebar (our custom sidebar, shown on all pages) ──
     with st.sidebar:
         _render_sidebar()
+
 
 main()
