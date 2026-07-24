@@ -342,6 +342,8 @@ def _render_sidebar() -> None:
         "[data-testid='stSidebarUserContent'] { padding-top: 0 !important; }"
         ".stSidebar h1 { padding-top: 0 !important; }"
         ".stSidebar hr { margin-top: 0.5rem; }"
+        "[data-testid='stToolbar'] { height: 36px !important; min-height: 36px !important; }"
+        "header[data-testid='stHeader'] { height: 36px !important; min-height: 36px !important; }"
         "</style>"
     )
     st.title("🧠 EMA")
