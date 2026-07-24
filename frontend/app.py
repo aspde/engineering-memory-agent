@@ -402,10 +402,6 @@ def main() -> None:
     st.set_page_config(page_title="EMA", page_icon="frontend/static/brain_favicon.png", layout="wide")
     _init_session()
 
-    # ── Sidebar ──
-    with st.sidebar:
-        _render_sidebar()
-
     # ── Base layout CSS (injected once inside main to avoid cache issues) ──
     st.markdown(
         "<style>"
@@ -441,6 +437,23 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
+    # ── Main area: title + input (rendered first for instant visibility) ──
+    if not has_messages:
+        col1, col2, col3 = st.columns([0.5, 4, 0.5])
+        with col2:
+            st.markdown(
+                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
+                "EMA — Engineering Memory Agent</h1>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Input area ──
+    @st.fragment
+    def _chat_fragment() -> None:
+        _handle_chat_input()
+
+    _chat_fragment()
+
     # ── Message history (max 50 most recent to avoid slowdown with long threads) ──
     _MAX_VISIBLE = 50
     msgs: list[dict] = st.session_state.get("messages", [])
@@ -475,25 +488,14 @@ def main() -> None:
     if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
         _render_approval(st.session_state["pending_interrupt"])
 
-    # ── Bottom bar (title + input) ──
+    # ── Sidebar (rendered LAST so main content appears first) ──
+    with st.sidebar:
+        _render_sidebar()
+
+    # ── Bottom-bar columns (only for messages layout, placed after sidebar) ──
     if has_messages:
-        col1, col2, col3 = st.columns([1, 3, 1])
-    else:
-        col1, col2, col3 = st.columns([0.5, 4, 0.5])
-    with col2:
-        if not has_messages:
-            st.markdown(
-                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
-                "EMA — Engineering Memory Agent</h1>",
-                unsafe_allow_html=True,
-            )
-
-    # ── Input area ──
-    @st.fragment
-    def _chat_fragment() -> None:
-        _handle_chat_input()
-
-    _chat_fragment()
+        # Adjust bottom spacing when messages exist
+        pass
 
 
 main()
