@@ -452,7 +452,7 @@ def main() -> None:
             "  .stMainBlockContainer + div { display: none !important; }"
             "  .stMainBlockContainer { border-bottom: none !important; }"
             "  [data-testid='stChatInput'] {"
-            "    max-width: 640px !important;"
+            "    max-width: 680px !important;"
             "    margin: 0 auto !important; }"
             "</style>",
             unsafe_allow_html=True,
