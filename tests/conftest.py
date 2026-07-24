@@ -17,6 +17,25 @@ os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 
+@pytest.fixture(autouse=True)
+def _noop_conversation_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent tests from writing to the ``conversations`` table.
+
+    The API tests use ``ASGITransport`` which exercises real route
+    handlers.  Without this fixture every ``POST /api/agent/chat``
+    would call ``_upsert_conversation()`` and pollute the production
+    database with test ``thread_id`` values.
+    """
+
+    async def _noop(*args: object, **kwargs: object) -> None:
+        pass
+
+    monkeypatch.setattr(
+        "backend.api.routes.agent_routes._upsert_conversation",
+        _noop,
+    )
+
+
 @pytest.fixture
 async def async_client() -> AsyncGenerator[AsyncClient]:
     """Create an async HTTP client for testing FastAPI endpoints.
