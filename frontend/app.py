@@ -421,44 +421,42 @@ def main() -> None:
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     # Layout strategy
     # ────────────────────────────────────────────────────────────────
-    # Streamlit renders EVERYTHING into .stMainBlockContainer.
-    # We wrap the bottom section in a container (#bottom-bar-wrap) and use
-    # JS to detach it from the scrollable block and append it outside,
-    # directly under .stMain, so it stays pinned at the bottom of the
-    # viewport while the messages above get overflow-y: auto.
+    # Chat input is pinned to the viewport bottom via position:fixed
+    # CSS. .stMainBlockContainer gets padding-bottom so messages
+    # don't get obscured behind the fixed input bar.
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
 
-    st.markdown(
-        "<style>"
-        "  .stMain { display: flex !important; flex-direction: column !important;"
-        "            min-height: 0 !important; }"
-        "  .stMainBlockContainer { flex: 1 1 auto !important; overflow-y: auto !important;"
-        "                          min-height: 0 !important; padding-bottom: 0 !important; }"
-        "  .stMainBlockContainer + div { display: none !important; }"
-        "  #bottom-bar-wrap { flex: 0 0 auto !important; padding: 0.75rem 1rem 1.5rem 1rem;"
-        "                     border: none !important; box-shadow: none !important;"
-        "                     background: transparent !important; }"
-        "  .stMainBlockContainer { border-bottom: none !important; }"
-        "  hr { display: none !important; }"
-        "  #bottom-bar-wrap, #bottom-bar-wrap * {"
-        "      background: transparent !important; border: none !important;"
-        "      box-shadow: none !important; outline: none !important; }"
-        "</style>"
-        "<script>"
-        "  (function moveWrap() {"
-        "    if (window._emaMoveWrapRan) return;"
-        "    var main = document.querySelector('.stMain');"
-        "    var wrap = document.getElementById('bottom-bar-wrap');"
-        "    if (main && wrap && wrap.parentElement !== main) {"
-        "      main.appendChild(wrap);"
-        "      window._emaMoveWrapRan = true;"
-        "      return;"
-        "    }"
-        "    requestAnimationFrame(moveWrap);"
-        "  })();"
-        "</script>",
-        unsafe_allow_html=True,
-    )
+    has_messages = bool(st.session_state.get("messages", []))
+
+    if has_messages:
+        st.markdown(
+            "<style>"
+            "  hr { display: none !important; }"
+            "  .stMainBlockContainer + div { display: none !important; }"
+            "  .stMainBlockContainer { border-bottom: none !important;"
+            "    padding-bottom: 120px !important; }"
+            "  [data-testid='stChatInput'] {"
+            "    position: fixed !important; bottom: 1.5rem !important;"
+            "    z-index: 100 !important;"
+            "    left: 50% !important; transform: translateX(-50%) !important;"
+            "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
+            "    background: var(--default-backgroundColor) !important;"
+            "    padding: 0.75rem 0 0.5rem 0 !important; }"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<style>"
+            "  hr { display: none !important; }"
+            "  .stMainBlockContainer + div { display: none !important; }"
+            "  .stMainBlockContainer { border-bottom: none !important; }"
+            "  [data-testid='stChatInput'] {"
+            "    max-width: 640px !important;"
+            "    margin: 0 auto !important; }"
+            "</style>",
+            unsafe_allow_html=True,
+        )
 
     # ── Message history ──
     for msg in st.session_state["messages"]:
@@ -468,12 +466,11 @@ def main() -> None:
     if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
         _render_approval(st.session_state["pending_interrupt"])
 
-    # ── Bottom bar ──
-    st.markdown('<div id="bottom-bar-wrap" style="background:transparent;border:none;">', unsafe_allow_html=True)
-
-    has_messages = len(st.session_state.get("messages", [])) > 0
-
-    col1, col2, col3 = st.columns([1, 3, 1])
+    # ── Bottom bar (title + input) ──
+    if has_messages:
+        col1, col2, col3 = st.columns([1, 3, 1])
+    else:
+        col1, col2, col3 = st.columns([0.5, 4, 0.5])
     with col2:
         if not has_messages:
             st.markdown(
@@ -488,8 +485,6 @@ def main() -> None:
         _handle_chat_input()
 
     _chat_fragment()
-
-    st.markdown('</div>', unsafe_allow_html=True)
 
 
 main()
