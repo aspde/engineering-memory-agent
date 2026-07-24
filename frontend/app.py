@@ -29,6 +29,7 @@ def _init_session() -> None:
         "_stream_interrupt": None,  # internal: interrupt caught during streaming
         "_threads": None,  # cached list[ThreadInfo] from backend
         "_threads_fetched_at": 0.0,  # timestamp of last fetch
+        "_loaded_thread_id": None,  # thread_id whose messages are in session
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -101,22 +102,20 @@ def _stream_response(user_input: str = ""):
 
 def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) -> dict:
     """Fallback non-streaming call for simple resume flows (approval / rejection)."""
-    import requests
-
     thread_id = st.session_state["thread_id"]
     payload: dict = {"message": message, "thread_id": thread_id}
     if resume_data is not None:
         payload["resume_data"] = resume_data
 
     try:
-        resp = requests.post(
+        resp = httpx.post(
             f"{BACKEND_URL}/api/agent/chat",
             json=payload,
             timeout=120,
         )
         resp.raise_for_status()
         return resp.json()
-    except requests.RequestException as exc:
+    except httpx.RequestError as exc:
         return {
             "thread_id": thread_id,
             "status": "error",
@@ -293,12 +292,13 @@ def _render_sidebar() -> None:
     st.caption("Engineering Memory Agent")
 
     # ── New conversation button ──
-    if st.button("🆕 新建对话", use_container_width=True):
+    if st.button("新建对话", use_container_width=True):
         st.session_state["thread_id"] = str(uuid.uuid4())
         st.session_state["messages"] = []
         st.session_state["pending_interrupt"] = None
         st.session_state["waiting_for_approval"] = False
         st.session_state["_threads_fetched_at"] = 0.0  # invalidate cache
+        st.session_state["_loaded_thread_id"] = None
         st.rerun()
 
     st.caption("**对话历史**")
@@ -309,7 +309,7 @@ def _render_sidebar() -> None:
     threads: list[dict] = st.session_state.get("_threads") or []
     if now - st.session_state.get("_threads_fetched_at", 0.0) > _THREAD_CACHE_TTL:
         try:
-            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=10)
+            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=5)
             if resp.status_code == 200:
                 threads = resp.json()
                 st.session_state["_threads"] = threads
@@ -333,18 +333,6 @@ def _render_sidebar() -> None:
                 st.session_state["messages"] = []
                 st.session_state["pending_interrupt"] = None
                 st.session_state["waiting_for_approval"] = False
-                # Load messages from checkpoint
-                try:
-                    import requests
-
-                    r = requests.get(
-                        f"{BACKEND_URL}/api/agent/thread/{tid}",
-                        timeout=10,
-                    )
-                    if r.status_code == 200:
-                        st.session_state["messages"] = r.json().get("messages", [])
-                except Exception:
-                    pass
                 st.rerun()
     else:
         st.caption("暂无历史对话")
@@ -418,6 +406,19 @@ def main() -> None:
     with st.sidebar:
         _render_sidebar()
 
+    # ── Lazy-load messages on thread switch ──
+    tid = st.session_state["thread_id"]
+    if st.session_state.get("_loaded_thread_id") != tid:
+        msgs: list[dict] = []
+        try:
+            r = httpx.get(f"{BACKEND_URL}/api/agent/thread/{tid}", timeout=5)
+            if r.status_code == 200:
+                msgs = r.json().get("messages", [])
+        except Exception:
+            pass
+        st.session_state["messages"] = msgs
+        st.session_state["_loaded_thread_id"] = tid
+
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
     # Layout strategy
     # ────────────────────────────────────────────────────────────────
@@ -426,14 +427,20 @@ def main() -> None:
     # don't get obscured behind the fixed input bar.
     # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
 
+    # ── Base layout CSS (injected once inside main to avoid cache issues) ──
+    st.markdown(
+        "<style>"
+        "  hr { display: none !important; }"
+        "  .stMainBlockContainer + div { display: none !important; }"
+        "  .stMainBlockContainer { border-bottom: none !important; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
     has_messages = bool(st.session_state.get("messages", []))
-
     if has_messages:
         st.markdown(
             "<style>"
-            "  hr { display: none !important; }"
-            "  .stMainBlockContainer + div { display: none !important; }"
-            "  .stMainBlockContainer { border-bottom: none !important;"
+            "  .stMainBlockContainer {"
             "    padding-bottom: 120px !important; }"
             "  [data-testid='stChatInput'] {"
             "    position: fixed !important; bottom: 1.5rem !important;"
@@ -448,9 +455,6 @@ def main() -> None:
     else:
         st.markdown(
             "<style>"
-            "  hr { display: none !important; }"
-            "  .stMainBlockContainer + div { display: none !important; }"
-            "  .stMainBlockContainer { border-bottom: none !important; }"
             "  [data-testid='stChatInput'] {"
             "    max-width: 720px !important;"
             "    margin: 0 auto !important; }"
@@ -458,8 +462,13 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    # ── Message history ──
-    for msg in st.session_state["messages"]:
+    # ── Message history (max 50 most recent to avoid slowdown with long threads) ──
+    _MAX_VISIBLE = 50
+    msgs: list[dict] = st.session_state.get("messages", [])
+    visible = msgs[-_MAX_VISIBLE:]
+    if len(msgs) > _MAX_VISIBLE:
+        st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
+    for msg in visible:
         _render_message(msg)
 
     # Render pending approval card (if agent is waiting)
