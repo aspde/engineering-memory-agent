@@ -406,27 +406,6 @@ def main() -> None:
     with st.sidebar:
         _render_sidebar()
 
-    # ── Lazy-load messages on thread switch ──
-    tid = st.session_state["thread_id"]
-    if st.session_state.get("_loaded_thread_id") != tid:
-        msgs: list[dict] = []
-        try:
-            r = httpx.get(f"{BACKEND_URL}/api/agent/thread/{tid}", timeout=5)
-            if r.status_code == 200:
-                msgs = r.json().get("messages", [])
-        except Exception:
-            pass
-        st.session_state["messages"] = msgs
-        st.session_state["_loaded_thread_id"] = tid
-
-    # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
-    # Layout strategy
-    # ────────────────────────────────────────────────────────────────
-    # Chat input is pinned to the viewport bottom via position:fixed
-    # CSS. .stMainBlockContainer gets padding-bottom so messages
-    # don't get obscured behind the fixed input bar.
-    # ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ── ──
-
     # ── Base layout CSS (injected once inside main to avoid cache issues) ──
     st.markdown(
         "<style>"
@@ -465,6 +444,27 @@ def main() -> None:
     # ── Message history (max 50 most recent to avoid slowdown with long threads) ──
     _MAX_VISIBLE = 50
     msgs: list[dict] = st.session_state.get("messages", [])
+
+    # ── Lazy-load messages on thread switch (placed AFTER layout so page
+    #     frame renders instantly; messages fill in on subsequent runs) ──
+    tid = st.session_state["thread_id"]
+    if st.session_state.get("_loaded_thread_id") != tid:
+        known_tids = {t["thread_id"] for t in (st.session_state.get("_threads") or [])}
+        if not known_tids or tid not in known_tids:
+            # New / unknown thread — no checkpoint exists, skip HTTP entirely.
+            st.session_state["messages"] = []
+            st.session_state["_loaded_thread_id"] = tid
+            msgs = []
+        else:
+            try:
+                r = httpx.get(f"{BACKEND_URL}/api/agent/thread/{tid}", timeout=5)
+                if r.status_code == 200:
+                    msgs = r.json().get("messages", [])
+                    st.session_state["messages"] = msgs
+                    st.session_state["_loaded_thread_id"] = tid
+            except Exception:
+                pass  # keep whatever we already have
+
     visible = msgs[-_MAX_VISIBLE:]
     if len(msgs) > _MAX_VISIBLE:
         st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
