@@ -492,10 +492,4 @@ def main() -> None:
     with st.sidebar:
         _render_sidebar()
 
-    # ── Bottom-bar columns (only for messages layout, placed after sidebar) ──
-    if has_messages:
-        # Adjust bottom spacing when messages exist
-        pass
-
-
 main()
