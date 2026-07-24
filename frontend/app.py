@@ -402,7 +402,7 @@ def main() -> None:
     st.set_page_config(page_title="EMA", page_icon="frontend/static/brain_favicon.png", layout="wide")
     _init_session()
 
-    # ── Base layout CSS (injected once inside main to avoid cache issues) ──
+    # ── Base layout CSS ──
     st.markdown(
         "<style>"
         "  hr { display: none !important; }"
@@ -412,47 +412,11 @@ def main() -> None:
         unsafe_allow_html=True,
     )
     has_messages = bool(st.session_state.get("messages", []))
-    if has_messages:
-        st.markdown(
-            "<style>"
-            "  .stMainBlockContainer {"
-            "    padding-bottom: 120px !important; }"
-            "  [data-testid='stChatInput'] {"
-            "    position: fixed !important; bottom: 1.5rem !important;"
-            "    z-index: 100 !important;"
-            "    left: 50% !important; transform: translateX(-50%) !important;"
-            "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
-            "    background: var(--default-backgroundColor) !important;"
-            "    padding: 0.75rem 0 0.5rem 0 !important; }"
-            "</style>",
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown(
-            "<style>"
-            "  [data-testid='stChatInput'] {"
-            "    max-width: 720px !important;"
-            "    margin: 0 auto !important; }"
-            "</style>",
-            unsafe_allow_html=True,
-        )
 
-    # ── Main area: title + input (rendered first for instant visibility) ──
-    if not has_messages:
-        col1, col2, col3 = st.columns([0.5, 4, 0.5])
-        with col2:
-            st.markdown(
-                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
-                "EMA — Engineering Memory Agent</h1>",
-                unsafe_allow_html=True,
-            )
-
-    # ── Input area ──
+    # ── Input fragment definition ──
     @st.fragment
     def _chat_fragment() -> None:
         _handle_chat_input()
-
-    _chat_fragment()
 
     # ── Message history (max 50 most recent to avoid slowdown with long threads) ──
     _MAX_VISIBLE = 50
@@ -479,6 +443,48 @@ def main() -> None:
                 pass  # keep whatever we already have
 
     visible = msgs[-_MAX_VISIBLE:]
+    has_messages = bool(msgs)
+
+    # ── Conditional CSS: pin input to bottom when messages exist ──
+    if has_messages:
+        st.markdown(
+            "<style>"
+            "  .stMainBlockContainer {"
+            "    padding-top: 0.5rem !important;"
+            "    padding-bottom: 100px !important; }"
+            "  [data-testid='stChatInput'] {"
+            "    position: fixed !important; bottom: 0.1rem !important;"
+            "    z-index: 100 !important;"
+            "    left: 50% !important; transform: translateX(-50%) !important;"
+            "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
+            "    background: var(--default-backgroundColor) !important;"
+            "    padding: 0.75rem 0 0.5rem 0 !important; }"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<style>"
+            "  [data-testid='stChatInput'] {"
+            "    max-width: 720px !important;"
+            "    margin: 0 auto !important; }"
+            "</style>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Title (only when no messages) ──
+    if not has_messages:
+        col1, col2, col3 = st.columns([0.5, 4, 0.5])
+        with col2:
+            st.markdown(
+                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
+                "EMA — Engineering Memory Agent</h1>",
+                unsafe_allow_html=True,
+            )
+
+    # ── Input area ──
+    _chat_fragment()
+
     if len(msgs) > _MAX_VISIBLE:
         st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
     for msg in visible:
