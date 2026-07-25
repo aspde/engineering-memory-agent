@@ -44,6 +44,7 @@ def _init_session() -> None:
         "pending_interrupt": None,  # dict or None
         "waiting_for_approval": False,
         "_stream_interrupt": None,  # internal: interrupt caught during streaming
+        "_stream_meta": None,  # internal: tool_calls/sources from streaming
         "_threads": None,  # cached list[ThreadInfo] from backend
         "_threads_fetched_at": 0.0,  # timestamp of last fetch
         "_loaded_thread_id": None,  # thread_id whose messages are in session
@@ -108,6 +109,12 @@ def _stream_response(user_input: str = ""):
                     st.session_state["_stream_interrupt"] = event["data"]
                     return
 
+                elif etype == "meta":
+                    st.session_state["_stream_meta"] = {
+                        "tool_calls": event.get("tool_calls", []),
+                        "sources": event.get("sources", []),
+                    }
+
                 elif etype == "error":
                     yield f"\n\n*错误: {event.get('message', 'unknown')}*"
 
@@ -131,7 +138,7 @@ def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) ->
         )
         resp.raise_for_status()
         return resp.json()
-    except httpx.RequestError as exc:
+    except (httpx.RequestError, httpx.HTTPStatusError) as exc:
         return {
             "thread_id": thread_id,
             "status": "error",
@@ -426,7 +433,7 @@ def _perform_stream(user_input: str) -> None:
         st.session_state["messages"].append({
             "role": "assistant",
             "content": full_response or "(no response)",
-            "_meta": {"tool_calls": [], "sources": []},
+            "_meta": st.session_state.pop("_stream_meta", None) or {"tool_calls": [], "sources": []},
         })
 
     # Remember that this thread's messages are loaded so chat won't re-fetch

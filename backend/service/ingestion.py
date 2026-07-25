@@ -157,11 +157,16 @@ def _format_diff(repo: pygit2.Repository, commit: pygit2.Commit) -> str:
                 lines.append(line.content.rstrip("\n"))
 
     full = "\n".join(lines)
-    if len(full.encode("utf-8")) <= _MAX_DIFF_BYTES:
+    full_bytes = full.encode("utf-8")
+    if len(full_bytes) <= _MAX_DIFF_BYTES:
         return full
 
-    half = _MAX_DIFF_BYTES // 2
-    return full[:half] + "\n... (truncated)\n" + full[-half:]
+    # Truncate by bytes, not characters, to respect _MAX_DIFF_BYTES
+    ellipsis = b"\n... (truncated)\n"
+    half = (_MAX_DIFF_BYTES - len(ellipsis)) // 2
+    head = full_bytes[:half]
+    tail = full_bytes[-half:]
+    return head.decode("utf-8", errors="replace") + ellipsis.decode() + tail.decode("utf-8", errors="replace")
 
 
 def _get_diff(repo: pygit2.Repository, commit: pygit2.Commit):

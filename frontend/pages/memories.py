@@ -121,6 +121,84 @@ def main() -> None:
         st.caption("无法加载统计数据，请确认后端服务已启动。")
 
     st.divider()
+
+    # ── Ingest section ──
+    with st.expander("📥 摄入文档", expanded=False):
+        tab1, tab2 = st.tabs(["粘贴文本", "上传文件"])
+
+        with tab1:
+            ingest_text = st.text_area(
+                "文本内容", placeholder="粘贴要摄入的文档、代码或任意文本…",
+                height=180, key="ingest_text_area",
+                label_visibility="collapsed",
+            )
+            ingest_name = st.text_input(
+                "文档名称", placeholder="用于标识这段内容（如 README、app.py）",
+                key="ingest_text_name", label_visibility="collapsed",
+            )
+            if st.button("摄入文本", key="ingest_text_btn", use_container_width=True,
+                         disabled=not (ingest_text.strip() and ingest_name.strip())):
+                with st.spinner("正在分块、嵌入、入库…"):
+                    try:
+                        client = _get_client()
+                        r = client.post(
+                            "/api/memory/ingest",
+                            json={
+                                "document_id": ingest_name.strip(),
+                                "content": ingest_text,
+                            },
+                            timeout=60,
+                        )
+                        if r.status_code == 200:
+                            data = r.json()
+                            st.toast(f"✅ 已摄入：{data['chunks_written']} 个块", icon="✅")
+                            _fetch_stats.clear()
+                        else:
+                            st.toast(f"摄入失败 ({r.status_code})", icon="❌")
+                    except Exception as exc:
+                        st.toast(f"摄入失败: {exc}", icon="❌")
+
+        with tab2:
+            uploaded = st.file_uploader(
+                "选择文件", type=["txt", "md", "py", "js", "ts", "json", "yaml", "yml",
+                                     "toml", "cfg", "ini", "sql", "html", "css", "sh",
+                                     "java", "go", "rs", "c", "cpp", "h", "rb", "php"],
+                key="ingest_file_uploader", label_visibility="collapsed",
+            )
+            if uploaded is not None:
+                st.caption(f"已选择: `{uploaded.name}` ({uploaded.size:,} bytes)")
+                if st.button("摄入文件", key="ingest_file_btn", use_container_width=True):
+                    with st.spinner("正在分块、嵌入、入库…"):
+                        try:
+                            raw = uploaded.read()
+                            content = raw.decode("utf-8")
+                        except UnicodeDecodeError:
+                            try:
+                                content = raw.decode("latin-1")
+                            except Exception:
+                                st.toast("无法解码文件内容，请使用 UTF-8 编码的文本文件", icon="❌")
+                                content = None
+                        if content:
+                            try:
+                                client = _get_client()
+                                r = client.post(
+                                    "/api/memory/ingest",
+                                    json={
+                                        "document_id": uploaded.name,
+                                        "content": content,
+                                    },
+                                    timeout=120,
+                                )
+                                if r.status_code == 200:
+                                    data = r.json()
+                                    st.toast(f"✅ 已摄入: {uploaded.name} → {data['chunks_written']} 个块", icon="✅")
+                                    _fetch_stats.clear()
+                                else:
+                                    st.toast(f"摄入失败 ({r.status_code})", icon="❌")
+                            except Exception as exc:
+                                st.toast(f"摄入失败: {exc}", icon="❌")
+
+    st.divider()
     st.caption("**搜索记忆**")
 
     # ── Search bar ──
@@ -139,30 +217,30 @@ def main() -> None:
 
     if st.button("🔍 搜索", use_container_width=True, key="mem_search_btn_main"):
         if not query.strip():
-            query = ""
-
-        with st.spinner("搜索中…"):
-            try:
-                client = _get_client()
-                resp = client.post(
-                    "/api/memory/memories/search",
-                    json={"query": query.strip() or "*", "top_k": top_k},
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    results = resp.json().get("results", [])
-                else:
-                    results = []
-            except Exception as exc:
-                st.error(f"搜索失败: {exc}")
-                results = []
-
-        if not results:
-            st.info("没有找到匹配的记忆。尝试换个关键词，或者在聊天中让 EMA 记录一些内容。")
+            st.info("请输入搜索关键词。")
         else:
-            st.caption(f"找到 {len(results)} 条记忆")
-            for mem in results:
-                _render_memory_card(mem)
+            with st.spinner("搜索中…"):
+                try:
+                    client = _get_client()
+                    resp = client.post(
+                        "/api/memory/memories/search",
+                        json={"query": query.strip(), "top_k": top_k},
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        results = resp.json().get("results", [])
+                    else:
+                        results = []
+                except Exception as exc:
+                    st.error(f"搜索失败: {exc}")
+                    results = []
+
+            if not results:
+                st.info("没有找到匹配的记忆。尝试换个关键词，或者在聊天中让 EMA 记录一些内容。")
+            else:
+                st.caption(f"找到 {len(results)} 条记忆")
+                for mem in results:
+                    _render_memory_card(mem)
 
 
 main()

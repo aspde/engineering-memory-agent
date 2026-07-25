@@ -63,6 +63,10 @@ def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
                 json_schema = t.args_schema.model_json_schema()
                 schema["function"]["parameters"] = json_schema
             except Exception:
+                logger.warning(
+                    "Failed to serialize tool schema for %s, falling back to empty parameters",
+                    t.name,
+                )
                 schema["function"]["parameters"] = {"type": "object", "properties": {}}
         else:
             schema["function"]["parameters"] = {"type": "object", "properties": {}}
@@ -222,21 +226,20 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
 
     context_str = "\n\n".join(context_parts) if context_parts else ""
 
-    # Build the final prompt
-    messages: list[dict[str, str]] = [
-        {
-            "role": "system",
-            "content": (
-                "You are EMA, the Engineering Memory Agent. "
-                "Answer the user's question based on the conversation "
-                "and any retrieved context provided below. "
-                "Be concise and cite sources when available."
-            ),
-        },
-    ]
-
+    # Build the final prompt — single system message (Anthropic only
+    # accepts one top-level system param, so context is folded in).
+    system_content = (
+        "You are EMA, the Engineering Memory Agent. "
+        "Answer the user's question based on the conversation "
+        "and any retrieved context provided below. "
+        "Be concise and cite sources when available."
+    )
     if context_str:
-        messages.append({"role": "system", "content": f"Context:\n{context_str}"})
+        system_content += f"\n\nContext:\n{context_str}"
+
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": system_content},
+    ]
 
     # Include the conversation history (skip tool & system messages)
     for m in state["messages"]:
@@ -289,7 +292,14 @@ async def check_approval_node(
             break
 
     if last_ai is None:
-        return Command(goto="call_llm")
+        logger.warning(
+            "tools_condition matched but no AIMessage with tool_calls found — "
+            "injecting empty assistant message to break potential loop"
+        )
+        return Command(
+            goto="call_llm",
+            update={"messages": [AIMessage(content="(internal: no tool calls to process)")]},
+        )
 
     tool_calls = last_ai.tool_calls
 
@@ -358,8 +368,8 @@ async def check_approval_node(
     reason = decision.get("reason", "Tool call was rejected by the user.")
     rejection_msgs: list[ToolMessage] = []
     for call in sensitive + safe:
-        cid = str(call.get("id", ""))
-        tname = str(call.get("name", ""))
+        cid = str(call.get("id", call.get("function", {}).get("id", "")))
+        tname = str(call.get("name", call.get("function", {}).get("name", "")))
         if call in sensitive:
             # Check if this specific call was rejected in batch mode
             call_rejected = True
@@ -377,7 +387,9 @@ async def check_approval_node(
             ToolMessage(content=content, tool_call_id=cid, name=tname)
         )
 
-    logger.info("Tool %s rejected: %s", tool_name, reason)
+    # Log with names from calls_payload (always available, regardless of path)
+    rejected_names = ", ".join(c["tool_name"] for c in calls_payload)
+    logger.info("Tool(s) rejected [%s]: %s", rejected_names, reason)
     return Command(
         goto="call_llm",
         update={

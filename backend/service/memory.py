@@ -164,6 +164,18 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
 
     session_factory = get_session_factory()
     async with session_factory() as session:
+        # Merge metadata — new keys overwrite existing, preserving old keys
+        existing_meta: dict[str, Any] = {}
+        if existing.get("meta"):
+            if isinstance(existing["meta"], str):
+                try:
+                    existing_meta = json.loads(existing["meta"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            elif isinstance(existing["meta"], dict):
+                existing_meta = existing["meta"]
+        merged_meta = existing_meta | (metadata or {})
+
         await session.execute(
             text(
                 """\
@@ -182,7 +194,7 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
                 "entities": json.dumps(merged_entities, ensure_ascii=False),
                 "relations": json.dumps(merged_relations, ensure_ascii=False),
                 "embedding": str(embedding),
-                "meta": json.dumps(metadata or {}),
+                "meta": json.dumps(merged_meta),
             },
         )
         await session.commit()

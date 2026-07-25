@@ -323,6 +323,18 @@ async def agent_chat_stream(req: ChatRequest):
                             async for sse_line in _stream_final_answer(agent, config, final_prompt):
                                 yield sse_line
 
+            # Send tool traces fetched from the final graph state
+            try:
+                final_state = await agent.aget_state(config)
+                if final_state and final_state.values:
+                    tool_traces, sources = _extract_tool_traces(
+                        final_state.values.get("messages", [])
+                    )
+                    if tool_traces or sources:
+                        yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources}, ensure_ascii=False)}\n\n"
+            except Exception:
+                pass
+
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as exc:
