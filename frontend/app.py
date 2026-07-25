@@ -373,6 +373,9 @@ def _render_sidebar() -> None:
         st.session_state["_loaded_thread_id"] = None
         st.switch_page("pages/new_chat.py")
 
+    if st.button("📚 记忆库", use_container_width=True, key="sb_memories"):
+        st.switch_page("pages/memories.py")
+
     st.caption("**对话历史**")
 
     # ── Thread list (cached — 30 s TTL) ──
@@ -424,6 +427,7 @@ def main() -> None:
     pages = [
         st.Page("pages/new_chat.py", title="新建对话", icon=":material/add:"),
         st.Page("pages/history_chat.py", title="历史对话", icon=":material/history:"),
+        st.Page("pages/memories.py", title="记忆库", icon=":material/book:"),
     ]
     pg = st.navigation(pages, position="hidden")
     pg.run()

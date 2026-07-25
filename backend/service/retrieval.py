@@ -168,6 +168,8 @@ async def retrieve(
         query, [c["content"] for c in candidates], top_k=top_k
     )
 
+    _RERANK_FLOOR = 0.15
+
     return [
         RetrievalResult(
             content=candidates[idx]["content"],
@@ -175,6 +177,7 @@ async def retrieve(
             metadata=candidates[idx].get("meta") or {},
         )
         for idx, score in ranked
+        if score >= _RERANK_FLOOR
     ]
 
 
@@ -182,7 +185,7 @@ async def query_memories(
     query: str,
     top_k: int = 5,
     *,
-    threshold: float = 0.0,
+    threshold: float = 0.3,
     use_llm_rerank: bool = False,
 ) -> list[dict]:
     """Search memories with decay-weighted ranking.
@@ -207,10 +210,16 @@ async def query_memories(
     )
 
     # Re-attach full memory rows in ranked order, and update decay
+    # Drop results where the reranker score is below the minimum threshold —
+    # this prevents irrelevant results from appearing when no real match exists.
     from backend.service.decay import update_decay
+
+    _RERANK_FLOOR = 0.15
 
     result: list[dict] = []
     for idx, score in ranked:
+        if score < _RERANK_FLOOR:
+            continue
         memory_id = str(candidates[idx]["id"])
         new_decay = await update_decay(memory_id)
         entry = {**candidates[idx], "rerank_score": score, "decay_factor": new_decay}
