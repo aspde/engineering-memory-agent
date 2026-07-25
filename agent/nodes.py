@@ -37,7 +37,11 @@ When the user asks a question:
 3. Answer clearly with references to sources when available
 
 When the user asks to ingest or index content, use the appropriate tools.
-Always prefer searching over guessing."""
+Always prefer searching over guessing.
+
+Always respond in Chinese (简体中文). All your answers, explanations,
+and tool interactions should use Chinese unless the user explicitly
+requests another language."""
 
 
 # ── Helper: message conversion ───────────────────────────────────────
