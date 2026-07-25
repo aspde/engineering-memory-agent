@@ -303,49 +303,70 @@ async def check_approval_node(
     if not sensitive:
         return Command(goto="tools")
 
-    # Build the approval payload for the first sensitive call
-    # (LLM typically emits one tool_call per turn; if multiple, pause on the first)
-    call = sensitive[0]
-    tool_name = str(call.get("name", call.get("function", {}).get("name", "unknown")))
-    tool_args = call.get("args", call.get("function", {}).get("args", {}))
-    if isinstance(tool_args, str):
-        try:
-            tool_args = json.loads(tool_args)
-        except json.JSONDecodeError:
-            tool_args = {"raw": tool_args}
+    # Build approval payloads for all sensitive calls
+    calls_payload: list[dict[str, Any]] = []
+    for call in sensitive:
+        tname = str(call.get("name", call.get("function", {}).get("name", "unknown")))
+        targs = call.get("args", call.get("function", {}).get("args", {}))
+        if isinstance(targs, str):
+            try:
+                targs = json.loads(targs)
+            except json.JSONDecodeError:
+                targs = {"raw": targs}
 
-    payload: dict[str, Any] = {
-        "tool_name": tool_name,
-        "tool_args": tool_args,
-    }
+        entry: dict[str, Any] = {
+            "tool_name": tname,
+            "tool_args": targs,
+        }
+        if tname == "write_memory_tool":
+            entry["summary"] = str(targs.get("content", ""))[:200]
+        elif tname == "ingest_git_repo_tool":
+            entry["summary"] = f"Repo: {targs.get('repo_path', '?')}"
+        elif tname == "ingest_document_tool":
+            entry["summary"] = f"Doc: {targs.get('document_id', '?')}"
 
-    # Build a human-readable summary
-    if tool_name == "write_memory_tool":
-        payload["summary"] = str(tool_args.get("content", ""))[:200]
-    elif tool_name == "ingest_git_repo_tool":
-        payload["summary"] = f"Repo: {tool_args.get('repo_path', '?')}"
-    elif tool_name == "ingest_document_tool":
-        payload["summary"] = f"Doc: {tool_args.get('document_id', '?')}"
+        calls_payload.append(entry)
 
-    logger.info("Requesting human approval for %s", tool_name)
+    if len(calls_payload) == 1:
+        payload: dict[str, Any] = dict(calls_payload[0])
+    else:
+        payload = {"type": "batch", "calls": calls_payload}
+
+    logger.info("Requesting human approval for %d tool(s)", len(calls_payload))
 
     # Pause and wait for human decision
     decision: dict[str, Any] = interrupt(payload)
 
-    if decision.get("approved") is True:
-        logger.info("Tool %s approved, executing", tool_name)
+    if len(calls_payload) == 1:
+        approved = decision.get("approved") is True
+    else:
+        # Batch mode: check if ALL calls were approved
+        batch_decisions = decision.get("calls", [])
+        approved = bool(batch_decisions) and all(
+            d.get("approved") is True for d in batch_decisions
+        )
+
+    if approved:
+        logger.info("All %d tool(s) approved, executing", len(calls_payload))
         return Command(goto="tools", update={"pending_approval": None})
 
-    # Rejected — inject a ToolMessage for every tool_call in this turn
-    # (both safe and sensitive) so the LLM API doesn't reject the request
-    # with "insufficient tool messages following tool_calls message".
+    # Some or all rejected — inject a ToolMessage for every tool_call in this turn
     reason = decision.get("reason", "Tool call was rejected by the user.")
     rejection_msgs: list[ToolMessage] = []
     for call in sensitive + safe:
         cid = str(call.get("id", ""))
         tname = str(call.get("name", ""))
         if call in sensitive:
-            content = f"[REJECTED] {reason}"
+            # Check if this specific call was rejected in batch mode
+            call_rejected = True
+            if len(calls_payload) > 1 and "calls" in decision:
+                batch_decisions = decision["calls"]
+                call_name = str(call.get("name", call.get("function", {}).get("name", "")))
+                for bd in batch_decisions:
+                    if bd.get("tool_name") == call_name:
+                        call_rejected = bd.get("approved") is not True
+                        break
+            content = f"[REJECTED] {reason}" if call_rejected else "[APPROVED]"
         else:
             content = f"[CANCELLED] A related write operation was rejected by the user."
         rejection_msgs.append(
