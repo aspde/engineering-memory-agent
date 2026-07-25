@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import httpx
 import streamlit as st
 
 from frontend.app import (
+    _get_client,
     _handle_chat_input,
     _render_approval,
     _render_message,
 )
-
-BACKEND_URL = "http://localhost:8000"
 
 # ── CSS: input fixed to bottom ──
 st.markdown(
@@ -45,7 +43,7 @@ if st.session_state.get("_loaded_thread_id") != tid:
         msgs = []
     else:
         try:
-            r = httpx.get(f"{BACKEND_URL}/api/agent/thread/{tid}", timeout=5)
+            r = _get_client().get(f"/api/agent/thread/{tid}", timeout=5)
             if r.status_code == 200:
                 msgs = r.json().get("messages", [])
                 st.session_state["messages"] = msgs

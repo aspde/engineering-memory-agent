@@ -16,6 +16,21 @@ import streamlit as st
 BACKEND_URL = "http://localhost:8000"
 
 
+@st.cache_resource
+def _get_client() -> httpx.Client:
+    """Return a shared httpx.Client with connection pooling.
+
+    Cached via ``@st.cache_resource`` so TCP connections are reused
+    across Streamlit reruns instead of paying a ~200ms handshake on
+    every request.
+    """
+    return httpx.Client(
+        base_url=BACKEND_URL,
+        timeout=httpx.Timeout(300, connect=10),
+        limits=httpx.Limits(max_keepalive_connections=5, max_connections=20),
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # Session state (shared across all pages)
 # ═══════════════════════════════════════════════════════════════════════
@@ -58,11 +73,11 @@ def _stream_response(user_input: str = ""):
     payload: dict = {"message": user_input, "thread_id": thread_id}
 
     try:
-        with httpx.stream(
+        client = _get_client()
+        with client.stream(
             "POST",
-            f"{BACKEND_URL}/api/agent/chat/stream",
+            "/api/agent/chat/stream",
             json=payload,
-            timeout=300,
         ) as resp:
             if resp.status_code != 200:
                 yield f"*后端错误 ({resp.status_code})*"
@@ -108,8 +123,9 @@ def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) ->
         payload["resume_data"] = resume_data
 
     try:
-        resp = httpx.post(
-            f"{BACKEND_URL}/api/agent/chat",
+        client = _get_client()
+        resp = client.post(
+            "/api/agent/chat",
             json=payload,
             timeout=120,
         )
@@ -211,9 +227,7 @@ def _render_conflict_resolution(interrupt: dict) -> None:
             st.markdown("**Existing memory**")
             st.warning(existing_summary or "(empty)")
 
-        # ── Conflict card divider ──
-    if False:
-        st.divider()  # kept for reference, removed from rendering
+        st.divider()
 
         cols = st.columns(4)
         with cols[0]:
@@ -367,7 +381,8 @@ def _render_sidebar() -> None:
     threads: list[dict] = st.session_state.get("_threads") or []
     if now - st.session_state.get("_threads_fetched_at", 0.0) > _THREAD_CACHE_TTL:
         try:
-            resp = httpx.get(f"{BACKEND_URL}/api/agent/threads", timeout=5)
+            client = _get_client()
+            resp = client.get("/api/agent/threads", timeout=5)
             if resp.status_code == 200:
                 threads = resp.json()
                 st.session_state["_threads"] = threads
