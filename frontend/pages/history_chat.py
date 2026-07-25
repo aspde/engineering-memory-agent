@@ -11,7 +11,7 @@ from frontend.app import (
     _render_message,
 )
 
-# ── CSS: input fixed to bottom ──
+# ── CSS: input fixed to bottom, user messages right-aligned ──
 st.markdown(
     "<style>"
     "  hr { display: none !important; }"
@@ -26,6 +26,14 @@ st.markdown(
     "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
     "    background: var(--default-backgroundColor) !important;"
     "    padding: 0.75rem 0 0.5rem 0 !important; }"
+    "  /* Right-align user messages */"
+    "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) {"
+    "    flex-direction: row-reverse !important; }"
+    "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) "
+    "  .stMarkdown,"
+    "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) "
+    "  [data-testid='stMarkdownContainer'] {"
+    "    text-align: right !important; }"
     "</style>",
     unsafe_allow_html=True,
 )
