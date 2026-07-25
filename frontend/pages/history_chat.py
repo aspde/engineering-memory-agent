@@ -81,20 +81,22 @@ if st.session_state.get("_loaded_thread_id") != tid:
         except Exception:
             pass
 
-# ── Chat input ──
+# ── Chat area: messages + approval + input (single fragment) ──
+# All three share one @st.fragment so that st.write_stream()
+# renders after message history instead of at the fragment's
+# declaration site (which would place tokens at the top of the page).
 @st.fragment
 def _chat_fragment() -> None:
+    msgs: list[dict] = st.session_state.get("messages", [])
+    visible = msgs[-_MAX_VISIBLE:]
+    if len(msgs) > _MAX_VISIBLE:
+        st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
+    for msg in visible:
+        _render_message(msg)
+
+    if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
+        _render_approval(st.session_state["pending_interrupt"])
+
     _handle_chat_input()
 
 _chat_fragment()
-
-# ── Messages ──
-visible = msgs[-_MAX_VISIBLE:]
-if len(msgs) > _MAX_VISIBLE:
-    st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
-for msg in visible:
-    _render_message(msg)
-
-# ── Pending approval ──
-if st.session_state["waiting_for_approval"] and st.session_state["pending_interrupt"]:
-    _render_approval(st.session_state["pending_interrupt"])
