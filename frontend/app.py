@@ -16,7 +16,7 @@ import streamlit as st
 BACKEND_URL = "http://localhost:8000"
 
 
-@st.cache_resource
+@st.cache_resource(show_spinner=False)
 def _get_client() -> httpx.Client:
     """Return a shared httpx.Client with connection pooling.
 
