@@ -55,7 +55,7 @@ st.components.v1.html(
     "    lastL=nl;lastW=nw;"
     "    c.style.left=nl;c.style.width=nw;"
     "  }"
-    "},16);"
+    "},8);"
     "</script>",
     height=1,
 )
