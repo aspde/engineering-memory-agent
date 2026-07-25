@@ -6,7 +6,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from backend.db import get_session_factory
 from backend.service.chunk import chunk_text
 from backend.service.memory import write_memory
 from backend.service.retrieval import query_memories, retrieve, write_chunks
@@ -64,6 +66,18 @@ class MemorySearchRequest(BaseModel):
 
 class MemorySearchResponse(BaseModel):
     results: list[dict[str, Any]]
+
+
+class MemoryStatsResponse(BaseModel):
+    total_memories: int
+    total_chunks: int
+    total_conversations: int
+    by_source_type: list[dict[str, Any]]
+    avg_decay_factor: float
+    avg_entities_per_memory: float
+    avg_relations_per_memory: float
+    recent_count_7d: int
+    top_entities: list[dict[str, Any]]
 
 
 # ── Routes ─────────────────────────────────────────────────────────
@@ -151,3 +165,83 @@ async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
         clean.append(entry)
 
     return MemorySearchResponse(results=clean)
+
+
+@router.get("/stats", response_model=MemoryStatsResponse)
+async def memory_stats() -> MemoryStatsResponse:
+    """Return aggregate statistics about the memory store.
+
+    Used by the frontend dashboard to show total counts, source
+    distribution, decay health, and frequently mentioned entities.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        # ── Core counts ──
+        r = await session.execute(text("SELECT COUNT(*) FROM memories"))
+        total_memories = r.fetchone()[0]
+
+        r = await session.execute(text("SELECT COUNT(*) FROM chunks"))
+        total_chunks = r.fetchone()[0]
+
+        r = await session.execute(text("SELECT COUNT(*) FROM conversations"))
+        total_conversations = r.fetchone()[0]
+
+        # ── Source type distribution ──
+        r = await session.execute(text(
+            "SELECT source_type, COUNT(*) AS cnt FROM memories "
+            "GROUP BY source_type ORDER BY cnt DESC"
+        ))
+        by_source_type = [{"source_type": row[0], "count": row[1]} for row in r.fetchall()]
+
+        # ── Decay & entity/relation averages
+        #     jsonb_array_length returns NULL, not 0, for non-array / NULL columns.
+        r = await session.execute(text(
+            "SELECT COALESCE(AVG(decay_factor), 0) FROM memories"
+        ))
+        avg_decay_factor = round(float(r.fetchone()[0]), 4)
+
+        r = await session.execute(text(
+            "SELECT COALESCE(AVG("
+            "  CASE WHEN jsonb_typeof(entities) = 'array' "
+            "       THEN jsonb_array_length(entities) ELSE 0 END"
+            "), 0) FROM memories"
+        ))
+        avg_entities_per_memory = round(float(r.fetchone()[0]), 2)
+
+        r = await session.execute(text(
+            "SELECT COALESCE(AVG("
+            "  CASE WHEN jsonb_typeof(relations) = 'array' "
+            "       THEN jsonb_array_length(relations) ELSE 0 END"
+            "), 0) FROM memories"
+        ))
+        avg_relations_per_memory = round(float(r.fetchone()[0]), 2)
+
+        # ── Recent 7-day count ──
+        r = await session.execute(text(
+            "SELECT COUNT(*) FROM memories "
+            "WHERE created_at >= NOW() - INTERVAL '7 days'"
+        ))
+        recent_count_7d = r.fetchone()[0]
+
+        # ── Top 10 entities (skip null / non-array rows defensively) ──
+        r = await session.execute(text(
+            "SELECT e->>'name' AS name, COUNT(*) AS cnt "
+            "FROM memories, jsonb_array_elements(entities) AS e "
+            "WHERE entities IS NOT NULL "
+            "  AND jsonb_typeof(entities) = 'array' "
+            "  AND e->>'name' IS NOT NULL "
+            "GROUP BY e->>'name' ORDER BY cnt DESC LIMIT 10"
+        ))
+        top_entities = [{"name": row[0], "count": row[1]} for row in r.fetchall()]
+
+    return MemoryStatsResponse(
+        total_memories=total_memories,
+        total_chunks=total_chunks,
+        total_conversations=total_conversations,
+        by_source_type=by_source_type,
+        avg_decay_factor=avg_decay_factor,
+        avg_entities_per_memory=avg_entities_per_memory,
+        avg_relations_per_memory=avg_relations_per_memory,
+        recent_count_7d=recent_count_7d,
+        top_entities=top_entities,
+    )
