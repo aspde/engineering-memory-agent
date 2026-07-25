@@ -17,20 +17,16 @@ msgs: list[dict] = st.session_state.get("messages", [])
 # ── Lazy-load messages on thread switch ──
 tid = st.session_state["thread_id"]
 if st.session_state.get("_loaded_thread_id") != tid:
-    known_tids = {t["thread_id"] for t in (st.session_state.get("_threads") or [])}
-    if not known_tids or tid not in known_tids:
-        st.session_state["messages"] = []
-        st.session_state["_loaded_thread_id"] = tid
-        msgs = []
-    else:
-        try:
-            r = _get_client().get(f"/api/agent/thread/{tid}", timeout=5)
-            if r.status_code == 200:
-                msgs = r.json().get("messages", [])
-                st.session_state["messages"] = msgs
-                st.session_state["_loaded_thread_id"] = tid
-        except Exception:
-            pass
+    # Always try the backend — _threads may not have been fetched yet
+    # (sidebar renders after pages in st.navigation).
+    try:
+        r = _get_client().get(f"/api/agent/thread/{tid}", timeout=5)
+        if r.status_code == 200:
+            msgs = r.json().get("messages", [])
+            st.session_state["messages"] = msgs
+            st.session_state["_loaded_thread_id"] = tid
+    except Exception:
+        pass
 
 # ── CSS ──
 st.html(
