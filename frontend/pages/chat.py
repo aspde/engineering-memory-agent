@@ -1,4 +1,4 @@
-"""History chat page — messages + input pinned to viewport bottom."""
+"""Chat page — centred title when empty, conversation when messages exist."""
 
 from __future__ import annotations
 
@@ -11,7 +11,28 @@ from frontend.app import (
     _render_message,
 )
 
-# ── CSS: input fixed to bottom, user messages right-aligned ──
+_MAX_VISIBLE = 50
+msgs: list[dict] = st.session_state.get("messages", [])
+
+# ── Lazy-load messages on thread switch ──
+tid = st.session_state["thread_id"]
+if st.session_state.get("_loaded_thread_id") != tid:
+    known_tids = {t["thread_id"] for t in (st.session_state.get("_threads") or [])}
+    if not known_tids or tid not in known_tids:
+        st.session_state["messages"] = []
+        st.session_state["_loaded_thread_id"] = tid
+        msgs = []
+    else:
+        try:
+            r = _get_client().get(f"/api/agent/thread/{tid}", timeout=5)
+            if r.status_code == 200:
+                msgs = r.json().get("messages", [])
+                st.session_state["messages"] = msgs
+                st.session_state["_loaded_thread_id"] = tid
+        except Exception:
+            pass
+
+# ── CSS ──
 st.html(
     "<style>"
     "  hr { display: none !important; }"
@@ -19,7 +40,6 @@ st.html(
     "  .stMainBlockContainer { border-bottom: none !important;"
     "    padding-top: 0.5rem !important;"
     "    padding-bottom: 100px !important; }"
-    "  /* input follows the same margin as the main content (sidebar-driven) */"
     "  [data-testid='stChatInput'] {"
     "    position: fixed !important; bottom: 0.1rem !important;"
     "    z-index: 100 !important;"
@@ -60,37 +80,24 @@ st.components.v1.html(
     height=1,
 )
 
-_MAX_VISIBLE = 50
-msgs: list[dict] = st.session_state.get("messages", [])
 
-# ── Lazy-load messages on thread switch ──
-tid = st.session_state["thread_id"]
-if st.session_state.get("_loaded_thread_id") != tid:
-    known_tids = {t["thread_id"] for t in (st.session_state.get("_threads") or [])}
-    if not known_tids or tid not in known_tids:
-        st.session_state["messages"] = []
-        st.session_state["_loaded_thread_id"] = tid
-        msgs = []
-    else:
-        try:
-            r = _get_client().get(f"/api/agent/thread/{tid}", timeout=5)
-            if r.status_code == 200:
-                msgs = r.json().get("messages", [])
-                st.session_state["messages"] = msgs
-                st.session_state["_loaded_thread_id"] = tid
-        except Exception:
-            pass
-
-# ── Chat area: messages + approval + input (single fragment) ──
-# All three share one @st.fragment so that st.write_stream()
-# renders after message history instead of at the fragment's
-# declaration site (which would place tokens at the top of the page).
+# ── Chat area: messages + title + approval + input (single fragment) ──
 @st.fragment
 def _chat_fragment() -> None:
     msgs: list[dict] = st.session_state.get("messages", [])
+
+    if not msgs:
+        col1, col2, col3 = st.columns([0.5, 4, 0.5])
+        with col2:
+            st.markdown(
+                "<h1 style='text-align: center; margin-bottom: 0.75rem;'>"
+                "EMA — Engineering Memory Agent</h1>",
+                unsafe_allow_html=True,
+            )
+
     visible = msgs[-_MAX_VISIBLE:]
     if len(msgs) > _MAX_VISIBLE:
-        st.caption(f"*… {len(msgs) - _MAX_VISIBLE} older messages hidden*")
+        st.caption(f"*... {len(msgs) - _MAX_VISIBLE} older messages hidden*")
     for msg in visible:
         _render_message(msg)
 

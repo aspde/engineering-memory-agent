@@ -289,7 +289,7 @@ def _handle_approval(approved: bool) -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Chat input handler (shared by new_chat + history_chat pages)
+# Chat input handler (shared by chat page)
 # ═══════════════════════════════════════════════════════════════════════
 
 
@@ -304,17 +304,29 @@ def _handle_chat_input() -> None:
     if not user_input or not user_input.strip():
         return
 
-    # Add user message to history
+    _perform_stream(user_input.strip())
+
+
+def _perform_stream(user_input: str) -> None:
+    """Execute streaming for the given user input (no input capture)."""
+    # Render user message immediately
+    with st.chat_message("user"):
+        st.markdown(user_input)
+
+    # Store user message in session state
     st.session_state["messages"].append({
         "role": "user",
-        "content": user_input.strip(),
+        "content": user_input,
     })
+
+    # Remember that this thread's messages are loaded so chat won't re-fetch
+    st.session_state["_loaded_thread_id"] = st.session_state["thread_id"]
 
     # Stream the response
     with st.chat_message("assistant"):
         st.session_state["_stream_interrupt"] = None
         full_response = st.write_stream(
-            _stream_response(user_input=user_input.strip())
+            _stream_response(user_input=user_input)
         )
 
     # Check if streaming was interrupted by an approval gate
@@ -340,10 +352,8 @@ def _handle_chat_input() -> None:
             "_meta": {"tool_calls": [], "sources": []},
         })
 
-
-# ═══════════════════════════════════════════════════════════════════════
-# Sidebar (shared across pages)
-# ═══════════════════════════════════════════════════════════════════════
+    # Remember that this thread's messages are loaded so chat won't re-fetch
+    st.session_state["_loaded_thread_id"] = st.session_state["thread_id"]
 
 
 def _render_sidebar() -> None:
@@ -363,7 +373,7 @@ def _render_sidebar() -> None:
     st.title("🧠 EMA")
     st.caption("Engineering Memory Agent")
 
-    # ── New conversation button → switch to new_chat page ──
+    # ── New conversation button → reset and switch to chat page ──
     if st.button("新建对话", use_container_width=True, key="sb_new_conv"):
         st.session_state["thread_id"] = str(uuid.uuid4())
         st.session_state["messages"] = []
@@ -371,7 +381,7 @@ def _render_sidebar() -> None:
         st.session_state["waiting_for_approval"] = False
         st.session_state["_threads_fetched_at"] = 0.0
         st.session_state["_loaded_thread_id"] = None
-        st.switch_page("pages/new_chat.py")
+        st.switch_page("pages/chat.py")
 
     if st.button("📚 记忆库", use_container_width=True, key="sb_memories"):
         st.switch_page("pages/memories.py")
@@ -409,7 +419,7 @@ def _render_sidebar() -> None:
                 st.session_state["messages"] = []
                 st.session_state["pending_interrupt"] = None
                 st.session_state["waiting_for_approval"] = False
-                st.switch_page("pages/history_chat.py")
+                st.switch_page("pages/chat.py")
     else:
         st.caption("暂无历史对话")
 
@@ -425,8 +435,7 @@ def main() -> None:
 
     # ── Navigation ──
     pages = [
-        st.Page("pages/new_chat.py", title="新建对话", icon=":material/add:"),
-        st.Page("pages/history_chat.py", title="历史对话", icon=":material/history:"),
+        st.Page("pages/chat.py", title="对话", icon=":material/chat:", default=True),
         st.Page("pages/memories.py", title="记忆库", icon=":material/book:"),
     ]
     pg = st.navigation(pages, position="hidden")
