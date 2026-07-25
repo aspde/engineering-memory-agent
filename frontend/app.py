@@ -142,6 +142,79 @@ def _call_agent_nonstream(message: str = "", resume_data: dict | None = None) ->
         }
 
 
+import re
+
+
+def _format_tool_result(tool_name: str, content: str) -> str:
+    """Return a human-readable one-line summary of *content* for *tool_name*.
+
+    Falls back to a truncated snippet when the format is unrecognised.
+    """
+    # ── search_memories_tool / retrieve_chunks_tool ──
+    # "Found N relevant memories:" / "Found N relevant chunks:"
+    if tool_name in ("search_memories_tool", "retrieve_chunks_tool"):
+        m = re.search(r"Found (\d+) relevant (memories|chunks)", content)
+        if m:
+            count, kind = int(m.group(1)), m.group(2)
+            if count == 0:
+                return f"🔍 No relevant {kind} found."
+            items = re.findall(r"\[\d+\]\s(.+)", content)
+            first = items[0][:80] if items else ""
+            return f"🔍 Found **{count}** {kind}" + (f" — _{first}…_" if first else "")
+        return content[:120]
+
+    # ── write_memory_tool ──
+    # JSON: {"id":..., "action":"inserted|merged|conflict", "summary":"..."}
+    if tool_name == "write_memory_tool":
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return content[:120]
+        action = data.get("action", "?")
+        summary = data.get("summary", "")[:120]
+        labels = {
+            "inserted": "📝 New memory created",
+            "merged": "🔗 Merged into existing memory",
+            "conflict": "⚠️ Conflict detected — needs resolution",
+        }
+        label = labels.get(action, f"📝 Memory {action}")
+        return f"{label}" + (f": _{summary}_" if summary else "")
+
+    # ── extract_memory_tool ──
+    # JSON: {"summary":"...", "entities":[...], "relations":[...]}
+    if tool_name == "extract_memory_tool":
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            return content[:120]
+        n_entities = len(data.get("entities", []))
+        n_relations = len(data.get("relations", []))
+        summary = data.get("summary", "")[:80]
+        return (
+            f"🧠 Extracted **{n_entities}** entities, **{n_relations}** relations"
+            + (f" — _{summary}…_" if summary else "")
+        )
+
+    # ── ingest_git_repo_tool ──
+    # "Ingested N commits as memories:" or "No commits were ingested …"
+    if tool_name == "ingest_git_repo_tool":
+        m = re.search(r"Ingested (\d+) commits?", content)
+        if m:
+            return f"📥 Ingested **{m.group(1)}** commits from Git repo"
+        return content[:120]
+
+    # ── ingest_document_tool ──
+    # "Ingested N chunks from document 'X'."
+    if tool_name == "ingest_document_tool":
+        m = re.search(r"Ingested (\d+) chunks? from document '(.+?)'", content)
+        if m:
+            return f"📥 Ingested **{m.group(1)}** chunks from `{m.group(2)}`"
+        return content[:120]
+
+    # ── Fallback ──
+    return content[:200]
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # UI helpers (shared across pages)
 # ═══════════════════════════════════════════════════════════════════════
@@ -164,8 +237,12 @@ def _render_message(msg: dict) -> None:
             if tool_calls:
                 with st.expander("🔧 Tool calls", expanded=False):
                     for tc in tool_calls:
-                        st.caption(f"`{tc['tool']}`")
-                        st.text(tc["content"][:300])
+                        tname = tc.get("tool", "unknown")
+                        tcontent = tc.get("content", "")
+                        st.markdown(_format_tool_result(tname, tcontent))
+                        with st.expander("Raw", expanded=False):
+                            st.caption(f"`{tname}`")
+                            st.text(tcontent[:300])
             if sources:
                 with st.expander("📚 Sources", expanded=False):
                     for s in sources:
