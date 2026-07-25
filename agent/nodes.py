@@ -316,15 +316,20 @@ async def check_approval_node(
         logger.info("Tool %s approved, executing", tool_name)
         return Command(goto="tools", update={"pending_approval": None})
 
-    # Rejected — inject a ToolMessage for each rejected call so the LLM
-    # can explain why the action was skipped.
+    # Rejected — inject a ToolMessage for every tool_call in this turn
+    # (both safe and sensitive) so the LLM API doesn't reject the request
+    # with "insufficient tool messages following tool_calls message".
     reason = decision.get("reason", "Tool call was rejected by the user.")
     rejection_msgs: list[ToolMessage] = []
-    for call in sensitive:
+    for call in sensitive + safe:
         cid = str(call.get("id", ""))
         tname = str(call.get("name", ""))
+        if call in sensitive:
+            content = f"[REJECTED] {reason}"
+        else:
+            content = f"[CANCELLED] A related write operation was rejected by the user."
         rejection_msgs.append(
-            ToolMessage(content=f"[REJECTED] {reason}", tool_call_id=cid, name=tname)
+            ToolMessage(content=content, tool_call_id=cid, name=tname)
         )
 
     logger.info("Tool %s rejected: %s", tool_name, reason)
