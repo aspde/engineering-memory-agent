@@ -71,7 +71,16 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
 
     Preserves ``tool_calls`` on AIMessages and ``tool_call_id`` on
     ToolMessages so the LLM can track the ReAct conversation loop.
+
+    Orphaned tool_calls (no ToolMessage response) are stripped to
+    prevent OpenAI 400 errors when resuming an interrupted conversation.
     """
+    # Collect all tool_call_ids that have a ToolMessage response
+    responded_ids: set[str] = set()
+    for m in messages:
+        if isinstance(m, ToolMessage) and m.tool_call_id:
+            responded_ids.add(m.tool_call_id)
+
     dicts: list[dict[str, object]] = []
     for m in messages:
         # 1. Determine role
@@ -103,18 +112,29 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
         entry: dict[str, object] = {"role": role, "content": content or ""}
 
         # 3. Preserve tool_calls on assistant messages (OpenAI API requirement)
+        #    but only those that have a corresponding ToolMessage response —
+        #    otherwise OpenAI rejects with "insufficient tool messages" 400.
         if isinstance(m, AIMessage) and m.tool_calls:
-            entry["tool_calls"] = [
-                {
-                    "id": tc["id"],
-                    "type": "function",
-                    "function": {
-                        "name": tc["name"],
-                        "arguments": json.dumps(tc["args"], ensure_ascii=False),
-                    },
-                }
-                for tc in m.tool_calls
+            answered = [
+                tc for tc in m.tool_calls
+                if tc.get("id") in responded_ids
             ]
+            if answered:
+                entry["tool_calls"] = [
+                    {
+                        "id": tc["id"],
+                        "type": "function",
+                        "function": {
+                            "name": tc["name"],
+                            "arguments": json.dumps(tc["args"], ensure_ascii=False),
+                        },
+                    }
+                    for tc in answered
+                ]
+            elif not content.strip():
+                # Orphaned tool_calls with no content — supply a placeholder
+                # so the API sees a valid assistant message.
+                entry["content"] = "(tool call was interrupted)"
 
         # 4. Preserve tool_call_id on tool messages (OpenAI API requirement)
         if isinstance(m, ToolMessage) and m.tool_call_id:

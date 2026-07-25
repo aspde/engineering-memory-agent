@@ -45,6 +45,105 @@ class TestMessageConversion:
         assert dicts[1]["role"] == "tool"
         assert dicts[1]["tool_call_id"] == "call_1"
 
+    def test_messages_to_dicts_strips_orphaned_tool_calls(self) -> None:
+        """AIMessage with tool_calls but no ToolMessage → tool_calls stripped."""
+        dicts = _messages_to_dicts([
+            HumanMessage(content="remember this"),
+            AIMessage(
+                content="I'll write that.",
+                tool_calls=[
+                    {"id": "call_1", "name": "write_memory_tool",
+                     "args": {"content": "test"}, "type": "tool_call"}
+                ],
+            ),
+        ])
+        assert len(dicts) == 2
+        assert dicts[0]["role"] == "user"
+        assert dicts[1]["role"] == "assistant"
+        assert "tool_calls" not in dicts[1]
+        assert "I'll write that" in dicts[1]["content"]
+
+    def test_messages_to_dicts_orphaned_tool_calls_empty_content(self) -> None:
+        """Orphaned tool_calls + empty content → placeholder to keep API valid."""
+        dicts = _messages_to_dicts([
+            HumanMessage(content="hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "orphan_1", "name": "write_memory_tool",
+                     "args": {"content": "x"}, "type": "tool_call"}
+                ],
+            ),
+        ])
+        assert dicts[1]["content"] == "(tool call was interrupted)"
+        assert "tool_calls" not in dicts[1]
+
+    def test_messages_to_dicts_keeps_answered_tool_calls(self) -> None:
+        """AIMessage tool_calls with ToolMessage responses are preserved."""
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="Let me search.",
+                tool_calls=[
+                    {"id": "call_1", "name": "search_memories_tool",
+                     "args": {"query": "test"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="Found 3 results", tool_call_id="call_1"),
+            AIMessage(
+                content="Here are the results.",
+            ),
+        ])
+        assert len(dicts) == 3
+        assert "tool_calls" in dicts[0]
+        assert dicts[0]["tool_calls"][0]["id"] == "call_1"
+
+    def test_messages_to_dicts_mixed_orphaned_and_answered(self) -> None:
+        """Only the answered tool_calls survive; orphaned ones are dropped."""
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="I'll do two things.",
+                tool_calls=[
+                    {"id": "call_ok", "name": "search_memories_tool",
+                     "args": {"query": "x"}, "type": "tool_call"},
+                    {"id": "call_orphan", "name": "write_memory_tool",
+                     "args": {"content": "x"}, "type": "tool_call"},
+                ],
+            ),
+            ToolMessage(content="Found", tool_call_id="call_ok"),
+        ])
+        assert "tool_calls" in dicts[0]
+        assert len(dicts[0]["tool_calls"]) == 1
+        assert dicts[0]["tool_calls"][0]["id"] == "call_ok"
+
+    def test_messages_to_dicts_multi_turn_roundtrip(self) -> None:
+        """Simulate a resumed conversation: answered mid-turn + new orphan at end."""
+        dicts = _messages_to_dicts([
+            HumanMessage(content="what is EMA?"),
+            AIMessage(
+                content="Let me search.",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool",
+                     "args": {"query": "EMA"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="Found 1", tool_call_id="c1"),
+            AIMessage(content="EMA is an agent."),
+            HumanMessage(content="remember that"),
+            AIMessage(
+                content="I'll write it.",
+                tool_calls=[
+                    {"id": "c2", "name": "write_memory_tool",
+                     "args": {"content": "EMA is an agent"}, "type": "tool_call"}
+                ],
+            ),
+        ])
+        # c1 is answered, c2 is orphaned (interrupted mid-turn)
+        assert "tool_calls" in dicts[1]  # c1 preserved
+        assert dicts[1]["tool_calls"][0]["id"] == "c1"
+        # c2 orphaned → stripped from last assistant message
+        assert "tool_calls" not in dicts[-1]
+        assert "I'll write it" in dicts[-1]["content"]
+
     def test_to_openai_tools_returns_schemas(self) -> None:
         from agent.tools import search_memories_tool
 
