@@ -12,21 +12,25 @@ from frontend.app import (
 )
 
 # ── CSS: input fixed to bottom, user messages right-aligned ──
-st.markdown(
+st.html(
     "<style>"
     "  hr { display: none !important; }"
     "  .stMainBlockContainer + div { display: none !important; }"
     "  .stMainBlockContainer { border-bottom: none !important;"
     "    padding-top: 0.5rem !important;"
     "    padding-bottom: 100px !important; }"
+    "  /* input follows the same margin as the main content (sidebar-driven) */"
     "  [data-testid='stChatInput'] {"
     "    position: fixed !important; bottom: 0.1rem !important;"
     "    z-index: 100 !important;"
-    "    left: 50% !important; transform: translateX(-50%) !important;"
-    "    max-width: 720px !important; width: calc(100vw - 21rem) !important;"
+    "    max-width: 720px !important;"
+    "    margin: 0 auto !important;"
     "    background: var(--default-backgroundColor) !important;"
-    "    padding: 0.75rem 0 0.5rem 0 !important; }"
-    "  /* Right-align user messages */"
+    "    padding: 0.75rem 0 0.5rem 0 !important;"
+    "    transition: none !important; }"
+    "  [data-testid='stLayoutWrapper'] {"
+    "    max-width: 720px !important;"
+    "    margin: 0 auto !important; }"
     "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) {"
     "    flex-direction: row-reverse !important; }"
     "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) "
@@ -34,8 +38,26 @@ st.markdown(
     "  [data-testid='stChatMessage']:has([data-testid='stChatMessageAvatarUser']) "
     "  [data-testid='stMarkdownContainer'] {"
     "    text-align: right !important; }"
-    "</style>",
-    unsafe_allow_html=True,
+    "</style>"
+)
+
+# JS: dynamically sync input position/width with stLayoutWrapper
+st.components.v1.html(
+    "<script>"
+    "var lastL='',lastW='';"
+    "setInterval(function(){"
+    "  var w=parent.document.querySelector('[data-testid=\"stLayoutWrapper\"]');"
+    "  var c=parent.document.querySelector('[data-testid=\"stChatInput\"]');"
+    "  if(!w||!c)return;"
+    "  var r=w.getBoundingClientRect();"
+    "  var nl=r.left+'px',nw=r.width+'px';"
+    "  if(nl!==lastL||nw!==lastW){"
+    "    lastL=nl;lastW=nw;"
+    "    c.style.left=nl;c.style.width=nw;"
+    "  }"
+    "},16);"
+    "</script>",
+    height=1,
 )
 
 _MAX_VISIBLE = 50
