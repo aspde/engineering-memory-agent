@@ -31,4 +31,4 @@
 
 ## 提交前
 
-运行 `pytest`，确保全部通过。其他提交前检查见 [git-workflow.md](git-workflow.md)。
+运行 `pytest`，确保全部通过。提交前调用 `/git-workflow` skill 检查其他规范。
