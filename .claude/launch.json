@@ -15,7 +15,6 @@
       "runtimeExecutable": ".venv/Scripts/streamlit.exe",
       "runtimeArgs": ["run", "frontend/app.py", "--server.port", "${PORT}", "--server.headless", "true"],
       "port": 8501,
-      "autoPort": true,
       "env": {
         "PYTHONPATH": "."
       }
