@@ -29,7 +29,10 @@ def _get_cross_encoder():
 
         model_name = "BAAI/bge-reranker-v2-m3"
         logger.info("Loading reranker model: %s", model_name)
-        _cross_encoder = CrossEncoder(model_name)
+        _cross_encoder = CrossEncoder(
+            model_name,
+            default_activation_function=__import__("torch").nn.Sigmoid(),
+        )
     return _cross_encoder
 
 

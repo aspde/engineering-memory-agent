@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+import os
+
+# ── Windows: limit OpenBLAS threads BEFORE numpy/torch are imported ──
+# sentence-transformers → torch → numpy → OpenBLAS spawns one thread pool
+# per core; on Windows this quickly exhausts address space and triggers
+# "Memory allocation still failed after 10 retries".  Single-thread each
+# BLAS backend — embedding calls are already batched & run on a thread.
+for _k, _v in {
+    "OPENBLAS_NUM_THREADS": "1",
+    "OMP_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+}.items():
+    os.environ.setdefault(_k, _v)
+
 import asyncio
 import sys
 from contextlib import asynccontextmanager
