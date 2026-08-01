@@ -120,6 +120,33 @@ def main() -> None:
     else:
         st.caption("无法加载统计数据，请确认后端服务已启动。")
 
+    # ── Chat jump filter (set by chat page when a memory source is clicked) ──
+    filter_id = st.session_state.get("mem_filter_id")
+    if filter_id:
+        st.info(f"🔗 从聊天跳转 — 正在查找记忆 `{str(filter_id)[:8]}…`")
+        found_mem: dict | None = None
+        with st.spinner("正在定位记忆…"):
+            try:
+                client = _get_client()
+                resp = client.get(
+                    f"/api/memory/memories/{filter_id}",
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    found_mem = resp.json()
+                # 404 or other errors → found_mem stays None, warning shown below
+            except Exception as exc:
+                st.error(f"查找记忆失败: {exc}")
+
+        if found_mem:
+            _render_memory_card(found_mem)
+        else:
+            st.warning("未找到该记忆，可能已被删除或尚未建立索引。")
+
+        if st.button("清除筛选", key="mem_filter_clear_btn", use_container_width=True):
+            del st.session_state["mem_filter_id"]
+            st.rerun()
+
     st.divider()
 
     # ── Ingest section ──

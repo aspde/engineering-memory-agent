@@ -68,6 +68,18 @@ class MemorySearchResponse(BaseModel):
     results: list[dict[str, Any]]
 
 
+class MemoryGetResponse(BaseModel):
+    id: str
+    source_type: str
+    summary: str
+    entities: list[dict[str, Any]] = Field(default_factory=list)
+    relations: list[dict[str, Any]] = Field(default_factory=list)
+    decay_factor: float
+    recall_count: int
+    meta: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
 class MemoryStatsResponse(BaseModel):
     total_memories: int
     total_chunks: int
@@ -165,6 +177,40 @@ async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
         clean.append(entry)
 
     return MemorySearchResponse(results=clean)
+
+
+@router.get("/memories/{memory_id}", response_model=MemoryGetResponse)
+async def get_memory_by_id(memory_id: str) -> MemoryGetResponse:
+    """Fetch a single memory by its primary-key UUID.
+
+    Used by the frontend after a memory source is clicked in the chat
+    page — bypasses the vector-search pipeline entirely.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        r = await session.execute(
+            text(
+                "SELECT id, source_type, summary, entities, relations, "
+                "       decay_factor, recall_count, meta, created_at "
+                "FROM memories WHERE id = :id"
+            ),
+            {"id": memory_id},
+        )
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+
+        return MemoryGetResponse(
+            id=str(row.id),
+            source_type=str(row.source_type),
+            summary=str(row.summary),
+            entities=row.entities or [],
+            relations=row.relations or [],
+            decay_factor=float(row.decay_factor),
+            recall_count=int(row.recall_count),
+            meta=row.meta or {},
+            created_at=row.created_at.isoformat() if row.created_at else "",
+        )
 
 
 @router.get("/stats", response_model=MemoryStatsResponse)

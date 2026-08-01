@@ -68,26 +68,46 @@ async def _stream_final_answer(
 def _extract_tool_traces(
     messages: list,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Extract tool call traces and sources from a message list."""
+    """Extract tool call traces and sources from a message list.
+
+    If a ToolMessage contains a JSON envelope with a ``sources`` key,
+    those structured sources are used directly (enabling clickable
+    references).  Otherwise falls back to the legacy snippet extraction.
+    """
     tool_call_traces: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     for m in messages:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
+        raw = str(m.content) if m.content else ""
+
+        # Try to extract structured sources from JSON envelope
+        parsed_sources: list[dict[str, Any]] | None = None
+        try:
+            data = json.loads(raw)
+            if isinstance(data, dict) and "sources" in data:
+                parsed_sources = data["sources"]
+                display = data.get("display", raw)
+            else:
+                display = raw
+        except (json.JSONDecodeError, TypeError):
+            display = raw
+
         tool_call_traces.append({
             "tool": tool_name,
-            "content": str(m.content)[:300],
+            "content": display[:300],
         })
-        if tool_name == "search_memories_tool":
-            source_type = "memory"
-        elif tool_name == "retrieve_chunks_tool":
-            source_type = "chunk"
-        else:
-            source_type = "unknown"
-        content = str(m.content)[:200] if m.content else ""
-        if content:
-            sources.append({"type": source_type, "snippet": content})
+
+        if parsed_sources is not None:
+            sources.extend(parsed_sources)
+        elif tool_name in ("search_memories_tool", "retrieve_chunks_tool"):
+            source_type = "memory" if tool_name == "search_memories_tool" else "chunk"
+            if raw.strip():
+                sources.append({"type": source_type, "snippet": raw[:200]})
+        elif raw.strip():
+            sources.append({"type": "unknown", "snippet": raw[:200]})
+
     return tool_call_traces, sources
 
 

@@ -23,6 +23,7 @@ class TestSearchMemoriesTool:
         async def mock_query(*args, **kwargs):
             return [
                 {
+                    "id": "mem-001",
                     "summary": "PostgreSQL is the primary database",
                     "rerank_score": 0.95,
                     "decay_factor": 0.9,
@@ -32,8 +33,13 @@ class TestSearchMemoriesTool:
         monkeypatch.setattr(mod, "query_memories", mock_query)
 
         result = await search_memories_tool.ainvoke({"query": "database"})
-        assert "PostgreSQL" in result
-        assert "0.95" in result
+        data = json.loads(result)
+        assert "display" in data
+        assert "sources" in data
+        assert "PostgreSQL" in data["display"]
+        assert "0.95" in data["display"]
+        assert len(data["sources"]) == 1
+        assert data["sources"][0]["id"] == "mem-001"
 
     @pytest.mark.asyncio
     async def test_empty_results(self, monkeypatch) -> None:
@@ -52,13 +58,19 @@ class TestRetrieveChunksTool:
         from backend.service.retrieval import RetrievalResult
 
         async def mock_retrieve(*args, **kwargs):
-            return [RetrievalResult(content="def foo(): pass", score=0.88, metadata={})]
+            return [RetrievalResult(content="def foo(): pass", score=0.88, metadata={"document_id": "test.py"})]
 
         monkeypatch.setattr(mod, "retrieve", mock_retrieve)
 
         result = await retrieve_chunks_tool.ainvoke({"query": "foo function"})
-        assert "def foo" in result
-        assert "0.88" in result
+        data = json.loads(result)
+        assert "display" in data
+        assert "sources" in data
+        assert "def foo" in data["display"]
+        assert "0.88" in data["display"]
+        assert len(data["sources"]) == 1
+        assert data["sources"][0]["document_id"] == "test.py"
+        assert data["sources"][0]["type"] == "chunk"
 
     @pytest.mark.asyncio
     async def test_empty_results(self, monkeypatch) -> None:

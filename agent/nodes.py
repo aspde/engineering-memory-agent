@@ -219,9 +219,19 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
-        content = str(m.content) if m.content else ""
-        if not content.strip():
+        raw = str(m.content) if m.content else ""
+        if not raw.strip():
             continue
+        # If the tool returned a JSON envelope with a "display" field,
+        # use only the display text for LLM context (hiding structured metadata).
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict) and "display" in parsed:
+                content = str(parsed["display"])
+            else:
+                content = raw
+        except (json.JSONDecodeError, TypeError):
+            content = raw
         context_parts.append(f"### {tool_name}\n{content}")
 
     context_str = "\n\n".join(context_parts) if context_parts else ""

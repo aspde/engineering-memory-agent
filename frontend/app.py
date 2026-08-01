@@ -7,8 +7,16 @@ navigation via ``st.navigation``. Individual pages live in ``pages/``.
 from __future__ import annotations
 
 import json
+import sys
 import time
 import uuid
+from pathlib import Path
+
+# Ensure the project root is on sys.path so that page modules can
+# ``from frontend.app import ...`` regardless of Streamlit's cwd.
+_project_root = Path(__file__).resolve().parent.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
 
 import httpx
 import streamlit as st
@@ -158,17 +166,27 @@ def _format_tool_result(tool_name: str, content: str) -> str:
     Falls back to a truncated snippet when the format is unrecognised.
     """
     # ── search_memories_tool / retrieve_chunks_tool ──
+    # JSON envelope: {"display": "...", "sources": [...]} → use the "display"
+    # field for the human-readable summary. Falls back to plain text for
+    # legacy/empty results.
     # "Found N relevant memories:" / "Found N relevant chunks:"
     if tool_name in ("search_memories_tool", "retrieve_chunks_tool"):
-        m = re.search(r"Found (\d+) relevant (memories|chunks)", content)
+        display = content
+        try:
+            data = json.loads(content)
+            if isinstance(data, dict) and data.get("display"):
+                display = data["display"]
+        except json.JSONDecodeError:
+            pass
+        m = re.search(r"Found (\d+) relevant (memories|chunks)", display)
         if m:
             count, kind = int(m.group(1)), m.group(2)
             if count == 0:
                 return f"🔍 No relevant {kind} found."
-            items = re.findall(r"\[\d+\]\s(.+)", content)
+            items = re.findall(r"\[\d+\]\s(.+)", display)
             first = items[0][:80] if items else ""
             return f"🔍 Found **{count}** {kind}" + (f" — _{first}…_" if first else "")
-        return content[:120]
+        return display[:120]
 
     # ── write_memory_tool ──
     # JSON: {"id":..., "action":"inserted|merged|conflict", "summary":"..."}
@@ -227,6 +245,44 @@ def _format_tool_result(tool_name: str, content: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════
 
 
+def _render_source(s: dict, index: int) -> None:
+    """Render a single source item inside the ``📚 Sources`` expander.
+
+    - ``memory`` → clickable button that jumps to the memory library filtered
+      by this memory's id.
+    - ``chunk``  → expander revealing the full snippet, document_id, relevance.
+    - anything else → legacy plain-text caption.
+    """
+    stype = s.get("type", "unknown")
+
+    if stype == "memory":
+        mem_id = s.get("id", "")
+        summary = s.get("summary") or s.get("snippet", "") or "(no summary)"
+        relevance = s.get("relevance")
+        label = f"🧠 {summary[:120]}"
+        if relevance is not None:
+            label += f"  — 相关度 {relevance:.2f}"
+        if mem_id:
+            if st.button(label, key=f"src_mem_{index}_{mem_id}", use_container_width=True):
+                st.session_state["mem_filter_id"] = mem_id
+                st.switch_page("pages/memories.py")
+        else:
+            st.caption(label)
+    elif stype == "chunk":
+        snippet = s.get("snippet", "")
+        doc_id = s.get("document_id", "")
+        relevance = s.get("relevance")
+        title = f"📄 {doc_id}" if doc_id else "📄 chunk"
+        with st.expander(title, expanded=False):
+            if doc_id:
+                st.caption(f"**document_id**: `{doc_id}`")
+            if relevance is not None:
+                st.caption(f"**relevance**: {relevance:.2f}")
+            st.text(snippet)
+    else:
+        st.caption(f"`{stype}` — {s.get('snippet', str(s))[:200]}")
+
+
 def _render_message(msg: dict) -> None:
     """Render a single chat message bubble."""
     role = msg["role"]
@@ -252,8 +308,18 @@ def _render_message(msg: dict) -> None:
                             st.text(tcontent[:300])
             if sources:
                 with st.expander("📚 Sources", expanded=False):
-                    for s in sources:
-                        st.caption(f"`{s['type']}` — {s['snippet'][:200]}")
+                    for i, s in enumerate(sources):
+                        # Sources may arrive as JSON strings — parse defensively
+                        if isinstance(s, str):
+                            try:
+                                s = json.loads(s)
+                            except json.JSONDecodeError:
+                                st.caption(s[:200])
+                                continue
+                        if not isinstance(s, dict):
+                            st.caption(str(s)[:200])
+                            continue
+                        _render_source(s, i)
     elif role == "system":
         with st.chat_message("assistant", avatar="⚠️"):
             st.info(content)

@@ -48,6 +48,7 @@ async def search_memories_tool(
         return "No relevant memories found."
 
     lines = [f"Found {len(results)} relevant memories:"]
+    sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
         score = r.get("rerank_score", r.get("weighted_score", 0))
         decay = r.get("decay_factor", 1.0)
@@ -55,7 +56,17 @@ async def search_memories_tool(
             f"[{i + 1}] (relevance: {score:.2f}, decay: {decay:.2f}) "
             f"{r['summary']}"
         )
-    return "\n".join(lines)
+        sources.append({
+            "id": str(r["id"]),
+            "type": "memory",
+            "summary": str(r["summary"])[:200],
+            "relevance": round(float(score), 4),
+            "decay": round(float(decay), 4),
+        })
+    return json.dumps(
+        {"display": "\n".join(lines), "sources": sources},
+        ensure_ascii=False,
+    )
 
 
 @tool
@@ -81,9 +92,22 @@ async def retrieve_chunks_tool(
         return "No relevant document chunks found."
 
     lines = [f"Found {len(results)} relevant chunks:"]
+    sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
         lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
-    return "\n".join(lines)
+        meta = r.metadata or {}
+        sources.append({
+            "document_id": str(meta.get("document_id", "")),
+            "chunk_index": meta.get("chunk_index", i),
+            "type": "chunk",
+            "snippet": r.content[:200],
+            "relevance": round(float(r.score), 4),
+            "metadata": meta,
+        })
+    return json.dumps(
+        {"display": "\n".join(lines), "sources": sources},
+        ensure_ascii=False,
+    )
 
 
 # ── Write tools ──────────────────────────────────────────────────────
