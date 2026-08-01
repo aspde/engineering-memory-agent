@@ -43,11 +43,13 @@ async def lifespan(app: FastAPI):
         from backend.service.agent_service import _setup_checkpointer
 
         await _setup_checkpointer()
-    except Exception:
+    except Exception as _exc:
         import logging
 
         logging.getLogger(__name__).warning(
-            "Failed to setup checkpointer — conversations will be ephemeral"
+            "Failed to setup checkpointer — conversations will be ephemeral. "
+            "Error: %s",
+            _exc,
         )
 
     yield

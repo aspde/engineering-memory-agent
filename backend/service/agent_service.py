@@ -76,6 +76,62 @@ async def _setup_checkpointer() -> None:
         await _pool.wait()
 
         _checkpointer = AsyncPostgresSaver(_pool)
+        async with _pool.connection() as conn:
+            await conn.set_autocommit(True)
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS checkpoint_migrations (v INTEGER PRIMARY KEY)"
+            )
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS checkpoints ("
+                "  thread_id TEXT NOT NULL,"
+                "  checkpoint_ns TEXT NOT NULL DEFAULT '',"
+                "  checkpoint_id TEXT NOT NULL,"
+                "  parent_checkpoint_id TEXT,"
+                "  type TEXT,"
+                "  checkpoint JSONB NOT NULL,"
+                "  metadata JSONB NOT NULL DEFAULT '{}',"
+                "  PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id))"
+            )
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS checkpoint_blobs ("
+                "  thread_id TEXT NOT NULL,"
+                "  checkpoint_ns TEXT NOT NULL DEFAULT '',"
+                "  channel TEXT NOT NULL,"
+                "  version TEXT NOT NULL,"
+                "  type TEXT NOT NULL,"
+                "  blob BYTEA,"
+                "  PRIMARY KEY (thread_id, checkpoint_ns, channel, version))"
+            )
+            await conn.execute(
+                "CREATE TABLE IF NOT EXISTS checkpoint_writes ("
+                "  thread_id TEXT NOT NULL,"
+                "  checkpoint_ns TEXT NOT NULL DEFAULT '',"
+                "  checkpoint_id TEXT NOT NULL,"
+                "  task_id TEXT NOT NULL,"
+                "  idx INTEGER NOT NULL,"
+                "  channel TEXT NOT NULL,"
+                "  type TEXT,"
+                "  blob BYTEA NOT NULL,"
+                "  task_path TEXT NOT NULL DEFAULT '',"
+                "  PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, idx))"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS checkpoints_thread_id_idx "
+                "ON checkpoints(thread_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS checkpoint_blobs_thread_id_idx "
+                "ON checkpoint_blobs(thread_id)"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS checkpoint_writes_thread_id_idx "
+                "ON checkpoint_writes(thread_id)"
+            )
+            for v in range(10):
+                await conn.execute(
+                    "INSERT INTO checkpoint_migrations (v) VALUES (%s) ON CONFLICT DO NOTHING",
+                    [v],
+                )
         await _checkpointer.setup()
         logger.info("AsyncPostgresSaver setup complete")
     except Exception as exc:
