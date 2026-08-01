@@ -188,12 +188,9 @@ async def get_thread_messages(thread_id: str) -> ThreadMessagesResponse:
             "content": str(m.content) if m.content else "",
         }
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            msg_dict["_meta"] = {
-                "tool_calls": [
-                    {"tool": tc.get("name", ""), "content": str(tc.get("args", ""))[:200]}
-                    for tc in m.tool_calls
-                ]
-            }
+            # AIMessages with tool_calls are intermediate ReAct steps —
+            # the final response from generate_final_node has no tool_calls.
+            continue
         messages.append(msg_dict)
 
     return ThreadMessagesResponse(thread_id=thread_id, messages=messages)
