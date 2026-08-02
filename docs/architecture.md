@@ -9,7 +9,7 @@ EMA (Engineering Memory Agent) — 面向研发团队的长期记忆智能体。
 ## High Level Architecture
 
 ```
-User → Frontend (Streamlit) → FastAPI Backend → Agent Layer (LangGraph)
+User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
                                                     ↓
                                               Memory Layer
                                                     ↓
@@ -24,8 +24,8 @@ User → Frontend (Streamlit) → FastAPI Backend → Agent Layer (LangGraph)
 
 | Layer | Technology | Status |
 |-------|-----------|--------|
-| Frontend | Streamlit (MVP) / React (Production) | Streamlit 骨架已就绪，交互界面待实现 |
-| Backend | FastAPI + Python 3.12 | 5 个 API 端点已实现 |
+| Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
+| Backend | FastAPI + Python 3.12 | 10 个 API 端点已实现（含 SSE 流式 + HITL） |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/衰减/去重全链路已实现 |
 | Storage | PostgreSQL + pgvector | docker-compose 已就绪 |
@@ -45,11 +45,16 @@ User → Frontend (Streamlit) → FastAPI Backend → Agent Layer (LangGraph)
 
 | Method | Path | Description |
 |--------|------|-------------|
+| POST | `/api/agent/chat` | Agent 对话（非流式）：ReAct 循环 + 工具调用 |
+| POST | `/api/agent/chat/stream` | Agent 对话（SSE 流式）：逐 token 输出 + interrupt |
+| GET | `/api/agent/threads` | 获取对话历史列表 |
+| GET | `/api/agent/thread/{thread_id}` | 获取指定对话消息历史 |
 | POST | `/api/memory/ingest` | 文档分块 → 嵌入 → 存入 chunks 表 |
 | POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索 → rerank |
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
 | POST | `/api/memory/memories/search` | 记忆搜索：衰减加权 → rerank → 更新 decay |
-| POST | `/api/agent/chat` | Agent 对话：ReAct 循环 + 工具调用 + 上下文生成 |
+| GET | `/api/memory/memories/{memory_id}` | 通过 ID 获取单条记忆 |
+| GET | `/api/memory/stats` | 记忆库统计信息（总数、来源分布、高频实体等） |
 
 ## Technology Stack
 
@@ -110,8 +115,10 @@ Agent 工具调用通过新增的 `chat_raw(messages, tools, **kwargs) → dict`
 
 ### Frontend
 
-- **MVP**: Streamlit (骨架已就绪)
-- **Production**: React (planned)
+- **React + TypeScript + Vite + Tailwind CSS**
+- 纯客户端 SPA，2 个页面：聊天页、记忆库页
+- SSE 流式聊天、Human-in-the-Loop 审批/冲突解决
+- 旧 Streamlit MVP 已备份至 `frontend/streamlit-backup/`
 
 ### Key Dependencies
 
@@ -122,7 +129,8 @@ Agent 工具调用通过新增的 `chat_raw(messages, tools, **kwargs) → dict`
 | LLM | openai, anthropic | Provider SDKs |
 | Embedding | sentence-transformers | BGE-M3 |
 | Database | pgvector, asyncpg, SQLAlchemy | Storage + vector search |
-| Frontend | streamlit | MVP UI |
+| Frontend | react, react-router-dom, tailwindcss | SPA UI |
+| Frontend build | vite, typescript | Build toolchain |
 | Git | pygit2 | Repository history ingestion |
 | Testing | pytest, pytest-asyncio | Test framework |
 

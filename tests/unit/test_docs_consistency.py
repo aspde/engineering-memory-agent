@@ -78,7 +78,6 @@ def test_tech_stack_matches_requirements() -> None:
         ("langgraph", "LangGraph"),
         ("pgvector", "pgvector"),
         ("sqlalchemy", "SQLAlchemy"),
-        ("streamlit", "Streamlit"),
         ("pytest", "pytest"),
         ("gitpython", "GitPython"),
     ]

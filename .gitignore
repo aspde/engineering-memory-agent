@@ -29,9 +29,10 @@ dist/
 build/
 *.egg-info/
 
-# Node (frontend later)
+# Node (frontend)
 node_modules/
 .next/
+*.tsbuildinfo
 
 # Claude Code local settings
 .claude/settings.local.json
