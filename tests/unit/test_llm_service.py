@@ -40,13 +40,6 @@ class FakeLLMProvider(LLMProvider):
             result["content"] = f"[{self._model}] echo: {messages[-1]['content']}"
         return result
 
-    async def chat_stream(
-        self, messages: list[dict[str, str]], **kwargs
-    ) -> AsyncIterator[str]:
-        """Stub: yield the full response as a single chunk."""
-        text = await self.chat(messages, **kwargs)
-        yield text
-
     @property
     def model(self) -> str:
         return self._model

@@ -19,8 +19,8 @@ elif _sync_url.startswith("postgresql+asyncpg://"):
 else:
     _async_url = _sync_url
 
-_engine = create_async_engine(_async_url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True)
-_session_factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+engine = create_async_engine(_async_url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True)
+_session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
 def get_session_factory() -> async_sessionmaker[AsyncSession]:
@@ -30,4 +30,4 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
 
 async def close_db() -> None:
     """Dispose the engine. Call on app shutdown."""
-    await _engine.dispose()
+    await engine.dispose()

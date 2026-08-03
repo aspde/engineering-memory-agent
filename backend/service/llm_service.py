@@ -5,39 +5,10 @@ from __future__ import annotations
 import json
 import logging
 
-import httpx
-
 from backend.model.llm import LLMProvider
 from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
-
-# Keep-alive connections idle for longer than this are discarded before
-# reuse, avoiding "Connection error." when the remote side has already
-# closed the TCP connection but httpx still believes it is valid.
-_KEEPALIVE_EXPIRY_SECONDS = 30.0
-
-
-def _build_async_http_client(timeout: int) -> httpx.AsyncClient:
-    """Return an ``httpx.AsyncClient`` with conservative keep-alive settings."""
-    return httpx.AsyncClient(
-        timeout=httpx.Timeout(timeout=float(timeout)),
-        limits=httpx.Limits(
-            max_keepalive_connections=2,
-            keepalive_expiry=_KEEPALIVE_EXPIRY_SECONDS,
-        ),
-    )
-
-
-def _build_sync_http_client(timeout: int) -> httpx.Client:
-    """Return an ``httpx.Client`` with conservative keep-alive settings."""
-    return httpx.Client(
-        timeout=httpx.Timeout(timeout=float(timeout)),
-        limits=httpx.Limits(
-            max_keepalive_connections=2,
-            keepalive_expiry=_KEEPALIVE_EXPIRY_SECONDS,
-        ),
-    )
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -110,34 +81,6 @@ class OpenAICompatibleProvider(LLMProvider):
                 for tc in msg.tool_calls
             ]
         return result
-
-    async def chat_stream(
-        self, messages: list[dict[str, str]], **kwargs
-    ):
-        kwargs.setdefault("temperature", self._temperature)
-        kwargs.setdefault("max_tokens", self._max_tokens)
-        try:
-            stream = await self._async_client.chat.completions.create(
-                model=self._model,
-                messages=messages,  # type: ignore[arg-type]
-                stream=True,
-                **kwargs,
-            )
-            async for chunk in stream:
-                choices = chunk.choices
-                if not choices:
-                    continue
-                delta = choices[0].delta
-                if delta and delta.content:
-                    yield delta.content
-        except Exception:
-            # Streaming path is unreliable on Windows (httpx +
-            # SelectorEventLoop incompatibility).  Fall back to a
-            # non-streaming call so the user still gets an answer.
-            logger.warning("chat_stream failed, falling back to non-streaming", exc_info=True)
-            text = await self.chat(messages, **kwargs)
-            if text:
-                yield text
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         kwargs.setdefault("temperature", self._temperature)
@@ -232,21 +175,6 @@ class AnthropicProvider(LLMProvider):
         if tool_calls:
             result["tool_calls"] = tool_calls
         return result
-
-    async def chat_stream(
-        self, messages: list[dict[str, str]], **kwargs
-    ):
-        system, user_messages = self._split_messages(messages)
-        kwargs.setdefault("max_tokens", self._max_tokens)
-        async with self._async_client.messages.stream(
-            model=self._model,
-            system=system,
-            messages=user_messages,  # type: ignore[arg-type]
-            **kwargs,
-        ) as stream:
-            async for event in stream:
-                if event.type == "content_block_delta" and getattr(event.delta, "type", "") == "text_delta":
-                    yield event.delta.text
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         system, user_messages = self._split_messages(messages)
