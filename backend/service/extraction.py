@@ -29,6 +29,7 @@ _SUMMARY_PROMPT = """\
 Summarize the following content in one concise paragraph (2-5 sentences).
 Focus on key facts, decisions, and actionable information.
 Avoid fluff — only write what someone searching for this information would want to find.
+Respond in the same language as the input content.
 
 Content:
 {content}
@@ -64,6 +65,7 @@ _ENTITIES_PROMPT = """\
 Extract named entities from the following text.
 Return ONLY a JSON array of objects with "name" and "type" fields.
 Types must be one of: person, project, technology, decision, event, file, concept.
+Use the same language as the input text for entity names.
 
 Text:
 {input_text}
