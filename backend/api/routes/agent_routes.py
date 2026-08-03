@@ -50,19 +50,20 @@ async def _upsert_conversation(thread_id: str, title: str = "") -> None:
 
 
 async def _stream_final_answer(
-    agent, config: dict, final_prompt: list[dict[str, str]]
+    agent, config: dict, final_response: str
 ):
-    """Stream tokens from *final_prompt* via SSE, then persist into the graph."""
-    provider = get_llm_provider()
-    full_text = ""
-    async for token in provider.chat_stream(final_prompt):
-        full_text += token
-        yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+    """Stream *final_response* character-by-character via SSE.
 
-    await agent.aupdate_state(
-        config,
-        {"final_response": full_text, "messages": [AIMessage(content=full_text)]},
-    )
+    The LLM call happens in ``generate_final_node`` (once).  This function
+    just yields the already-generated text as SSE tokens — no second LLM
+    call, so the persisted state and the streamed output are identical.
+    """
+    # Stream the response in small chunks so the frontend sees a
+    # token-by-token animation (same UX as before, but deterministic).
+    chunk_size = 4
+    for i in range(0, len(final_response), chunk_size):
+        chunk = final_response[i:i + chunk_size]
+        yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
 
 
 # Read-only tools whose results belong in the sources panel, not the
@@ -71,6 +72,13 @@ async def _stream_final_answer(
 _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "search_memories_tool",
     "retrieve_chunks_tool",
+})
+
+# Write tools whose output is already confirmed by the approval flow —
+# showing them in the tool-call panel adds noise, not value.
+_SILENT_TOOLS: frozenset[str] = frozenset({
+    "write_memory_tool",
+    "extract_memory_tool",
 })
 
 
@@ -90,6 +98,10 @@ def _extract_tool_traces(
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
+
+        # Silent tools — confirmed by approval, no need to show.
+        if tool_name in _SILENT_TOOLS:
+            continue
 
         # Chunk retrieval sources have no stable IDs — skip entirely.
         if tool_name == "retrieve_chunks_tool":
@@ -120,7 +132,7 @@ def _extract_tool_traces(
         if parsed_sources is not None:
             sources.extend(parsed_sources)
         elif tool_name == "search_memories_tool":
-            if raw.strip():
+            if raw.strip() and raw.strip() != "No relevant memories found.":
                 sources.append({"type": "memory", "snippet": raw[:200]})
         elif tool_name not in _READ_ONLY_TOOLS and raw.strip():
             sources.append({"type": "unknown", "snippet": raw[:200]})
@@ -373,9 +385,9 @@ async def agent_chat_stream(req: ChatRequest):
                     return
 
                 # Stream the final answer from the state
-                final_prompt = result.get("final_prompt")
-                if final_prompt:
-                    async for sse_line in _stream_final_answer(agent, config, final_prompt):
+                final_response = result.get("final_response")
+                if final_response:
+                    async for sse_line in _stream_final_answer(agent, config, final_response):
                         yield sse_line
 
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -400,9 +412,9 @@ async def agent_chat_stream(req: ChatRequest):
                     yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
 
                     if node_name == "generate_final":
-                        final_prompt = node_state.get("final_prompt")
-                        if final_prompt:
-                            async for sse_line in _stream_final_answer(agent, config, final_prompt):
+                        final_response = node_state.get("final_response")
+                        if final_response:
+                            async for sse_line in _stream_final_answer(agent, config, final_response):
                                 yield sse_line
 
             # Send tool traces fetched from the final graph state

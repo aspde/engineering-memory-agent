@@ -35,9 +35,16 @@ When the user asks a question:
 1. Search relevant memories and documents first
 2. Synthesize information from retrieved context
 3. Answer clearly and concisely — do not list or enumerate sources, they are shown separately in the UI
+4. If a search returned no results, simply ignore it — do not mention empty searches
 
 When the user asks to ingest or index content, use the appropriate tools.
 Always prefer searching over guessing.
+
+When the user tells you to remember something, or shares facts/decisions/knowledge:
+- Call write_memory_tool IMMEDIATELY with the user's exact words as content.
+- Do NOT pre-check for conflicts yourself. The tool has built-in conflict detection
+  and will pause for human review if a contradiction is found.
+- Do NOT ask the user whether to overwrite or merge — that is handled by the tool.
 
 Always respond in Chinese (简体中文). All your answers, explanations,
 and tool interactions should use Chinese unless the user explicitly
@@ -203,15 +210,15 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
-    """Assemble context from retrieved results and build the final prompt.
+    """Assemble context from retrieved results, call the LLM, and produce the final answer.
 
     Reads tool-call results from the conversation history (ToolMessages)
     rather than from discrete state fields, so every tool's output is
     automatically included regardless of which tool was called.
 
-    The LLM call is deferred to the API streaming layer so the response
-    can be streamed token-by-token to the client.  The assembled prompt
-    is stored in ``final_prompt``.
+    The LLM call happens here (once) so the response is persisted in the
+    checkpointer state.  The API streaming layer reads the persisted
+    response and streams it token-by-token — no second LLM call.
     """
     # ── Harvest context from ToolMessages in conversation history ──
     context_parts: list[str] = []
@@ -266,7 +273,21 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
             continue  # skip tool_call-only AIMessages
         messages.append({"role": role, "content": content})
 
-    return {"final_prompt": messages}
+    # ── Call LLM here (once) so the response is persisted ──
+    provider = get_llm_provider()
+    try:
+        response = await provider.chat(messages)
+    except Exception as exc:
+        logger.exception("Final answer LLM call failed")
+        response = f"抱歉，生成回复时出现错误: {exc}"
+
+    aimessage = AIMessage(content=response)
+
+    return {
+        "final_prompt": messages,
+        "final_response": response,
+        "messages": [aimessage],
+    }
 
 
 # ── Tools requiring human approval before execution ────────────────────
@@ -486,6 +507,11 @@ async def check_conflict_node(
         outcome = {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
 
     action_label = _RESOLUTION_LABELS.get(resolution, resolution)
+    logger.info("Conflict resolved: %s → %s (%s)", existing_id, resolution, outcome.get("id", "?"))
+
+    # Replace the conflict ToolMessage with a resolution note (same id so
+    # add_messages deduplicates it) — avoids two ToolMessages with the same
+    # tool_call_id, which OpenAI-compatible APIs reject.
     note = ToolMessage(
         content=(
             f"Conflict resolved — {action_label}. "
@@ -493,9 +519,8 @@ async def check_conflict_node(
         ),
         tool_call_id=str(getattr(m, "tool_call_id", "")),
         name="write_memory_tool",
+        id=getattr(m, "id", None),  # same id → replaces conflict msg
     )
-    logger.info("Conflict resolved: %s → %s", existing_id, resolution)
-
     return Command(
         goto="call_llm",
         update={"messages": [note], "pending_approval": None},

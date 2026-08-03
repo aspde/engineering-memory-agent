@@ -99,8 +99,8 @@ class TestAgentChat:
         assert data["thread_id"]  # should be auto-generated UUID
 
     @pytest.mark.asyncio
-    async def test_includes_tool_call_traces(self, async_client: AsyncClient, monkeypatch) -> None:
-        """Response includes tool call traces only for write/ingest tools."""
+    async def test_silent_tools_excluded_from_tool_calls(self, async_client: AsyncClient, monkeypatch) -> None:
+        """write_memory_tool results are excluded from tool_calls (silent tools)."""
         from unittest.mock import AsyncMock
         from langchain_core.messages import ToolMessage
 
@@ -127,8 +127,8 @@ class TestAgentChat:
         )
         assert response.status_code == 200
         data = response.json()
-        assert len(data["tool_calls"]) == 1
-        assert data["tool_calls"][0]["tool"] == "write_memory_tool"
+        # write_memory_tool is silent — no tool_call trace in response
+        assert len(data["tool_calls"]) == 0
 
     @pytest.mark.asyncio
     async def test_returns_status_field(self, async_client: AsyncClient, monkeypatch) -> None:

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { chatNonStream, chatStream } from '../api/agent';
+import { invalidateStatsCache } from './useMemories';
 
 /** SSE `node` event → Chinese status label (mirrors frontend/app.py `_node_labels`). */
 const NODE_LABELS: Record<string, string> = {
@@ -174,6 +175,7 @@ export function useChat() {
         isStreamingRef.current = false;
         dispatch({ type: 'SET_STREAMING', isStreaming: false });
         dispatch({ type: 'INVALIDATE_THREADS' });
+        invalidateStatsCache();
         abortRef.current = null;
       }
     },
@@ -229,6 +231,7 @@ export function useChat() {
         isStreamingRef.current = false;
         dispatch({ type: 'SET_STREAMING', isStreaming: false });
         dispatch({ type: 'INVALIDATE_THREADS' });
+        invalidateStatsCache();
       }
     },
     [dispatch, threadId],

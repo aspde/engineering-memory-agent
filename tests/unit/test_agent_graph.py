@@ -64,6 +64,7 @@ class TestGraphRouting:
         """When LLM returns text (no tool_calls), route to generate_final."""
         mock_provider = AsyncMock()
         mock_provider.chat_raw.return_value = {"content": "I can answer that directly."}
+        mock_provider.chat.return_value = "Final synthesized answer."
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -75,9 +76,10 @@ class TestGraphRouting:
             {"configurable": {"thread_id": "test-1"}},
         )
 
-        # generate_final_node now produces final_prompt instead of calling LLM
+        # generate_final_node calls the LLM once and persists the response
+        assert "final_response" in result
+        assert result["final_response"] == "Final synthesized answer."
         assert "final_prompt" in result
-        assert len(result["final_prompt"]) > 0
 
     @pytest.mark.asyncio
     async def test_tool_calling_path(self, monkeypatch) -> None:
@@ -98,6 +100,7 @@ class TestGraphRouting:
             },
             {"content": "Based on search results, Python is a programming language."},
         ]
+        mock_provider.chat.return_value = "Final synthesized answer."
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
