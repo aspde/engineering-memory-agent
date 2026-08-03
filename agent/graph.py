@@ -38,6 +38,19 @@ from agent.nodes import (
 from agent.state import AgentState
 
 
+def _make_route_after_call_llm(max_steps: int):
+    """Return a routing function that respects *tools_condition* but
+    force-terminates to ``generate_final`` after *max_steps* iterations."""
+
+    def _route_after_call_llm(state: AgentState) -> str:
+        steps = state.get("step_count", 0) or 0
+        if steps >= max_steps:
+            return "generate_final"
+        return tools_condition(state)
+
+    return _route_after_call_llm
+
+
 def _route_after_approval(state: AgentState) -> str:
     """Route to tools after check_approval pass-through."""
     return "tools"
@@ -46,6 +59,7 @@ def _route_after_approval(state: AgentState) -> str:
 def build_agent_graph(
     tools: list,
     checkpointer: object | None = None,
+    max_steps: int = 5,
 ) -> CompiledStateGraph:
     """Build and compile the EMA agent graph.
 
@@ -53,6 +67,8 @@ def build_agent_graph(
         tools: List of ``@tool``-decorated async functions.
         checkpointer: Checkpointer for state persistence
             (InMemorySaver, PostgresSaver, etc.).  Defaults to InMemorySaver.
+        max_steps: Maximum ReAct loop iterations before the graph
+            forces a final answer.  Defaults to 5.
 
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
@@ -69,13 +85,15 @@ def build_agent_graph(
 
     builder.add_edge(START, "call_llm")
 
-    # call_llm → if tool_calls → check_approval (gate) else → generate_final
+    # call_llm → if tool_calls AND step_count < max_steps → check_approval
+    #            else → generate_final
     builder.add_conditional_edges(
         "call_llm",
-        tools_condition,
+        _make_route_after_call_llm(max_steps),
         {
             "tools": "check_approval",
             "__end__": "generate_final",
+            "generate_final": "generate_final",
         },
     )
 

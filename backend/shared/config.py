@@ -62,6 +62,12 @@ class AppConfig:
         default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/memory")
     )
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "development"))
+    max_agent_steps: int = field(
+        default_factory=lambda: int(os.getenv("MAX_AGENT_STEPS", "5"))
+    )
+    memory_enabled: bool = field(
+        default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() == "true"
+    )
 
 
 config = AppConfig()

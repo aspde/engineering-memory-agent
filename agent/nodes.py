@@ -206,7 +206,7 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     else:
         aimessage = AIMessage(content=content)
 
-    return {"messages": [aimessage]}
+    return {"messages": [aimessage], "step_count": state.get("step_count", 0) + 1}
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:

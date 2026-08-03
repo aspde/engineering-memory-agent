@@ -29,6 +29,21 @@ from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
 
+# ── Tool filtering based on MEMORY_ENABLED ──────────────────────────
+
+
+def _active_tools() -> list:
+    """Return the tool list appropriate for the current config.
+
+    When ``MEMORY_ENABLED=false`` the agent runs without any memory tools —
+    a lightweight pure-chat mode suitable for quick questions where the
+    memory pipeline overhead isn't warranted.
+    """
+    if config.memory_enabled:
+        return ALL_TOOLS
+    logger.info("MEMORY_ENABLED=false — agent running in chat-only mode (no tools)")
+    return []
+
 _checkpointer: InMemorySaver | object | None = None
 _pool = None  # psycopg AsyncConnectionPool, closed on shutdown
 
@@ -150,13 +165,20 @@ async def _close_checkpointer() -> None:
 
 
 def get_agent() -> CompiledStateGraph:
-    """Return a compiled agent graph with all default tools.
+    """Return a compiled agent graph with active tools per config.
 
     Uses ``AsyncPostgresSaver`` when the database is reachable;
     falls back to ``InMemorySaver``.  Different ``thread_id`` values
     in ``ainvoke()`` config are fully isolated.
+
+    Tool selection is controlled by ``MEMORY_ENABLED`` — when ``false``
+    the agent runs without memory tools (pure chat mode).
     """
-    return build_agent_graph(tools=ALL_TOOLS, checkpointer=_get_checkpointer())
+    return build_agent_graph(
+        tools=_active_tools(),
+        checkpointer=_get_checkpointer(),
+        max_steps=config.max_agent_steps,
+    )
 
 
 # Alias kept for compatibility — agents are now always per-thread-safe.

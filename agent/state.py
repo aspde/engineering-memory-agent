@@ -19,6 +19,11 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     """Conversation history with automatic ID-based dedup."""
 
+    step_count: int | None
+    """Number of ``call_llm`` invocations in the current conversation turn.
+    Used with ``MAX_AGENT_STEPS`` to bound the ReAct loop.  ``None`` until
+    the first ``call_llm`` pass."""
+
     final_response: str | None
     """Final answer set by generate_final_node.  Must be Optional because
     the initial state has no answer yet — only the terminal node sets it."""
