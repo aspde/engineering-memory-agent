@@ -13,7 +13,7 @@
 | LLM 调用 | LLMProvider 抽象接口 | 业务代码直接 import openai / anthropic |
 | Embedding | EmbeddingProvider 抽象接口 | 业务代码直接依赖具体模型 |
 | 后端 | Python 3.12 + FastAPI | — |
-| 前端 | Streamlit（MVP 阶段） | MVP 阶段引入 React 框架 |
+| 前端 | React + TypeScript + Vite + Tailwind CSS | — |
 
 ## 设计原则
 
