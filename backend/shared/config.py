@@ -30,8 +30,11 @@ class EmbeddingConfig:
     def dimension(self) -> int:
         dimensions: dict[str, int] = {
             "BAAI/bge-m3": 1024,
+            "text-embedding-3-small": 1536,
+            "text-embedding-3-large": 3072,
+            "text-embedding-ada-002": 1536,
         }
-        return dimensions.get(self.model, 1024)
+        return dimensions.get(self.model, 1536)
 
 
 @dataclass

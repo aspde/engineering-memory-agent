@@ -19,6 +19,15 @@ from backend.shared.config import config  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# ── Known dimensions for common embedding models ──────────────────────
+# Used to resolve dimension without making an API call.
+_KNOWN_DIMENSIONS: dict[str, int] = {
+    "BAAI/bge-m3": 1024,
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+}
+
 
 class BGEEmbeddingProvider(EmbeddingProvider):
     """BGE-M3 via sentence-transformers."""
@@ -64,6 +73,82 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         return self._model.get_sentence_embedding_dimension()
 
 
+class OpenAIEmbeddingProvider(EmbeddingProvider):
+    """OpenAI / OpenAI-compatible embedding API (text-embedding-3-*, etc.).
+
+    Uses the ``openai`` SDK for both async and sync paths.  Batch
+    requests are sent in groups of *batch_size* to stay under provider
+    rate limits.
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str = "text-embedding-3-small",
+        batch_size: int = 100,
+    ) -> None:
+        from openai import AsyncOpenAI, OpenAI
+
+        base = base_url.rstrip("/") if base_url else "https://api.openai.com/v1"
+        self._async_client = AsyncOpenAI(api_key=api_key, base_url=base)
+        self._client = OpenAI(api_key=api_key, base_url=base)
+        self._model = model
+        self._batch_size = batch_size
+
+        # Resolve dimension from known models; warn + default for unknowns.
+        self._dimension = _KNOWN_DIMENSIONS.get(model)
+        if self._dimension is None:
+            logger.warning(
+                "Unknown dimension for model %r — defaulting to 1536. "
+                "Add the model to _KNOWN_DIMENSIONS in %s.",
+                model,
+                __file__,
+            )
+            self._dimension = 1536
+
+        logger.info(
+            "OpenAI embedding provider ready: model=%r dimension=%d batch_size=%d",
+            model,
+            self._dimension,
+            batch_size,
+        )
+
+    # ── async ─────────────────────────────────────────────────────────
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(texts), self._batch_size):
+            batch = texts[i : i + self._batch_size]
+            response = await self._async_client.embeddings.create(
+                model=self._model,
+                input=batch,
+            )
+            all_embeddings.extend(
+                [d.embedding for d in response.data]
+            )
+        return all_embeddings
+
+    # ── sync ──────────────────────────────────────────────────────────
+
+    def embed_sync(self, texts: list[str]) -> list[list[float]]:
+        all_embeddings: list[list[float]] = []
+        for i in range(0, len(texts), self._batch_size):
+            batch = texts[i : i + self._batch_size]
+            response = self._client.embeddings.create(
+                model=self._model,
+                input=batch,
+            )
+            all_embeddings.extend(
+                [d.embedding for d in response.data]
+            )
+        return all_embeddings
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+
 _provider: EmbeddingProvider | None = None
 
 
@@ -73,14 +158,22 @@ def get_embedding_provider() -> EmbeddingProvider:
     if _provider is not None:
         return _provider
 
-    if config.embedding.provider == "local":
+    provider_name = config.embedding.provider
+    if provider_name == "local":
         _provider = BGEEmbeddingProvider(
             model_name=config.embedding.model,
             normalize=config.embedding.normalize,
             batch_size=config.embedding.batch_size,
             hf_endpoint=config.embedding.hf_endpoint,
         )
+    elif provider_name == "openai":
+        _provider = OpenAIEmbeddingProvider(
+            api_key=config.embedding.api_key,
+            base_url=config.embedding.base_url,
+            model=config.embedding.model,
+            batch_size=config.embedding.batch_size,
+        )
     else:
-        raise ValueError(f"Unsupported embedding provider: {config.embedding.provider}")
+        raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
 
     return _provider
