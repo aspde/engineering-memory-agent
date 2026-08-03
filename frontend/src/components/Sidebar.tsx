@@ -7,7 +7,7 @@ const THREADS_CACHE_TTL_MS = 30_000;
 
 export default function Sidebar() {
   const navigate = useNavigate();
-  const { threadId, threads, threadsFetchedAt, isStreaming } = useAppState();
+  const { threadId, threads, threadsFetchedAt } = useAppState();
   const dispatch = useAppDispatch();
 
   useEffect(() => {
@@ -37,13 +37,11 @@ export default function Sidebar() {
   const isLoading = threadsFetchedAt === 0;
 
   const handleNewConversation = () => {
-    if (isStreaming) return;
     dispatch({ type: 'NEW_CONVERSATION', threadId: crypto.randomUUID() });
     navigate('/');
   };
 
   const handleOpenThread = (id: string) => {
-    if (isStreaming) return;
     dispatch({ type: 'SET_THREAD_ID', threadId: id });
     navigate('/');
   };
@@ -61,8 +59,7 @@ export default function Sidebar() {
         <button
           type="button"
           onClick={handleNewConversation}
-          disabled={isStreaming}
-          className="w-full rounded-lg bg-blue-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+          className="w-full rounded-lg bg-blue-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-blue-700"
         >
           ＋ 新建对话
         </button>
@@ -97,7 +94,7 @@ export default function Sidebar() {
                 key={t.thread_id}
                 type="button"
                 onClick={() => handleOpenThread(t.thread_id)}
-                disabled={isStreaming || active}
+                disabled={active}
                 className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
                   active
                     ? 'bg-blue-50 font-medium text-blue-700'

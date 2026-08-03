@@ -100,15 +100,19 @@ class TestAgentChat:
 
     @pytest.mark.asyncio
     async def test_includes_tool_call_traces(self, async_client: AsyncClient, monkeypatch) -> None:
-        """Response includes tool call traces from ToolMessages."""
+        """Response includes tool call traces only for write/ingest tools."""
         from unittest.mock import AsyncMock
         from langchain_core.messages import ToolMessage
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {
-            "final_response": "Based on what I found...",
+            "final_response": "Memory has been saved.",
             "messages": [
-                ToolMessage(content="Found 1 memory: EMA uses PostgreSQL", tool_call_id="call_1", name="search_memories_tool"),
+                ToolMessage(
+                    content='{"action":"inserted","summary":"EMA uses PostgreSQL"}',
+                    tool_call_id="call_1",
+                    name="write_memory_tool",
+                ),
             ],
         }
 
@@ -119,12 +123,12 @@ class TestAgentChat:
 
         response = await async_client.post(
             "/api/agent/chat",
-            json={"message": "what is EMA?"},
+            json={"message": "remember EMA uses PostgreSQL"},
         )
         assert response.status_code == 200
         data = response.json()
         assert len(data["tool_calls"]) == 1
-        assert data["tool_calls"][0]["tool"] == "search_memories_tool"
+        assert data["tool_calls"][0]["tool"] == "write_memory_tool"
 
     @pytest.mark.asyncio
     async def test_returns_status_field(self, async_client: AsyncClient, monkeypatch) -> None:

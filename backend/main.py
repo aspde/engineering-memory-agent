@@ -22,9 +22,11 @@ from contextlib import asynccontextmanager
 
 # ── Windows: psycopg 3 (used by AsyncPostgresSaver) requires
 #    SelectorEventLoop — ProActorEventLoop is incompatible.
-if sys.platform == "win32":
-    loop = asyncio.SelectorEventLoop()
-    asyncio.set_event_loop(loop)
+#    uvicorn creates its own event loop after importing this module,
+#    so set_event_loop here has no lasting effect.  On Windows the
+#    checkpointer falls back to InMemorySaver — acceptable for dev.
+#    Production should run in a Linux container where ProactorEventLoop
+#    doesn't exist and psycopg async works natively.
 
 from fastapi import FastAPI
 

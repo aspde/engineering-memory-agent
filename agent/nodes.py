@@ -34,7 +34,7 @@ You have access to tools for:
 When the user asks a question:
 1. Search relevant memories and documents first
 2. Synthesize information from retrieved context
-3. Answer clearly with references to sources when available
+3. Answer clearly and concisely — do not list or enumerate sources, they are shown separately in the UI
 
 When the user asks to ingest or index content, use the appropriate tools.
 Always prefer searching over guessing.
@@ -219,6 +219,10 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
+        # Chunk retrieval is noisy; the LLM's answer should rely on
+        # memory search results (which have stable IDs and summaries).
+        if tool_name == "retrieve_chunks_tool":
+            continue
         raw = str(m.content) if m.content else ""
         if not raw.strip():
             continue
@@ -241,8 +245,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     system_content = (
         "You are EMA, the Engineering Memory Agent. "
         "Answer the user's question based on the conversation "
-        "and any retrieved context provided below. "
-        "Be concise and cite sources when available."
+        "and the retrieved context below. "
+        "Be concise.  Do NOT list or enumerate the sources in your response — "
+        "they are already displayed separately in the UI."
     )
     if context_str:
         system_content += f"\n\nContext:\n{context_str}"

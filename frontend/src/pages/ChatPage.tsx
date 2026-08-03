@@ -29,7 +29,16 @@ export default function ChatPage() {
         if (cancelled) return;
         dispatch({
           type: 'SET_MESSAGES',
-          messages: res.messages.map((m) => ({ role: m.role, content: m.content })),
+          messages: res.messages.map((m) => {
+            const toolCalls = m.tool_calls ?? [];
+            const sources = m.sources ?? [];
+            const hasMeta = toolCalls.length > 0 || sources.length > 0;
+            return {
+              role: m.role,
+              content: m.content,
+              _meta: hasMeta ? { toolCalls, sources } : undefined,
+            };
+          }),
         });
       })
       .catch(() => {

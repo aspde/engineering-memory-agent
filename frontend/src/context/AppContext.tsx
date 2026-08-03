@@ -57,6 +57,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       };
     case 'SET_LOADED_THREAD':
       return { ...state, loadedThreadId: action.threadId };
+    case 'INVALIDATE_THREADS':
+      return { ...state, threadsFetchedAt: 0 };
     default:
       return state;
   }

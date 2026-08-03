@@ -62,8 +62,6 @@ async def _setup_checkpointer() -> None:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
         from psycopg_pool import AsyncConnectionPool
 
-        # config.database_url is postgresql://..., psycopg 3 natively supports it.
-        # Remove +asyncpg if present (legacy compatibility).
         conninfo = config.database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
 
         _pool = AsyncConnectionPool(

@@ -19,7 +19,7 @@ const TOKEN_BATCH_INTERVAL_MS = 50;
  * Wires the global app state to the streaming / non-streaming agent APIs.
  * Uses `AbortController` to cancel in-flight SSE streams on unmount or
  * thread switch.  Streaming state is synced to `AppState.isStreaming` so
- * the sidebar can disable thread-select buttons while the agent is busy.
+ * the UI can show a loading indicator while the agent is busy.
  */
 export function useChat() {
   const { threadId, isStreaming } = useAppState();
@@ -40,6 +40,17 @@ export function useChat() {
       }
     };
   }, []);
+
+  // Abort the current stream when the user switches to a different thread.
+  useEffect(() => {
+    abortRef.current?.abort();
+    if (flushTimerRef.current !== null) {
+      window.clearInterval(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    isStreamingRef.current = false;
+    dispatch({ type: 'SET_STREAMING', isStreaming: false });
+  }, [threadId, dispatch]);
 
   /** Push accumulated tokens (if any) onto the last assistant message. */
   const flushTokens = useCallback(() => {
@@ -104,7 +115,8 @@ export function useChat() {
               if (node !== 'generate_final' && !yieldedNodes.has(node)) {
                 yieldedNodes.add(node);
                 const label = NODE_LABELS[node] ?? node;
-                tokenBufferRef.current += `\n\n> ${label}\n\n`;
+                const suffix = node === 'check_conflict' ? '\n' : '';
+                tokenBufferRef.current += `> ${label}\n${suffix}`;
               }
               break;
             }
@@ -161,6 +173,7 @@ export function useChat() {
         stopTokenTimer();
         isStreamingRef.current = false;
         dispatch({ type: 'SET_STREAMING', isStreaming: false });
+        dispatch({ type: 'INVALIDATE_THREADS' });
         abortRef.current = null;
       }
     },
@@ -215,6 +228,7 @@ export function useChat() {
       } finally {
         isStreamingRef.current = false;
         dispatch({ type: 'SET_STREAMING', isStreaming: false });
+        dispatch({ type: 'INVALIDATE_THREADS' });
       }
     },
     [dispatch, threadId],

@@ -41,6 +41,8 @@ export interface ThreadMessagesResponse {
 export interface MessageFromBackend {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  tool_calls?: ToolCall[];
+  sources?: Source[];
 }
 
 /** Frontend-enriched message with optional metadata from streaming. */
@@ -180,4 +182,5 @@ export type AppAction =
   | { type: 'SET_MEM_FILTER'; memId: string }
   | { type: 'CLEAR_MEM_FILTER' }
   | { type: 'NEW_CONVERSATION'; threadId: string }
-  | { type: 'SET_LOADED_THREAD'; threadId: string | null };
+  | { type: 'SET_LOADED_THREAD'; threadId: string | null }
+  | { type: 'INVALIDATE_THREADS' };

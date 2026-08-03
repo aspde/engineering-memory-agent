@@ -5,10 +5,39 @@ from __future__ import annotations
 import json
 import logging
 
+import httpx
+
 from backend.model.llm import LLMProvider
 from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
+
+# Keep-alive connections idle for longer than this are discarded before
+# reuse, avoiding "Connection error." when the remote side has already
+# closed the TCP connection but httpx still believes it is valid.
+_KEEPALIVE_EXPIRY_SECONDS = 30.0
+
+
+def _build_async_http_client(timeout: int) -> httpx.AsyncClient:
+    """Return an ``httpx.AsyncClient`` with conservative keep-alive settings."""
+    return httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout=float(timeout)),
+        limits=httpx.Limits(
+            max_keepalive_connections=2,
+            keepalive_expiry=_KEEPALIVE_EXPIRY_SECONDS,
+        ),
+    )
+
+
+def _build_sync_http_client(timeout: int) -> httpx.Client:
+    """Return an ``httpx.Client`` with conservative keep-alive settings."""
+    return httpx.Client(
+        timeout=httpx.Timeout(timeout=float(timeout)),
+        limits=httpx.Limits(
+            max_keepalive_connections=2,
+            keepalive_expiry=_KEEPALIVE_EXPIRY_SECONDS,
+        ),
+    )
 
 
 class OpenAICompatibleProvider(LLMProvider):
@@ -28,11 +57,16 @@ class OpenAICompatibleProvider(LLMProvider):
         self._model = model
         self._temperature = temperature
         self._max_tokens = max_tokens
+
         self._async_client = AsyncOpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
         )
         self._sync_client = OpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout,
         )
         logger.info("LLM provider ready: %s @ %s", model, base_url)
 
@@ -82,19 +116,28 @@ class OpenAICompatibleProvider(LLMProvider):
     ):
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        stream = await self._async_client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            stream=True,
-            **kwargs,
-        )
-        async for chunk in stream:
-            choices = chunk.choices
-            if not choices:
-                continue
-            delta = choices[0].delta
-            if delta and delta.content:
-                yield delta.content
+        try:
+            stream = await self._async_client.chat.completions.create(
+                model=self._model,
+                messages=messages,  # type: ignore[arg-type]
+                stream=True,
+                **kwargs,
+            )
+            async for chunk in stream:
+                choices = chunk.choices
+                if not choices:
+                    continue
+                delta = choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+        except Exception:
+            # Streaming path is unreliable on Windows (httpx +
+            # SelectorEventLoop incompatibility).  Fall back to a
+            # non-streaming call so the user still gets an answer.
+            logger.warning("chat_stream failed, falling back to non-streaming", exc_info=True)
+            text = await self.chat(messages, **kwargs)
+            if text:
+                yield text
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
         kwargs.setdefault("temperature", self._temperature)
@@ -125,10 +168,15 @@ class AnthropicProvider(LLMProvider):
 
         self._model = model
         self._max_tokens = max_tokens
+
         self._async_client = AsyncAnthropic(
-            api_key=api_key, timeout=timeout
+            api_key=api_key,
+            timeout=timeout,
         )
-        self._sync_client = Anthropic(api_key=api_key, timeout=timeout)
+        self._sync_client = Anthropic(
+            api_key=api_key,
+            timeout=timeout,
+        )
         logger.info("Anthropic provider ready: %s", model)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> str:

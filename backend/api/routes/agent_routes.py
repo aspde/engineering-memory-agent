@@ -65,21 +65,36 @@ async def _stream_final_answer(
     )
 
 
+# Read-only tools whose results belong in the sources panel, not the
+# tool-call panel (the user doesn't approve reads, and their output is
+# already reflected in the assistant's answer + source references).
+_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "search_memories_tool",
+    "retrieve_chunks_tool",
+})
+
+
 def _extract_tool_traces(
     messages: list,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Extract tool call traces and sources from a message list.
 
-    If a ToolMessage contains a JSON envelope with a ``sources`` key,
-    those structured sources are used directly (enabling clickable
-    references).  Otherwise falls back to the legacy snippet extraction.
+    Read-only tools (search / retrieve) are surfaced as **sources** only.
+    Write tools (write / ingest / extract) appear as **tool-call traces**
+    so the user can see what was modified.
     """
     tool_call_traces: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
+
     for m in messages:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
+
+        # Chunk retrieval sources have no stable IDs — skip entirely.
+        if tool_name == "retrieve_chunks_tool":
+            continue
+
         raw = str(m.content) if m.content else ""
 
         # Try to extract structured sources from JSON envelope
@@ -94,21 +109,35 @@ def _extract_tool_traces(
         except (json.JSONDecodeError, TypeError):
             display = raw
 
-        tool_call_traces.append({
-            "tool": tool_name,
-            "content": display[:300],
-        })
+        # Only write / ingest tools go to the tool-call panel.  Read
+        # results (search_memories_tool) are shown as clickable sources.
+        if tool_name not in _READ_ONLY_TOOLS:
+            tool_call_traces.append({
+                "tool": tool_name,
+                "content": display[:300],
+            })
 
         if parsed_sources is not None:
             sources.extend(parsed_sources)
-        elif tool_name in ("search_memories_tool", "retrieve_chunks_tool"):
-            source_type = "memory" if tool_name == "search_memories_tool" else "chunk"
+        elif tool_name == "search_memories_tool":
             if raw.strip():
-                sources.append({"type": source_type, "snippet": raw[:200]})
-        elif raw.strip():
+                sources.append({"type": "memory", "snippet": raw[:200]})
+        elif tool_name not in _READ_ONLY_TOOLS and raw.strip():
             sources.append({"type": "unknown", "snippet": raw[:200]})
 
-    return tool_call_traces, sources
+    # Deduplicate sources by id (same memory may be returned by multiple
+    # search calls in a single ReAct loop).  Sources without an id are
+    # kept as-is (legacy / fallback entries).
+    seen_ids: set[str] = set()
+    unique_sources: list[dict[str, Any]] = []
+    for s in sources:
+        sid = s.get("id")
+        if sid is not None:
+            if sid in seen_ids:
+                continue
+            seen_ids.add(sid)
+        unique_sources.append(s)
+    return tool_call_traces, unique_sources
 
 
 # ── Request / Response models ────────────────────────────────────────
@@ -174,24 +203,60 @@ async def get_thread_messages(thread_id: str) -> ThreadMessagesResponse:
     if not state or not state.values:
         return ThreadMessagesResponse(thread_id=thread_id, messages=[])
 
-    messages: list[dict[str, Any]] = []
-    for m in state.values.get("messages", []):
-        role: str = "assistant"
-        if isinstance(m, HumanMessage):
-            role = "user"
-        elif isinstance(m, AIMessage):
-            role = "assistant"
-        elif isinstance(m, ToolMessage):
-            role = "system"
-        msg_dict: dict[str, Any] = {
-            "role": role,
-            "content": str(m.content) if m.content else "",
-        }
-        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            # AIMessages with tool_calls are intermediate ReAct steps —
-            # the final response from generate_final_node has no tool_calls.
-            continue
-        messages.append(msg_dict)
+    # Build displayed messages in "turns": each HumanMessage starts a new
+    # turn.  Tool-call traces and sources extracted from ToolMessages
+    # within a turn are attached to that turn's final assistant message.
+    displayed: list[dict[str, Any]] = []
+    raw_messages = state.values.get("messages", [])
+
+    # Collect raw messages belonging to the current turn.
+    turn_buf: list = []
+
+    def _flush_turn() -> None:
+        """Process the accumulated *turn_buf* into *displayed*."""
+        if not turn_buf:
+            return
+
+        # Extract tool traces + sources only from this turn's ToolMessages.
+        turn_traces, turn_sources = _extract_tool_traces(turn_buf)
+
+        for m in turn_buf:
+            if isinstance(m, ToolMessage):
+                continue
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                continue
+
+            role = "user" if isinstance(m, HumanMessage) else "assistant"
+            msg_dict: dict[str, Any] = {
+                "role": role,
+                "content": str(m.content) if m.content else "",
+            }
+            # Deduplicate consecutive assistant messages within the turn.
+            if role == "assistant" and displayed and displayed[-1]["role"] == "assistant":
+                displayed[-1] = msg_dict
+            else:
+                displayed.append(msg_dict)
+
+        # Attach this turn's traces & sources to its last assistant msg.
+        if turn_traces or turn_sources:
+            for i in range(len(displayed) - 1, -1, -1):
+                if displayed[i]["role"] == "assistant":
+                    if turn_traces:
+                        displayed[i]["tool_calls"] = turn_traces
+                    if turn_sources:
+                        displayed[i]["sources"] = turn_sources
+                    break
+
+        turn_buf.clear()
+
+    for m in raw_messages:
+        if isinstance(m, HumanMessage) and turn_buf:
+            # A new user message starts a fresh turn.
+            _flush_turn()
+        turn_buf.append(m)
+
+    _flush_turn()
+    messages = displayed
 
     return ThreadMessagesResponse(thread_id=thread_id, messages=messages)
 
