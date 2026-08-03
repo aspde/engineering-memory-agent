@@ -1,0 +1,81 @@
+import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import MessageBubble from '../components/MessageBubble';
+import type { Message, Source, ToolCall } from '../types';
+
+// SourcesPanel depends on React Router + AppContext; mock it so MessageBubble
+// can be rendered as a pure presentational component in isolation.
+vi.mock('../components/SourcesPanel', () => ({
+  default: () => <div data-testid="sources-panel">mock sources panel</div>,
+}));
+
+function makeMessage(overrides: Partial<Message> = {}): Message {
+  return { role: 'assistant', content: '你好', ...overrides };
+}
+
+const toolCalls: ToolCall[] = [
+  {
+    tool: 'write_memory_tool',
+    content: JSON.stringify({ action: 'inserted', summary: 'New memory' }),
+  },
+];
+
+const sources: Source[] = [{ type: 'memory', summary: '一篇关于缓存的记忆', relevance: 0.9 }];
+
+describe('MessageBubble', () => {
+  it('renders user messages right-aligned with a blue bubble', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ role: 'user', content: 'hello' })} />);
+    const outer = container.firstElementChild as HTMLElement;
+    expect(outer.className).toContain('justify-end');
+    expect(container.querySelector('.rounded-2xl.bg-blue-600')).not.toBeNull();
+  });
+
+  it('renders assistant messages left-aligned with a grey bubble', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ role: 'assistant' })} />);
+    const outer = container.firstElementChild as HTMLElement;
+    expect(outer.className).toContain('justify-start');
+    expect(container.querySelector('.rounded-2xl.bg-gray-100')).not.toBeNull();
+  });
+
+  it('renders system messages centred with an amber background', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ role: 'system', content: '注意' })} />);
+    const outer = container.firstElementChild as HTMLElement;
+    expect(outer.className).toContain('justify-center');
+    expect(container.querySelector('.bg-amber-50')).not.toBeNull();
+  });
+
+  it('shows a typing indicator for an empty streaming assistant message', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ content: '' })} isStreaming />);
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(3);
+  });
+
+  it('renders streamed content without a typing indicator', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ content: '流式内容' })} isStreaming />);
+    expect(screen.getByText('流式内容')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+
+  it('renders the ToolCallPanel below an assistant message with tool calls', () => {
+    render(<MessageBubble message={makeMessage({ _meta: { toolCalls, sources: [] } })} />);
+    expect(screen.getByText('🔧 工具调用')).toBeInTheDocument();
+    expect(screen.getByText('写入记忆')).toBeInTheDocument();
+    expect(screen.queryByTestId('sources-panel')).not.toBeInTheDocument();
+  });
+
+  it('renders the SourcesPanel below an assistant message with sources', () => {
+    render(<MessageBubble message={makeMessage({ _meta: { toolCalls: [], sources } })} />);
+    expect(screen.getByTestId('sources-panel')).toBeInTheDocument();
+  });
+
+  it('renders both panels when tool calls and sources are present', () => {
+    render(<MessageBubble message={makeMessage({ _meta: { toolCalls, sources } })} />);
+    expect(screen.getByText('🔧 工具调用')).toBeInTheDocument();
+    expect(screen.getByTestId('sources-panel')).toBeInTheDocument();
+  });
+
+  it('renders no panels when the message has no metadata', () => {
+    render(<MessageBubble message={makeMessage()} />);
+    expect(screen.queryByText('🔧 工具调用')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('sources-panel')).not.toBeInTheDocument();
+  });
+});

@@ -154,7 +154,7 @@ async function readErrorDetail(response: Response): Promise<string> {
 }
 
 /** Parse a single SSE line; returns null for empty/non-`data:`/malformed lines. */
-function parseSSELine(line: string): SSEEvent | null {
+export function parseSSELine(line: string): SSEEvent | null {
   if (!line.startsWith('data: ')) return null;
   const payload = line.slice('data: '.length).trim();
   if (!payload) return null;
@@ -167,7 +167,7 @@ function parseSSELine(line: string): SSEEvent | null {
 }
 
 /** Convert a raw SSE JSON payload into a typed {@link SSEEvent}. */
-function normalizeSSEEvent(data: Record<string, unknown>): SSEEvent {
+export function normalizeSSEEvent(data: Record<string, unknown>): SSEEvent {
   switch (data.type) {
     case 'token':
       return { type: 'token', content: String(data.content ?? '') };

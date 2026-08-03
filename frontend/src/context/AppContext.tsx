@@ -13,7 +13,7 @@ const initialState: AppState = {
   memFilterId: null,
 };
 
-function appReducer(state: AppState, action: AppAction): AppState {
+export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_THREAD_ID':
       return { ...state, threadId: action.threadId, messages: [], pendingInterrupt: null, waitingForApproval: false };
