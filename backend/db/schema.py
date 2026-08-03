@@ -40,13 +40,24 @@ _STATEMENTS = [
         recalled_at TIMESTAMPTZ DEFAULT now(),
         recall_count INT DEFAULT 0,
         meta        JSONB DEFAULT '{}',
-        created_at  TIMESTAMPTZ DEFAULT now()
+        created_at  TIMESTAMPTZ DEFAULT now(),
+        updated_at  TIMESTAMPTZ
     )
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_memories_embedding
         ON memories USING ivfflat (embedding vector_cosine_ops)
         WITH (lists = 100)
+    """,
+    # Migration: add updated_at to existing memories tables that lack it.
+    # CREATE TABLE IF NOT EXISTS won't mutate an existing table, so we
+    # apply this ALTER for databases created before the column was added.
+    """
+    DO $$
+    BEGIN
+        ALTER TABLE memories ADD COLUMN updated_at TIMESTAMPTZ;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
     """,
     """
     CREATE TABLE IF NOT EXISTS conversations (
