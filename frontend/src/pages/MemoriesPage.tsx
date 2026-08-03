@@ -8,10 +8,20 @@ import { useAppDispatch, useAppState } from '../context/AppContext';
 import { useMemories } from '../hooks/useMemories';
 import type { MemoryGetResponse } from '../types';
 
+type Tab = 'dashboard' | 'ingest' | 'search';
+
+const TABS: { key: Tab; label: string; icon: string }[] = [
+  { key: 'dashboard', label: '仪表盘', icon: '📊' },
+  { key: 'ingest', label: '摄入文档', icon: '📥' },
+  { key: 'search', label: '搜索记忆', icon: '🔍' },
+];
+
 export default function MemoriesPage() {
   const { stats, isLoading, error, fetchStats, getMemoryById } = useMemories();
   const { memFilterId } = useAppState();
   const dispatch = useAppDispatch();
+
+  const [activeTab, setActiveTab] = useState<Tab>('dashboard');
 
   // Chat → memories jump filter state.
   const [jumpMemory, setJumpMemory] = useState<MemoryGetResponse | null>(null);
@@ -26,6 +36,9 @@ export default function MemoriesPage() {
     setJumpNotFound(false);
     setJumpError(null);
     setJumpMemory(null);
+
+    // Switch to search tab so the jumped memory is visible.
+    setActiveTab('search');
 
     getMemoryById(memFilterId)
       .then((mem) => {
@@ -57,12 +70,28 @@ export default function MemoriesPage() {
       <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
         <h1 className="mb-6 text-2xl font-bold text-gray-900">📚 记忆库</h1>
 
-        {/* Stats dashboard */}
-        <StatsDashboard stats={stats} isLoading={isLoading} error={error} onRetry={fetchStats} />
+        {/* Tab bar */}
+        <nav className="mb-6 flex gap-1 border-b border-gray-200">
+          {TABS.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setActiveTab(tab.key)}
+              className={`rounded-t-lg border-b-2 px-4 py-2.5 text-sm font-medium transition-colors ${
+                activeTab === tab.key
+                  ? 'border-blue-600 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700'
+              }`}
+            >
+              <span className="mr-1.5">{tab.icon}</span>
+              {tab.label}
+            </button>
+          ))}
+        </nav>
 
-        {/* Chat jump filter */}
+        {/* Chat jump filter — visible across all tabs */}
         {memFilterId && (
-          <div className="mt-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
+          <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4">
             <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
               <p className="text-sm text-blue-800">
                 🔗 从聊天跳转 — 正在查找记忆{' '}
@@ -89,24 +118,13 @@ export default function MemoriesPage() {
           </div>
         )}
 
-        <hr className="my-8 border-gray-200" />
-
-        {/* Ingest section (collapsible, default collapsed) */}
-        <details className="rounded-lg border border-gray-200 bg-white">
-          <summary className="cursor-pointer select-none rounded-lg px-4 py-3 text-sm font-medium text-gray-800 transition-colors hover:bg-gray-50">
-            📥 摄入文档
-          </summary>
-          <div className="border-t border-gray-200 p-4">
-            <IngestSection onIngest={fetchStats} />
-          </div>
-        </details>
-
-        <hr className="my-8 border-gray-200" />
-
-        {/* Memory search */}
+        {/* Tab content */}
         <section>
-          <h2 className="mb-3 text-sm font-semibold text-gray-900">搜索记忆</h2>
-          <MemorySearch />
+          {activeTab === 'dashboard' && (
+            <StatsDashboard stats={stats} isLoading={isLoading} error={error} onRetry={fetchStats} />
+          )}
+          {activeTab === 'ingest' && <IngestSection onIngest={fetchStats} />}
+          {activeTab === 'search' && <MemorySearch />}
         </section>
       </div>
     </div>

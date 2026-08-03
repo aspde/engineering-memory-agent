@@ -28,11 +28,19 @@ from contextlib import asynccontextmanager
 #    Production should run in a Linux container where ProactorEventLoop
 #    doesn't exist and psycopg async works natively.
 
+from pathlib import Path
+
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from backend.api.router import api_router
 from backend.db import close_db
 from backend.db.schema import init_db
+
+# Paths relative to backend/main.py
+_FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+_FRONTEND_STATIC = Path(__file__).resolve().parent.parent / "frontend" / "static"
 
 
 @asynccontextmanager
@@ -76,3 +84,20 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix="/api")
+
+# ── SPA static files & fallback ──
+# Mount asset directories so the browser can load JS/CSS/images.
+if _FRONTEND_DIST.joinpath("assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+
+if _FRONTEND_STATIC.is_dir():
+    app.mount("/static", StaticFiles(directory=str(_FRONTEND_STATIC)), name="static")
+
+
+@app.get("/{full_path:path}", include_in_schema=False)
+async def spa_fallback(full_path: str):
+    """Catch-all: serve index.html for any non-API route (SPA client-side routing)."""
+    index_path = _FRONTEND_DIST / "index.html"
+    if index_path.is_file():
+        return FileResponse(str(index_path))
+    return {"detail": "Frontend not built — run: cd frontend && npm run build"}
