@@ -118,7 +118,6 @@ Agent 工具调用通过新增的 `chat_raw(messages, tools, **kwargs) → dict`
 - **React + TypeScript + Vite + Tailwind CSS**
 - 纯客户端 SPA，2 个页面：聊天页、记忆库页
 - SSE 流式聊天、Human-in-the-Loop 审批/冲突解决
-- 旧 Streamlit MVP 已备份至 `frontend/streamlit-backup/`
 
 ### Key Dependencies
 
