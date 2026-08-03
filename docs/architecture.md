@@ -25,12 +25,12 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Layer | Technology | Status |
 |-------|-----------|--------|
 | Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
-| Backend | FastAPI + Python 3.12 | 10 个 API 端点已实现（含 SSE 流式 + HITL） |
+| Backend | FastAPI + Python 3.12 | 11 个 API 端点已实现（含 SSE 流式 + HITL） |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/衰减/去重全链路已实现 |
 | Storage | PostgreSQL + pgvector | docker-compose 已就绪 |
 | LLM | OpenAI SDK / Anthropic SDK | provider 抽象 + chat_raw 工具调用已实现 |
-| Embedding | BGE-M3 (sentence-transformers) | 本地离线模式已实现 |
+| Embedding | BGE-M3 (local) / OpenAI (API) | 本地离线 + OpenAI 兼容 API 双模式 |
 
 ## Layer Responsibilities
 
@@ -54,6 +54,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
 | POST | `/api/memory/memories/search` | 记忆搜索：衰减加权 → rerank → 更新 decay |
 | GET | `/api/memory/memories/{memory_id}` | 通过 ID 获取单条记忆 |
+| DELETE | `/api/memory/memories/{memory_id}` | 软删除记忆（设置 deleted_at） |
 | GET | `/api/memory/stats` | 记忆库统计信息（总数、来源分布、高频实体等） |
 
 ## Technology Stack

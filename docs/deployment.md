@@ -16,7 +16,7 @@ services:
 | Service | Image | Status |
 |---------|-------|--------|
 | postgres | pgvector/pgvector:pg16 | 已就绪 |
-| backend | FastAPI + Python 3.12 | 10 个 API 端点已实现，待容器化 |
+| backend | FastAPI + Python 3.12 | 11 个 API 端点已实现，待容器化 |
 | frontend | React + TypeScript + Vite | SPA 已实现（聊天页、记忆库页），待容器化 |
 
 ## Configuration

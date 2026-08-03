@@ -5,20 +5,26 @@
 手动构建 `StateGraph` ReAct 循环 —— 不使用任何预建 Agent（`create_react_agent` 已废弃，`create_agent` 禁止引入）。
 
 ```
-START → call_llm ──(有 tool_calls)──→ tools ──→ call_llm (循环)
+START → call_llm ──(无 tool_calls)──→ generate_final → END
          │
-         └──(无 tool_calls)──→ generate_final → END
+         └──(有 tool_calls)──→ check_approval ──→ tools ──→ check_conflict
+                                   │                            │
+                                   └──(拒绝)────────────────────┘
+                                                              │
+                                   call_llm ←─────────────────┘
 ```
 
-三个节点：
+五个节点：
 
 | 节点 | 实现 | 职责 |
 |------|------|------|
 | `call_llm` | `agent/nodes.py` | 将对话历史 + tool schema 发给 LLM，解析返回的 `AIMessage`（含 `tool_calls`，如有） |
-| `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage`；执行失败返回错误 `ToolMessage`，不终止图执行 |
-| `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终自然语言回答 |
+| `check_approval` | `agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批 |
+| `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage` |
+| `check_conflict` | `agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
+| `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答 |
 
-路由：`tools_condition`（LangGraph 内置）—— AIMessage 有 `tool_calls` 则去 `tools`（形成循环），无则去 `generate_final`（终止）。
+路由：`tools_condition`（LangGraph 内置）—— AIMessage 有 `tool_calls` 则进入 `check_approval`（HITL 审批），无则去 `generate_final`（终止）。
 
 ## 设计决策
 
@@ -53,9 +59,9 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 
 ```
 agent/
-  state.py    # AgentState TypedDict (messages, final_response, error)
+  state.py    # AgentState TypedDict (messages, final_response, final_prompt, error, pending_approval)
   tools.py    # 6 个 @tool 薄封装 → 调用 backend/service/
-  nodes.py    # call_llm_node, generate_final_node
+  nodes.py    # call_llm_node, check_approval_node, check_conflict_node, generate_final_node
   graph.py    # build_agent_graph(), get_default_agent()
 
 backend/
