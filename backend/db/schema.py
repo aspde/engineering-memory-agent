@@ -60,6 +60,13 @@ _STATEMENTS = [
     END $$;
     """,
     """
+    DO $$
+    BEGIN
+        ALTER TABLE memories ADD COLUMN deleted_at TIMESTAMPTZ;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversations (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         thread_id   TEXT NOT NULL UNIQUE,

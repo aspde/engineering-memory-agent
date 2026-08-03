@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getMemory, getStats, ingest, searchMemories } from '../api/memory';
+import { deleteMemory, getMemory, getStats, ingest, searchMemories } from '../api/memory';
 import type {
   IngestResponse,
   MemoryGetResponse,
@@ -18,6 +18,11 @@ const STATS_CACHE_TTL_MS = 60_000;
  */
 let statsCache: Promise<MemoryStatsResponse> | null = null;
 let statsCacheAt = 0;
+
+/** Invalidate the stats cache so the next reader re-fetches from the API. */
+export function invalidateStatsCache() {
+  statsCacheAt = 0;
+}
 
 /** Read a file as text, falling back to latin-1 when it is not valid UTF-8. */
 async function readFileContent(file: File): Promise<string> {
@@ -117,6 +122,21 @@ export function useMemories() {
     [],
   );
 
+  /** Delete a memory by its id. */
+  const deleteMemoryById = useCallback(
+    async (id: string): Promise<{ id: string; deleted: boolean }> => deleteMemory(id),
+    [],
+  );
+
+  /** Remove a memory from the current search results by id. */
+  const removeSearchResult = useCallback((id: string) => {
+    setSearchResults(prev => {
+      if (!prev) return null;
+      const filtered = prev.filter(m => String(m.id) !== id);
+      return filtered.length > 0 ? filtered : null;
+    });
+  }, []);
+
   return {
     stats,
     isLoading,
@@ -129,5 +149,7 @@ export function useMemories() {
     ingestText,
     ingestFile,
     getMemoryById,
+    deleteMemoryById,
+    removeSearchResult,
   };
 }

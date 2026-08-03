@@ -51,6 +51,22 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   return handleJsonResponse<T>(response, path);
 }
 
+/** Perform a DELETE request and parse the JSON response. */
+async function apiDelete<T>(path: string): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${BASE_URL}${path}`, {
+      method: 'DELETE',
+      headers: { Accept: 'application/json' },
+    });
+  } catch (err) {
+    throw new Error(
+      `Network error deleting ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  return handleJsonResponse<T>(response, path);
+}
+
 /**
  * Stream a POST response as Server-Sent Events.
  *
@@ -190,4 +206,4 @@ export function normalizeSSEEvent(data: Record<string, unknown>): SSEEvent {
   }
 }
 
-export { apiGet, apiPost, apiSSE };
+export { apiGet, apiPost, apiDelete, apiSSE };

@@ -17,11 +17,18 @@ const TABS: { key: Tab; label: string; icon: string }[] = [
 ];
 
 export default function MemoriesPage() {
-  const { stats, isLoading, error, fetchStats, getMemoryById } = useMemories();
+  const { stats, isLoading, error, fetchStats, getMemoryById, deleteMemoryById } = useMemories();
   const { memFilterId } = useAppState();
   const dispatch = useAppDispatch();
 
   const [activeTab, setActiveTab] = useState<Tab>('dashboard');
+
+  // Refresh stats whenever the dashboard tab becomes active.
+  useEffect(() => {
+    if (activeTab === 'dashboard') {
+      fetchStats();
+    }
+  }, [activeTab, fetchStats]);
 
   // Chat → memories jump filter state.
   const [jumpMemory, setJumpMemory] = useState<MemoryGetResponse | null>(null);
@@ -63,6 +70,16 @@ export default function MemoriesPage() {
 
   const handleClearFilter = () => {
     dispatch({ type: 'CLEAR_MEM_FILTER' });
+  };
+
+  const handleDeleteJumpMemory = async (id: string) => {
+    try {
+      await deleteMemoryById(id);
+      dispatch({ type: 'CLEAR_MEM_FILTER' });
+      fetchStats();
+    } catch (err) {
+      setJumpError(err instanceof Error ? err.message : String(err));
+    }
   };
 
   return (
@@ -109,7 +126,10 @@ export default function MemoriesPage() {
             {jumpLoading ? (
               <p className="text-sm text-blue-700">正在定位记忆…</p>
             ) : jumpMemory ? (
-              <MemoryCard memory={jumpMemory as unknown as Record<string, unknown>} />
+              <MemoryCard
+                memory={jumpMemory as unknown as Record<string, unknown>}
+                onDelete={handleDeleteJumpMemory}
+              />
             ) : jumpNotFound ? (
               <p className="text-sm text-amber-700">未找到该记忆，可能已被删除或尚未建立索引。</p>
             ) : jumpError ? (

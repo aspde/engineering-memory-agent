@@ -1,10 +1,11 @@
 import type {
   IngestResponse,
+  MemoryDeleteResponse,
   MemoryGetResponse,
   MemorySearchResponse,
   MemoryStatsResponse,
 } from '../types';
-import { apiGet, apiPost } from './client';
+import { apiDelete, apiGet, apiPost } from './client';
 
 /** Fetch aggregate statistics about the memory store. */
 async function getStats(): Promise<MemoryStatsResponse> {
@@ -32,4 +33,9 @@ async function getMemory(id: string): Promise<MemoryGetResponse> {
   return apiGet<MemoryGetResponse>(`/api/memory/memories/${encodeURIComponent(id)}`);
 }
 
-export { getStats, ingest, searchMemories, getMemory };
+/** Delete a memory by its id. */
+async function deleteMemory(id: string): Promise<MemoryDeleteResponse> {
+  return apiDelete<MemoryDeleteResponse>(`/api/memory/memories/${encodeURIComponent(id)}`);
+}
+
+export { getStats, ingest, searchMemories, getMemory, deleteMemory };

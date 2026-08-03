@@ -1,14 +1,37 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useMemories } from '../hooks/useMemories';
 import MemoryCard from './MemoryCard';
 
 const TOP_K_OPTIONS = [5, 10, 20, 30, 50];
 
+interface ToastState {
+  type: 'success' | 'error';
+  message: string;
+}
+
+const TOAST_DURATION_MS = 4000;
+
 export default function MemorySearch() {
-  const { searchResults, isSearching, searchError, search } = useMemories();
+  const { searchResults, isSearching, searchError, search, deleteMemoryById, removeSearchResult, fetchStats } =
+    useMemories();
   const [query, setQuery] = useState('');
   const [topK, setTopK] = useState(20);
   const [prompt, setPrompt] = useState<string | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const toastTimerRef = useRef<number | null>(null);
+
+  const showToast = (t: ToastState) => {
+    setToast(t);
+    if (toastTimerRef.current !== null) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToast(null);
+      toastTimerRef.current = null;
+    }, TOAST_DURATION_MS);
+  };
 
   const handleSearch = () => {
     const q = query.trim();
@@ -18,6 +41,23 @@ export default function MemorySearch() {
     }
     setPrompt(null);
     void search(q, topK);
+  };
+
+  const handleDelete = async (id: string) => {
+    setDeletingId(id);
+    try {
+      await deleteMemoryById(id);
+      removeSearchResult(id);
+      fetchStats(); // 刷新仪表盘统计
+      showToast({ type: 'success', message: '✅ 已删除记忆' });
+    } catch (err) {
+      showToast({
+        type: 'error',
+        message: `删除失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    } finally {
+      setDeletingId(null);
+    }
   };
 
   return (
@@ -75,7 +115,12 @@ export default function MemorySearch() {
             <div className="space-y-3">
               <p className="text-sm text-gray-500">找到 {searchResults.length} 条记忆</p>
               {searchResults.map((mem, idx) => (
-                <MemoryCard key={idx} memory={mem} />
+                <MemoryCard
+                  key={idx}
+                  memory={mem}
+                  onDelete={handleDelete}
+                  isDeleting={deletingId === String(mem.id)}
+                />
               ))}
             </div>
           )
@@ -83,6 +128,17 @@ export default function MemorySearch() {
           <p className="rounded-lg bg-blue-50 px-3 py-2 text-sm text-blue-700">{prompt}</p>
         ) : null}
       </div>
+
+      {/* Toast */}
+      {toast && (
+        <div
+          className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-lg ${
+            toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'
+          }`}
+        >
+          {toast.message}
+        </div>
+      )}
     </div>
   );
 }

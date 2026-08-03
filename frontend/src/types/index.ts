@@ -144,6 +144,11 @@ export interface MemoryGetResponse {
   created_at: string;
 }
 
+export interface MemoryDeleteResponse {
+  id: string;
+  deleted: boolean;
+}
+
 export interface MemoryStatsResponse {
   total_memories: number;
   total_chunks: number;

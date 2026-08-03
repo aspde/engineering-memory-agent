@@ -84,6 +84,7 @@ async def _find_similar(embedding, session_factory):
                        1 - (embedding <=> :vec ::vector) AS similarity
                 FROM memories
                 WHERE embedding IS NOT NULL
+                  AND deleted_at IS NULL
                   AND 1 - (embedding <=> :vec ::vector) > :threshold
                 ORDER BY embedding <=> :vec ::vector
                 LIMIT 1

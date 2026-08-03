@@ -101,6 +101,7 @@ async def search_memories(
                        (1 - (embedding <=> :vec ::vector)) * decay_factor AS weighted_score
                 FROM memories
                 WHERE embedding IS NOT NULL
+                  AND deleted_at IS NULL
                   AND 1 - (embedding <=> :vec ::vector) > :threshold
                 ORDER BY (1 - (embedding <=> :vec ::vector)) * decay_factor DESC
                 LIMIT :limit

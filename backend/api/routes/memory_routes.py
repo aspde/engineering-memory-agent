@@ -92,6 +92,11 @@ class MemoryStatsResponse(BaseModel):
     top_entities: list[dict[str, Any]]
 
 
+class MemoryDeleteResponse(BaseModel):
+    id: str
+    deleted: bool
+
+
 # ── Routes ─────────────────────────────────────────────────────────
 
 
@@ -192,13 +197,13 @@ async def get_memory_by_id(memory_id: str) -> MemoryGetResponse:
             text(
                 "SELECT id, source_type, summary, entities, relations, "
                 "       decay_factor, recall_count, meta, created_at "
-                "FROM memories WHERE id = :id"
+                "FROM memories WHERE id = :id AND deleted_at IS NULL"
             ),
             {"id": memory_id},
         )
         row = r.fetchone()
         if row is None:
-            raise HTTPException(status_code=404, detail="Memory not found")
+            raise HTTPException(status_code=404, detail="Memory not found or has been deleted")
 
         return MemoryGetResponse(
             id=str(row.id),
@@ -213,6 +218,33 @@ async def get_memory_by_id(memory_id: str) -> MemoryGetResponse:
         )
 
 
+@router.delete("/memories/{memory_id}", response_model=MemoryDeleteResponse)
+async def delete_memory(memory_id: str) -> MemoryDeleteResponse:
+    """Soft-delete a memory by setting deleted_at = NOW().
+
+    Returns 404 if the memory does not exist or is already deleted.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        r = await session.execute(
+            text("SELECT deleted_at FROM memories WHERE id = :id"),
+            {"id": memory_id},
+        )
+        row = r.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Memory not found")
+        if row.deleted_at is not None:
+            raise HTTPException(status_code=404, detail="Memory has already been deleted")
+
+        await session.execute(
+            text("UPDATE memories SET deleted_at = NOW() WHERE id = :id"),
+            {"id": memory_id},
+        )
+        await session.commit()
+
+    return MemoryDeleteResponse(id=memory_id, deleted=True)
+
+
 @router.get("/stats", response_model=MemoryStatsResponse)
 async def memory_stats() -> MemoryStatsResponse:
     """Return aggregate statistics about the memory store.
@@ -223,7 +255,7 @@ async def memory_stats() -> MemoryStatsResponse:
     session_factory = get_session_factory()
     async with session_factory() as session:
         # ── Core counts ──
-        r = await session.execute(text("SELECT COUNT(*) FROM memories"))
+        r = await session.execute(text("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"))
         total_memories = r.fetchone()[0]
 
         r = await session.execute(text("SELECT COUNT(*) FROM chunks"))
@@ -235,6 +267,7 @@ async def memory_stats() -> MemoryStatsResponse:
         # ── Source type distribution ──
         r = await session.execute(text(
             "SELECT source_type, COUNT(*) AS cnt FROM memories "
+            "WHERE deleted_at IS NULL "
             "GROUP BY source_type ORDER BY cnt DESC"
         ))
         by_source_type = [{"source_type": row[0], "count": row[1]} for row in r.fetchall()]
@@ -242,7 +275,7 @@ async def memory_stats() -> MemoryStatsResponse:
         # ── Decay & entity/relation averages
         #     jsonb_array_length returns NULL, not 0, for non-array / NULL columns.
         r = await session.execute(text(
-            "SELECT COALESCE(AVG(decay_factor), 0) FROM memories"
+            "SELECT COALESCE(AVG(decay_factor), 0) FROM memories WHERE deleted_at IS NULL"
         ))
         avg_decay_factor = round(float(r.fetchone()[0]), 4)
 
@@ -250,7 +283,7 @@ async def memory_stats() -> MemoryStatsResponse:
             "SELECT COALESCE(AVG("
             "  CASE WHEN jsonb_typeof(entities) = 'array' "
             "       THEN jsonb_array_length(entities) ELSE 0 END"
-            "), 0) FROM memories"
+            "), 0) FROM memories WHERE deleted_at IS NULL"
         ))
         avg_entities_per_memory = round(float(r.fetchone()[0]), 2)
 
@@ -258,14 +291,14 @@ async def memory_stats() -> MemoryStatsResponse:
             "SELECT COALESCE(AVG("
             "  CASE WHEN jsonb_typeof(relations) = 'array' "
             "       THEN jsonb_array_length(relations) ELSE 0 END"
-            "), 0) FROM memories"
+            "), 0) FROM memories WHERE deleted_at IS NULL"
         ))
         avg_relations_per_memory = round(float(r.fetchone()[0]), 2)
 
         # ── Recent 7-day count ──
         r = await session.execute(text(
             "SELECT COUNT(*) FROM memories "
-            "WHERE created_at >= NOW() - INTERVAL '7 days'"
+            "WHERE deleted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
         ))
         recent_count_7d = r.fetchone()[0]
 
@@ -273,7 +306,8 @@ async def memory_stats() -> MemoryStatsResponse:
         r = await session.execute(text(
             "SELECT e->>'name' AS name, COUNT(*) AS cnt "
             "FROM memories, jsonb_array_elements(entities) AS e "
-            "WHERE entities IS NOT NULL "
+            "WHERE deleted_at IS NULL "
+            "  AND entities IS NOT NULL "
             "  AND jsonb_typeof(entities) = 'array' "
             "  AND e->>'name' IS NOT NULL "
             "GROUP BY e->>'name' ORDER BY cnt DESC LIMIT 10"
