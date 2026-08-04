@@ -155,6 +155,35 @@ async def lifespan(app: FastAPI):
                     callback=_run_weekly_patrol,
                 )
 
+                # ── Phase 4: tech debt radar weekly scan ────────────
+                async def _run_tech_debt_scan() -> None:
+                    """Run tech debt scenario via compose function.
+
+                    The scenario's agent may call notify_feishu_tool to push
+                    findings to the team channel.  Persistence is handled by
+                    the agent's memory tools — no separate DB write needed.
+                    """
+                    import logging
+
+                    _log = logging.getLogger(__name__)
+                    try:
+                        from backend.service.scenarios.tech_debt import (
+                            compose_tech_debt_report,
+                        )
+
+                        report = await compose_tech_debt_report()
+                        _log.info(
+                            "Tech debt scan completed (%d chars)", len(report)
+                        )
+                    except Exception:
+                        _log.exception("Tech debt scan failed")
+
+                _scheduler.schedule_weekly(
+                    day=config.patrol_weekly_day,
+                    hour=config.patrol_weekly_hour + 2,
+                    callback=_run_tech_debt_scan,
+                )
+
             await _scheduler.start()
             import logging
             logging.getLogger(__name__).info("Patrol scheduler started")

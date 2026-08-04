@@ -11,6 +11,7 @@ const initialState: AppState = {
   threadsFetchedAt: 0,
   loadedThreadId: null,
   memFilterId: null,
+  activeScenario: null,
 };
 
 export function appReducer(state: AppState, action: AppAction): AppState {
@@ -54,6 +55,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         waitingForApproval: false,
         isStreaming: false,
         loadedThreadId: null,
+        activeScenario: null,
       };
     case 'SET_LOADED_THREAD':
       return { ...state, loadedThreadId: action.threadId };
@@ -75,6 +77,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'INVALIDATE_THREADS':
       return { ...state, threadsFetchedAt: 0 };
+    case 'SET_ACTIVE_SCENARIO':
+      return { ...state, activeScenario: action.scenario };
+    case 'CLEAR_ACTIVE_SCENARIO':
+      return { ...state, activeScenario: null };
     default:
       return state;
   }

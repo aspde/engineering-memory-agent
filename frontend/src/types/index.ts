@@ -311,6 +311,28 @@ export interface DismissFindingResponse {
   dismissed_finding_id: string;
 }
 
+// ── Scenario types (Phase 4: vertical scenarios) ─────────────────────
+
+export type ScenarioStatus = 'active' | 'beta' | 'inactive';
+
+export interface ScenarioInfo {
+  key: string;
+  name: string;
+  description: string;
+  triggers: string[];
+  status: ScenarioStatus;
+}
+
+export interface ScenarioRunRequest {
+  params: Record<string, unknown>;
+}
+
+export interface ScenarioRunResponse {
+  scenario: string;
+  status: string;
+  result: string;
+}
+
 // ── App state ────────────────────────────────────────────────────
 
 export interface AppState {
@@ -323,6 +345,7 @@ export interface AppState {
   threadsFetchedAt: number;
   loadedThreadId: string | null;
   memFilterId: string | null;
+  activeScenario: string | null;
 }
 
 export type AppAction =
@@ -339,4 +362,6 @@ export type AppAction =
   | { type: 'NEW_CONVERSATION'; threadId: string }
   | { type: 'SET_LOADED_THREAD'; threadId: string | null }
   | { type: 'REMOVE_THREAD'; threadId: string }
-  | { type: 'INVALIDATE_THREADS' };
+  | { type: 'INVALIDATE_THREADS' }
+  | { type: 'SET_ACTIVE_SCENARIO'; scenario: string }
+  | { type: 'CLEAR_ACTIVE_SCENARIO' };

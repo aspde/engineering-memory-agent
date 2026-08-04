@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { getThreadMessages } from '../api/agent';
 import { writeMemory } from '../api/memory';
+import { runScenario } from '../api/scenarios';
 import { useChat } from '../hooks/useChat';
 import ChatArea from '../components/ChatArea';
 import ChatInput from '../components/ChatInput';
@@ -14,12 +15,59 @@ import ChatInput from '../components/ChatInput';
  * to the memory write API, bypassing the LLM's tool-calling judgement.
  */
 export default function ChatPage() {
-  const { threadId, loadedThreadId, messages, pendingInterrupt, waitingForApproval } =
+  const { threadId, loadedThreadId, messages, pendingInterrupt, waitingForApproval, activeScenario } =
     useAppState();
   const dispatch = useAppDispatch();
   const { sendMessage, resume, isStreaming } = useChat();
   const [isLoading, setIsLoading] = useState(false);
   const [writeToast, setWriteToast] = useState<string | null>(null);
+
+  // Track which thread has already been auto-triggered for a scenario.
+  const triggeredRef = useRef<string | null>(null);
+
+  // Auto-trigger scenario via API when a new conversation is created with an active scenario.
+  useEffect(() => {
+    if (!activeScenario) return;
+    if (triggeredRef.current === threadId) return;
+    if (loadedThreadId !== threadId) return;
+    if (isLoading || messages.length > 0) return;
+
+    triggeredRef.current = threadId;
+    const scenarioKey = activeScenario;
+    dispatch({ type: 'CLEAR_ACTIVE_SCENARIO' });
+
+    // Add a placeholder that will be replaced when the API returns
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: { role: 'user', content: `触发场景: ${scenarioKey}` },
+    });
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: { role: 'assistant', content: '正在执行场景…' },
+    });
+
+    runScenario(scenarioKey)
+      .then((res) => {
+        // Replace the placeholder with the scenario result
+        dispatch({
+          type: 'UPDATE_LAST_MESSAGE',
+          appendContent: '',
+        });
+        dispatch({
+          type: 'ADD_MESSAGE',
+          message: {
+            role: 'assistant',
+            content: res.result || '(场景返回为空)',
+          },
+        });
+      })
+      .catch((err) => {
+        dispatch({
+          type: 'UPDATE_LAST_MESSAGE',
+          appendContent: `\n\n场景执行失败: ${err instanceof Error ? err.message : String(err)}`,
+        });
+      });
+  }, [activeScenario, threadId, loadedThreadId, isLoading, messages.length, dispatch]);
 
   // Auto-dismiss toast after 2.5 s
   useEffect(() => {

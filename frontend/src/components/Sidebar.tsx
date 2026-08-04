@@ -2,21 +2,36 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { deleteThread, listThreads } from '../api/agent';
+import { listScenarios } from '../api/scenarios';
+import type { ScenarioInfo } from '../types';
 
 const THREADS_CACHE_TTL_MS = 30_000;
+
+const SCENARIO_COLORS: Record<string, string> = {
+  postmortem: 'bg-red-600 hover:bg-red-700',
+  code_review: 'bg-indigo-600 hover:bg-indigo-700',
+  onboarding: 'bg-green-600 hover:bg-green-700',
+  tech_debt: 'bg-orange-600 hover:bg-orange-700',
+};
+
+const SCENARIO_ICONS: Record<string, string> = {
+  postmortem: '🔎',
+  code_review: '👀',
+  onboarding: '🎓',
+  tech_debt: '📋',
+};
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const { threadId, threads, threadsFetchedAt } = useAppState();
   const dispatch = useAppDispatch();
 
-  // Track which thread (if any) is in the delete-confirm state.
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [scenarios, setScenarios] = useState<ScenarioInfo[]>([]);
 
   useEffect(() => {
-    // Skip if we already have a fresh thread list within the cache TTL.
     if (Date.now() - threadsFetchedAt < THREADS_CACHE_TTL_MS) return;
 
     let cancelled = false;
@@ -37,7 +52,25 @@ export default function Sidebar() {
     };
   }, [dispatch, threadsFetchedAt]);
 
+  useEffect(() => {
+    let cancelled = false;
+    listScenarios()
+      .then((data) => {
+        if (!cancelled) setScenarios(data);
+      })
+      .catch(() => {
+        if (!cancelled) setScenarios([]);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
   const isLoading = threadsFetchedAt === 0;
+
+  const handleScenarioClick = (key: string) => {
+    dispatch({ type: 'NEW_CONVERSATION', threadId: crypto.randomUUID() });
+    dispatch({ type: 'SET_ACTIVE_SCENARIO', scenario: key });
+    navigate('/');
+  };
 
   const handleNewConversation = () => {
     dispatch({ type: 'NEW_CONVERSATION', threadId: crypto.randomUUID() });
@@ -108,6 +141,24 @@ export default function Sidebar() {
         >
           🔍 巡检日志
         </button>
+
+        {/* Scenarios — same style as nav buttons above */}
+        {scenarios.map((s) => (
+          <button
+            key={s.key}
+            type="button"
+            onClick={() => handleScenarioClick(s.key)}
+            className={`w-full rounded-lg px-3 py-2 text-left text-sm font-medium text-white transition-colors ${
+              SCENARIO_COLORS[s.key] ?? 'bg-gray-600 hover:bg-gray-700'
+            }`}
+            title={s.description}
+          >
+            {SCENARIO_ICONS[s.key] ?? '📌'} {s.name}
+            {s.status === 'beta' && (
+              <span className="ml-1.5 rounded bg-white/20 px-1 py-0.5 text-[10px]">beta</span>
+            )}
+          </button>
+        ))}
       </div>
 
       {/* Thread list */}
