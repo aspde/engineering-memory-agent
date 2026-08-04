@@ -3,6 +3,7 @@ import { ApiError } from '../api/client';
 import IngestSection from '../components/IngestSection';
 import MemoryCard from '../components/MemoryCard';
 import MemorySearch from '../components/MemorySearch';
+import PatrolBrief from '../components/PatrolBrief';
 import StatsDashboard from '../components/StatsDashboard';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { useMemories } from '../hooks/useMemories';
@@ -141,7 +142,12 @@ export default function MemoriesPage() {
         {/* Tab content */}
         <section>
           {activeTab === 'dashboard' && (
-            <StatsDashboard stats={stats} isLoading={isLoading} error={error} onRetry={fetchStats} />
+            <>
+              <StatsDashboard stats={stats} isLoading={isLoading} error={error} onRetry={fetchStats} />
+              <div className="mt-4">
+                <PatrolBrief />
+              </div>
+            </>
           )}
           {activeTab === 'ingest' && <IngestSection onIngest={fetchStats} />}
           {activeTab === 'search' && <MemorySearch />}

@@ -119,6 +119,23 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_webhook_logs_source
         ON webhook_logs (source, created_at DESC)
     """,
+    # ── Phase 3: proactive agent ─────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS patrol_logs (
+        id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        patrol_type       TEXT NOT NULL,
+        trigger           TEXT NOT NULL,
+        status            TEXT NOT NULL DEFAULT 'running',
+        findings          JSONB,
+        dismissed_findings UUID[],
+        started_at        TIMESTAMPTZ DEFAULT now(),
+        completed_at      TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_patrol_logs_type_time
+        ON patrol_logs (patrol_type, started_at DESC)
+    """,
 ]
 
 

@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse
 from backend.api.router import api_router
 from backend.db import close_db
 from backend.db.schema import init_db
+from backend.shared.config import config
 
 # Paths relative to backend/main.py
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -117,7 +118,62 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
 
+    # ── Phase 3: start patrol scheduler ─────────────────────────────
+    _scheduler = None
+    if config.patrol_enabled:
+        try:
+            from backend.service.patrol import get_patrol_prompt, run_patrol
+            from backend.service.scheduler import PatrolScheduler
+
+            _scheduler = PatrolScheduler()
+
+            async def _run_daily_patrol() -> None:
+                prompt = get_patrol_prompt("daily")
+                await run_patrol(
+                    patrol_type="daily",
+                    trigger="cron",
+                    system_prompt=prompt,
+                )
+
+            _scheduler.schedule_daily(
+                hour=config.patrol_daily_hour,
+                callback=_run_daily_patrol,
+            )
+
+            if config.patrol_weekly_enabled:
+                async def _run_weekly_patrol() -> None:
+                    prompt = get_patrol_prompt("weekly")
+                    await run_patrol(
+                        patrol_type="weekly",
+                        trigger="cron",
+                        system_prompt=prompt,
+                    )
+
+                _scheduler.schedule_weekly(
+                    day=config.patrol_weekly_day,
+                    hour=config.patrol_weekly_hour,
+                    callback=_run_weekly_patrol,
+                )
+
+            await _scheduler.start()
+            import logging
+            logging.getLogger(__name__).info("Patrol scheduler started")
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Failed to start patrol scheduler — proactive features disabled."
+            )
+
     yield
+
+    # ── Shutdown: stop patrol scheduler ─────────────────────────────
+    if _scheduler is not None:
+        try:
+            await _scheduler.stop()
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("Failed to stop patrol scheduler")
+
     await close_db()
 
     # Close checkpointer pool on shutdown

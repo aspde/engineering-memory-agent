@@ -316,6 +316,39 @@ class TestSearchMemoriesToolWithEntities:
         assert "pgvector" in data["display"]
 
 
+class TestNotifyFeishuTool:
+    """Tests for the notify_feishu notification tool."""
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_not_configured(self, monkeypatch) -> None:
+        """When FEISHU_WEBHOOK_URL is empty, the tool returns ok=false."""
+        from agent.tools import notify_feishu_tool
+
+        monkeypatch.setattr(
+            "backend.shared.config.config.feishu_webhook_url", ""
+        )
+
+        result = await notify_feishu_tool.ainvoke({
+            "message": "Hello",
+        })
+        data = json.loads(result)
+        assert data["ok"] is False
+        assert "FEISHU_WEBHOOK_URL" in data["error"]
+
+    @pytest.mark.asyncio
+    async def test_tool_schema_has_required_params(self) -> None:
+        """Verify the tool has the expected parameter schema."""
+        from agent.tools import notify_feishu_tool
+
+        schema = notify_feishu_tool.args_schema.model_json_schema()
+        props = schema.get("properties", {})
+        assert "message" in props
+        assert "msg_type" in props
+        assert "title" in props
+        required = schema.get("required", [])
+        assert "message" in required
+
+
 class TestConnectorAwareness:
     """Tool descriptions and prompts should mention connector data sources."""
 
@@ -333,8 +366,8 @@ class TestConnectorAwareness:
             word in desc for word in ("pingcode", "ci", "feishu", "飞书", "connectors", "sources")
         )
 
-    def test_tool_count_unchanged(self):
-        """Sanity check: the ALL_TOOLS roster should still have 7 tools."""
+    def test_tool_count(self):
+        """Sanity check: the ALL_TOOLS roster should have 8 tools (7 core + notify_slack)."""
         from agent.tools import ALL_TOOLS
 
-        assert len(ALL_TOOLS) == 7
+        assert len(ALL_TOOLS) == 8

@@ -20,6 +20,7 @@ function mockStats(overrides: Partial<MemoryStatsResponse> = {}): MemoryStatsRes
       { name: 'React', count: 8 },
       { name: 'TypeScript', count: 5 },
     ],
+    entity_graph: null,
     ...overrides,
   };
 }

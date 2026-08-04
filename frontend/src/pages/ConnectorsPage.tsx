@@ -2,19 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import type { ConnectorInfo, ConnectorLogEntry } from '../types';
 import { getConnectorLogs, listConnectors } from '../api/connectors';
 
-// ── Source badge color map ───────────────────────────────────────────
-
-const SOURCE_COLORS: Record<string, string> = {
-  pingcode: 'bg-blue-100 text-blue-700',
-  pingcode_bug: 'bg-blue-100 text-blue-700',
-  ci_build: 'bg-green-100 text-green-700',
-  ci_regression: 'bg-orange-100 text-orange-700',
-  feishu: 'bg-purple-100 text-purple-700',
-  git_commit: 'bg-gray-100 text-gray-600',
-  conversation: 'bg-indigo-100 text-indigo-700',
-  api: 'bg-cyan-100 text-cyan-700',
-};
-
 const STATUS_COLORS: Record<string, string> = {
   active: 'bg-green-100 text-green-700',
   pending: 'bg-yellow-100 text-yellow-700',

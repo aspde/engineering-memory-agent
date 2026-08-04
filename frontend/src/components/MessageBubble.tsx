@@ -1,6 +1,5 @@
 import type { Message } from '../types';
 import RichText from './RichText';
-import ToolCallPanel from './ToolCallPanel';
 import SourcesPanel from './SourcesPanel';
 
 interface MessageBubbleProps {

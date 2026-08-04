@@ -101,6 +101,13 @@ export default function Sidebar() {
         >
           🔌 连接器
         </button>
+        <button
+          type="button"
+          onClick={() => navigate('/patrol')}
+          className="w-full rounded-lg bg-teal-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-teal-700"
+        >
+          🔍 巡检日志
+        </button>
       </div>
 
       {/* Thread list */}

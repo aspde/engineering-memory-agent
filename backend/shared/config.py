@@ -78,6 +78,25 @@ class AppConfig:
     memory_enabled: bool = field(
         default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() == "true"
     )
+    # ── Phase 3: proactive agent ───────────────────────────────────
+    patrol_enabled: bool = field(
+        default_factory=lambda: os.getenv("PATROL_ENABLED", "true").lower() == "true"
+    )
+    patrol_daily_hour: int = field(
+        default_factory=lambda: int(os.getenv("PATROL_DAILY_HOUR", "8"))
+    )
+    patrol_weekly_enabled: bool = field(
+        default_factory=lambda: os.getenv("PATROL_WEEKLY_ENABLED", "true").lower() == "true"
+    )
+    patrol_weekly_day: int = field(
+        default_factory=lambda: int(os.getenv("PATROL_WEEKLY_DAY", "1"))
+    )
+    patrol_weekly_hour: int = field(
+        default_factory=lambda: int(os.getenv("PATROL_WEEKLY_HOUR", "9"))
+    )
+    feishu_webhook_url: str = field(
+        default_factory=lambda: os.getenv("FEISHU_WEBHOOK_URL", "")
+    )
 
 
 config = AppConfig()

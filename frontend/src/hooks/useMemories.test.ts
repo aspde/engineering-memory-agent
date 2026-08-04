@@ -35,6 +35,7 @@ const mockStats: MemoryStatsResponse = {
   avg_relations_per_memory: 1,
   recent_count_7d: 4,
   top_entities: [{ name: 'foo', count: 3 }],
+  entity_graph: null,
 };
 
 beforeEach(async () => {

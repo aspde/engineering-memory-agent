@@ -254,6 +254,63 @@ export interface ConnectorLogsResponse {
   logs: ConnectorLogEntry[];
 }
 
+// ── Patrol types (Phase 3: proactive agent) ──────────────────────────
+
+export type PatrolType = 'daily' | 'weekly' | 'event_driven' | 'manual';
+export type PatrolTrigger = 'cron' | 'webhook' | 'manual';
+export type PatrolStatus = 'running' | 'completed' | 'failed';
+
+export interface PatrolLogSummary {
+  id: string;
+  patrol_type: PatrolType;
+  trigger: PatrolTrigger;
+  status: PatrolStatus;
+  finding_count: number;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface PatrolLogList {
+  items: PatrolLogSummary[];
+  total: number;
+}
+
+export interface PatrolFinding {
+  id?: string;
+  type?: string;
+  title?: string;
+  description?: string;
+  severity?: 'critical' | 'warning' | 'info';
+  [key: string]: unknown;
+}
+
+export interface PatrolLogDetail {
+  id: string;
+  patrol_type: PatrolType;
+  trigger: PatrolTrigger;
+  status: PatrolStatus;
+  findings: Record<string, PatrolFinding[]> | null;
+  dismissed_findings: string[];
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface TriggerPatrolRequest {
+  patrol_type: string;
+  scope?: string;
+}
+
+export interface TriggerPatrolResponse {
+  patrol_id: string;
+  status: string;
+}
+
+export interface DismissFindingResponse {
+  ok: boolean;
+  log_id: string;
+  dismissed_finding_id: string;
+}
+
 // ── App state ────────────────────────────────────────────────────
 
 export interface AppState {
