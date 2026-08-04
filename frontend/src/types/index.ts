@@ -65,6 +65,12 @@ export interface ToolCall {
   content: string;
 }
 
+export interface EntityRef {
+  entity_id: string;
+  canonical_name: string;
+  type: string;
+}
+
 export interface Source {
   type: 'memory' | 'chunk' | 'unknown';
   id?: string;
@@ -72,6 +78,7 @@ export interface Source {
   snippet?: string;
   document_id?: string;
   relevance?: number;
+  entities?: EntityRef[];
 }
 
 // ── Interrupt (approval / conflict) ──────────────────────────────
@@ -154,6 +161,58 @@ export interface MemoryDeleteResponse {
   deleted: boolean;
 }
 
+export interface EntityGraphStats {
+  coverage_ratio: number;
+  growth_rate_7d: number;
+  density: number;
+  total_entities: number;
+}
+
+// ── Entity API types ──────────────────────────────────────────────
+
+export interface EntityProfile {
+  id: string;
+  name: string;
+  canonical_name: string;
+  type: string;
+  memory_count: number;
+  source_breakdown: { source_type: string; count: number }[];
+  first_seen_at: string;
+}
+
+export interface RelatedEntity {
+  entity_id: string;
+  name: string;
+  type: string;
+  relation_type: string;
+  memory_count: number;
+}
+
+export interface RecentEntityMemory {
+  memory_id: string;
+  summary: string;
+  source_type: string;
+  created_at: string;
+}
+
+export interface EntityRelationsResponse {
+  entity: EntityProfile;
+  related_entities: RelatedEntity[];
+  recent_memories: RecentEntityMemory[];
+}
+
+export interface EntitySearchResult {
+  id: string;
+  name: string;
+  canonical_name: string;
+  type: string;
+  memory_count: number;
+}
+
+export interface EntitySearchResponse {
+  results: EntitySearchResult[];
+}
+
 export interface MemoryStatsResponse {
   total_memories: number;
   total_chunks: number;
@@ -164,6 +223,7 @@ export interface MemoryStatsResponse {
   avg_relations_per_memory: number;
   recent_count_7d: number;
   top_entities: { name: string; count: number }[];
+  entity_graph: EntityGraphStats | null;
 }
 
 // ── App state ────────────────────────────────────────────────────

@@ -56,6 +56,7 @@ class MemoryWriteResponse(BaseModel):
     id: str
     action: str  # "inserted" | "merged" | "conflict"
     summary: str
+    entity_ids: list[str] = Field(default_factory=list)
 
 
 class MemorySearchRequest(BaseModel):
@@ -80,6 +81,13 @@ class MemoryGetResponse(BaseModel):
     created_at: str
 
 
+class EntityGraphStats(BaseModel):
+    coverage_ratio: float
+    growth_rate_7d: float
+    density: float
+    total_entities: int
+
+
 class MemoryStatsResponse(BaseModel):
     total_memories: int
     total_chunks: int
@@ -90,6 +98,7 @@ class MemoryStatsResponse(BaseModel):
     avg_relations_per_memory: float
     recent_count_7d: int
     top_entities: list[dict[str, Any]]
+    entity_graph: EntityGraphStats | None = None
 
 
 class MemoryDeleteResponse(BaseModel):
@@ -151,6 +160,7 @@ async def memory_write(req: MemoryWriteRequest) -> MemoryWriteResponse:
         id=result["id"],
         action=result["action"],
         summary=result["summary"],
+        entity_ids=result.get("entity_ids", []),
     )
 
 
@@ -314,6 +324,53 @@ async def memory_stats() -> MemoryStatsResponse:
         ))
         top_entities = [{"name": row[0], "count": row[1]} for row in r.fetchall()]
 
+        # ── Entity graph metrics (Phase 1) ──
+        entity_graph = None
+        try:
+            # coverage_ratio: memories linked to entities / total memories
+            r = await session.execute(text(
+                "SELECT "
+                "  COALESCE(COUNT(DISTINCT me.memory_id)::float "
+                "    / NULLIF(COUNT(DISTINCT m.id), 0), 0) AS coverage "
+                "FROM memories m "
+                "LEFT JOIN memory_entities me ON me.memory_id = m.id "
+                "WHERE m.deleted_at IS NULL"
+            ))
+            coverage_ratio = round(float(r.fetchone()[0]), 4)
+
+            # total_entities
+            r = await session.execute(text("SELECT COUNT(*) FROM entities"))
+            total_entities = r.fetchone()[0]
+
+            # growth_rate_7d: new entities in past 7 days / total entities
+            r = await session.execute(text(
+                "SELECT COUNT(*) FROM entities "
+                "WHERE first_seen_at >= NOW() - INTERVAL '7 days'"
+            ))
+            new_7d = r.fetchone()[0]
+            growth_rate_7d = round(
+                new_7d / total_entities if total_entities > 0 else 0.0, 4
+            )
+
+            # density: avg entities per memory from the junction table
+            r = await session.execute(text(
+                "SELECT "
+                "  COALESCE("
+                "    COUNT(me.entity_id)::float "
+                "    / NULLIF(COUNT(DISTINCT me.memory_id), 0), 0) "
+                "FROM memory_entities me"
+            ))
+            density = round(float(r.fetchone()[0]), 2)
+
+            entity_graph = EntityGraphStats(
+                coverage_ratio=coverage_ratio,
+                growth_rate_7d=growth_rate_7d,
+                density=density,
+                total_entities=total_entities,
+            )
+        except Exception:
+            pass  # entities table may not exist yet (pre-migration)
+
     return MemoryStatsResponse(
         total_memories=total_memories,
         total_chunks=total_chunks,
@@ -324,4 +381,5 @@ async def memory_stats() -> MemoryStatsResponse:
         avg_relations_per_memory=avg_relations_per_memory,
         recent_count_7d=recent_count_7d,
         top_entities=top_entities,
+        entity_graph=entity_graph,
     )

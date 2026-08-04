@@ -6,6 +6,7 @@ Write path:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -14,7 +15,9 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from backend.service.embedding_service import get_embedding_provider
+from backend.service.entity import normalize_entities
 from backend.service.extraction import extract_memory
+from backend.shared.config import current_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +178,9 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
                     pass
             elif isinstance(existing["meta"], dict):
                 existing_meta = existing["meta"]
+        tid = current_thread_id.get("")
+        if tid:
+            metadata = (metadata or {}) | {"thread_id": tid}
         merged_meta = existing_meta | (metadata or {})
 
         await session.execute(
@@ -200,8 +206,16 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
         )
         await session.commit()
 
+    # Fire-and-forget entity normalisation (best-effort, non-blocking)
+    _schedule_normalization(str(existing["id"]), merged_entities)
+
     logger.info("Merged into memory %s", existing["id"])
-    return {"id": str(existing["id"]), "action": "merged", "summary": merged_summary.strip()}
+    return {
+        "id": str(existing["id"]),
+        "action": "merged",
+        "summary": merged_summary.strip(),
+        "entity_ids": [],
+    }
 
 
 _MERGE_PROMPT = """\
@@ -241,6 +255,27 @@ async def _mark_conflict(existing, extracted, embedding, source_type, metadata):
     }
 
 
+def _schedule_normalization(memory_id: str, entities: list[dict]) -> None:
+    """Fire-and-forget entity normalisation — never blocks the caller.
+
+    Runs in a background asyncio Task so that memory-write latency is not
+    gated on embedding + vector search + LLM round-trips.  Failures are
+    logged but never propagated (spec: normalisation is best-effort).
+    """
+
+    async def _run() -> None:
+        try:
+            await normalize_entities(memory_id, entities)
+        except Exception:
+            logger.exception("Entity normalisation failed for memory %s", memory_id)
+
+    try:
+        asyncio.create_task(_run())
+    except RuntimeError:
+        # No running event loop (e.g. synchronous test context) — skip.
+        logger.debug("No event loop available; skipping entity normalisation for %s", memory_id)
+
+
 async def _supplement_memory(existing, extracted, embedding, source_type, metadata):
     """Insert new memory, linked to existing as a supplement."""
     enriched_meta = (metadata or {}) | {
@@ -252,6 +287,10 @@ async def _supplement_memory(existing, extracted, embedding, source_type, metada
 
 async def _insert_memory(extracted, embedding, source_type, metadata):
     """Insert a fresh memory row."""
+    tid = current_thread_id.get("")
+    if tid:
+        metadata = (metadata or {}) | {"thread_id": tid}
+
     session_factory = get_session_factory()
     async with session_factory() as session:
         result = await session.execute(
@@ -274,8 +313,16 @@ async def _insert_memory(extracted, embedding, source_type, metadata):
         await session.commit()
         new_id = result.fetchone()[0]
 
+    # 6. Fire-and-forget entity normalisation (best-effort, non-blocking)
+    _schedule_normalization(str(new_id), extracted.get("entities") or [])
+
     logger.info("Inserted new memory %s (source=%s)", new_id, source_type)
-    return {"id": str(new_id), "action": "inserted", "summary": extracted["summary"]}
+    return {
+        "id": str(new_id),
+        "action": "inserted",
+        "summary": extracted["summary"],
+        "entity_ids": [],
+    }
 
 
 async def resolve_conflict(

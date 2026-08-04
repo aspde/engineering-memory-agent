@@ -67,9 +67,6 @@ export default function MessageBubble({ message, isStreaming = false }: MessageB
 
         {!isUser && message._meta && (message._meta.toolCalls.length > 0 || message._meta.sources.length > 0) && (
           <div className="w-full space-y-2 pl-10">
-            {message._meta.toolCalls.length > 0 && (
-              <ToolCallPanel toolCalls={message._meta.toolCalls} />
-            )}
             {message._meta.sources.length > 0 && (
               <SourcesPanel sources={message._meta.sources} />
             )}

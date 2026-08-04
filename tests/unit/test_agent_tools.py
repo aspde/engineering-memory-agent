@@ -9,6 +9,7 @@ from agent.tools import (
     extract_memory_tool,
     ingest_document_tool,
     ingest_git_repo_tool,
+    query_entity_tool,
     retrieve_chunks_tool,
     search_memories_tool,
     write_memory_tool,
@@ -228,3 +229,88 @@ class TestIngestDocument:
             {"document_id": "readme.md", "content": "# Hello\n\nWorld"}
         )
         assert "1 chunks" in result
+
+
+class TestQueryEntityTool:
+    @pytest.mark.asyncio
+    async def test_returns_entity_profile(self, monkeypatch) -> None:
+        from agent import tools as mod
+        from agent.tools import query_entity_tool
+
+        async def mock_get_entity(name: str):
+            return {
+                "id": "e-001",
+                "name": "pg",
+                "canonical_name": "PostgreSQL",
+                "type": "technology",
+                "memory_count": 5,
+            }
+
+        async def mock_get_relations(eid: str):
+            return {
+                "related_entities": [
+                    {"id": "e-002", "name": "pgvector", "type": "technology", "memory_count": 3}
+                ],
+                "recent_memories": [
+                    {"id": "m-001", "summary": "Using pgvector", "source_type": "conversation", "created_at": "2026-01-01T00:00:00"}
+                ],
+            }
+
+        monkeypatch.setattr(mod, "get_entity_by_name", mock_get_entity)
+        monkeypatch.setattr(mod, "get_entity_relations_for_tool", mock_get_relations)
+
+        result = await query_entity_tool.ainvoke({"entity_name": "PostgreSQL"})
+        data = json.loads(result)
+        assert data["found"] is True
+        assert data["entity"]["canonical_name"] == "PostgreSQL"
+        assert len(data["related_entities"]) == 1
+        assert data["related_entities"][0]["name"] == "pgvector"
+        assert len(data["recent_memories"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_entity_not_found(self, monkeypatch) -> None:
+        from agent import tools as mod
+        from agent.tools import query_entity_tool
+
+        monkeypatch.setattr(mod, "get_entity_by_name", AsyncMock(return_value=None))
+
+        result = await query_entity_tool.ainvoke({"entity_name": "NonexistentTech"})
+        data = json.loads(result)
+        assert data["found"] is False
+        assert "no entity found" in data["message"].lower()
+
+
+class TestSearchMemoriesToolWithEntities:
+    @pytest.mark.asyncio
+    async def test_includes_entities_in_sources(self, monkeypatch) -> None:
+        from agent import tools as mod
+        from agent.tools import search_memories_tool
+
+        async def mock_query(*args, **kwargs):
+            return [
+                {
+                    "id": "mem-001",
+                    "summary": "PostgreSQL with pgvector",
+                    "rerank_score": 0.95,
+                    "decay_factor": 0.9,
+                }
+            ]
+
+        async def mock_entity_batch(ids):
+            return {
+                "mem-001": [
+                    {"entity_id": "e-001", "canonical_name": "PostgreSQL", "type": "technology"},
+                    {"entity_id": "e-002", "canonical_name": "pgvector", "type": "technology"},
+                ]
+            }
+
+        monkeypatch.setattr(mod, "query_memories", mock_query)
+        monkeypatch.setattr(mod, "get_memory_entities_batch", mock_entity_batch)
+
+        result = await search_memories_tool.ainvoke({"query": "database"})
+        data = json.loads(result)
+        assert "entities" in data["sources"][0]
+        assert len(data["sources"][0]["entities"]) == 2
+        assert data["sources"][0]["entities"][0]["canonical_name"] == "PostgreSQL"
+        assert "PostgreSQL" in data["display"]
+        assert "pgvector" in data["display"]

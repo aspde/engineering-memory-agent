@@ -1,3 +1,4 @@
+import { useNavigate } from 'react-router-dom';
 import type { ToolCall } from '../types';
 import RichText from './RichText';
 
@@ -122,7 +123,34 @@ export function formatToolResult(toolName: string, content: string): string {
  * Renders a compact list of tool-call results, each with a formatted summary
  * and a collapsible raw view (mirrors Streamlit's "🔧 Tool calls" expander).
  */
+/** Extract unique entity names from search_memories_tool JSON content. */
+function extractEntities(content: string): { name: string; type: string }[] {
+  try {
+    const data = JSON.parse(content);
+    const sources = data?.sources as unknown[];
+    if (!Array.isArray(sources)) return [];
+    const seen = new Set<string>();
+    const result: { name: string; type: string }[] = [];
+    for (const s of sources) {
+      const entities = (s as Record<string, unknown>)?.entities as unknown[];
+      if (!Array.isArray(entities)) continue;
+      for (const e of entities) {
+        const name = (e as Record<string, unknown>)?.canonical_name as string;
+        const type = (e as Record<string, unknown>)?.type as string;
+        if (name && !seen.has(name)) {
+          seen.add(name);
+          result.push({ name, type: type ?? 'concept' });
+        }
+      }
+    }
+    return result.slice(0, 6); // max 6 entity chips
+  } catch {
+    return [];
+  }
+}
+
 export default function ToolCallPanel({ toolCalls }: ToolCallPanelProps) {
+  const navigate = useNavigate();
   if (toolCalls.length === 0) return null;
 
   return (
@@ -134,6 +162,10 @@ export default function ToolCallPanel({ toolCalls }: ToolCallPanelProps) {
         {toolCalls.map((tc, i) => {
           const tool = tc.tool ?? 'unknown';
           const label = TOOL_LABELS[tool] ?? tool;
+          const entities =
+            tool === 'search_memories_tool'
+              ? extractEntities(tc.content ?? '')
+              : [];
           return (
             <li key={i} className="px-3 py-2">
               <div className="mb-1 flex items-center gap-1.5">
@@ -142,6 +174,21 @@ export default function ToolCallPanel({ toolCalls }: ToolCallPanelProps) {
               <p className="text-sm leading-relaxed text-gray-800">
                 <RichText text={formatToolResult(tool, tc.content ?? '')} />
               </p>
+              {entities.length > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <span className="text-xs text-gray-400">🔗</span>
+                  {entities.map((e) => (
+                    <button
+                      key={e.name}
+                      type="button"
+                      onClick={() => navigate(`/graph?entity=${encodeURIComponent(e.name)}`)}
+                      className="rounded-full bg-emerald-50 px-2 py-0.5 text-xs text-emerald-700 transition-colors hover:bg-emerald-100"
+                    >
+                      {e.name}
+                    </button>
+                  ))}
+                </div>
+              )}
               <details className="mt-1">
                 <summary className="cursor-pointer select-none text-xs text-gray-400 hover:text-gray-600">
                   查看原始内容

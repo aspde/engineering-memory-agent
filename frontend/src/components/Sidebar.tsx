@@ -87,6 +87,13 @@ export default function Sidebar() {
         >
           📚 记忆库
         </button>
+        <button
+          type="button"
+          onClick={() => navigate('/graph')}
+          className="w-full rounded-lg bg-emerald-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-emerald-700"
+        >
+          🔗 实体图谱
+        </button>
       </div>
 
       {/* Thread list */}

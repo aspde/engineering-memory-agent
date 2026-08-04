@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 
 interface ChatInputProps {
-  onSend: (text: string) => void;
+  onSend: (text: string, forceWrite: boolean) => void;
   disabled?: boolean;
   placeholder?: string;
 }
@@ -9,6 +9,8 @@ interface ChatInputProps {
 /**
  * Chat input box: Enter to send, Shift+Enter for a newline.
  * Disabled while the agent is busy (streaming / awaiting approval).
+ * Optional "强制写入" checkbox bypasses LLM judgement and writes a
+ * memory via the direct API path.
  */
 export default function ChatInput({
   onSend,
@@ -16,6 +18,7 @@ export default function ChatInput({
   placeholder = '向 EMA 提问…',
 }: ChatInputProps) {
   const [value, setValue] = useState('');
+  const [forceWrite, setForceWrite] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Auto-grow the textarea up to a sensible max height.
@@ -29,13 +32,12 @@ export default function ChatInput({
   const submit = () => {
     const text = value.trim();
     if (!text || disabled) return;
-    onSend(text);
+    onSend(text, forceWrite);
     setValue('');
+    // Keep forceWrite checked until user unchecks — don't reset.
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter sends; Shift+Enter inserts a newline. Ignore while IME composing
-    // (Chinese input confirmation) to avoid sending mid-composition.
     if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       submit();
@@ -65,9 +67,20 @@ export default function ChatInput({
           发送
         </button>
       </div>
-      <p className="mx-auto mt-1 max-w-3xl text-right text-xs text-gray-400">
-        Enter 发送 · Shift+Enter 换行
-      </p>
+      <div className="mx-auto mt-1 flex max-w-3xl items-center justify-between text-xs text-gray-400">
+        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={forceWrite}
+            onChange={(e) => setForceWrite(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-gray-300 text-amber-500 focus:ring-amber-500"
+          />
+          <span className={forceWrite ? 'font-medium text-amber-600' : ''}>
+            强制写入记忆
+          </span>
+        </label>
+        <span>Enter 发送 · Shift+Enter 换行</span>
+      </div>
     </div>
   );
 }

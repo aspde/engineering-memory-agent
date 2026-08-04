@@ -17,6 +17,7 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from backend.service.agent_service import get_agent_for_thread
+from backend.shared.config import current_thread_id
 from backend.service.llm_service import get_llm_provider
 
 logger = logging.getLogger(__name__)
@@ -343,6 +344,9 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     agent = get_agent_for_thread()
     config = {"configurable": {"thread_id": req.thread_id}}
 
+    # Tag memories written during this turn with the conversation thread.
+    current_thread_id.set(req.thread_id)
+
     # Record this conversation as active
     title = req.message[:80] if req.message else ""
     if req.resume_data is None and title:
@@ -413,6 +417,9 @@ async def agent_chat_stream(req: ChatRequest):
     """
     agent = get_agent_for_thread()
     config = {"configurable": {"thread_id": req.thread_id}}
+
+    # Tag memories written during this turn with the conversation thread.
+    current_thread_id.set(req.thread_id)
 
     # Record this conversation as active
     title = req.message[:80] if req.message else ""

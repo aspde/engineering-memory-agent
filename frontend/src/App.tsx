@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
+import EntityGraphPage from './pages/EntityGraphPage';
 import MemoriesPage from './pages/MemoriesPage';
 
 export default function App() {
@@ -11,6 +12,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<ChatPage />} />
           <Route path="/memories" element={<MemoriesPage />} />
+          <Route path="/graph" element={<EntityGraphPage />} />
         </Routes>
       </main>
     </div>

@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 interface MemoryCardProps {
   /** Raw memory record from searchMemories (or a full MemoryGetResponse). */
@@ -10,6 +11,7 @@ interface MemoryCardProps {
 }
 
 export default function MemoryCard({ memory, onDelete, isDeleting }: MemoryCardProps) {
+  const navigate = useNavigate();
   const [showConfirm, setShowConfirm] = useState(false);
   const summary =
     typeof memory.summary === 'string' && memory.summary.length > 0
@@ -20,6 +22,10 @@ export default function MemoryCard({ memory, onDelete, isDeleting }: MemoryCardP
   const createdAt = typeof memory.created_at === 'string' ? memory.created_at : '';
   const rawId = memory.id;
   const id = rawId != null ? String(rawId) : '';
+
+  // Extract thread_id from meta if this memory came from a conversation
+  const meta = memory.meta as Record<string, unknown> | undefined;
+  const threadId = typeof meta?.thread_id === 'string' ? meta.thread_id : null;
 
   const isLong = summary.length > 120;
   const shortSummary = isLong ? `${summary.slice(0, 120)}…` : summary;

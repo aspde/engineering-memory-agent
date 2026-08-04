@@ -16,7 +16,7 @@ const initialState: AppState = {
 export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_THREAD_ID':
-      return { ...state, threadId: action.threadId, messages: [], pendingInterrupt: null, waitingForApproval: false };
+      return { ...state, threadId: action.threadId, messages: [], loadedThreadId: null, pendingInterrupt: null, waitingForApproval: false };
     case 'ADD_MESSAGE':
       return { ...state, messages: [...state.messages, action.message] };
     case 'UPDATE_LAST_MESSAGE': {

@@ -67,6 +67,29 @@ _STATEMENTS = [
     END $$;
     """,
     """
+    CREATE TABLE IF NOT EXISTS entities (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        name            TEXT NOT NULL,
+        canonical_name  TEXT NOT NULL,
+        type            TEXT NOT NULL,
+        embedding       vector(1024),
+        first_seen_at   TIMESTAMPTZ DEFAULT now(),
+        UNIQUE(canonical_name, type)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_entities_embedding
+        ON entities USING ivfflat (embedding vector_cosine_ops)
+        WITH (lists = 100)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS memory_entities (
+        memory_id UUID REFERENCES memories(id) ON DELETE CASCADE,
+        entity_id UUID REFERENCES entities(id) ON DELETE CASCADE,
+        PRIMARY KEY (memory_id, entity_id)
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS conversations (
         id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         thread_id   TEXT NOT NULL UNIQUE,

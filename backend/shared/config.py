@@ -2,12 +2,22 @@
 
 from __future__ import annotations
 
+import contextvars
 import os
 from dataclasses import dataclass, field
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# Context variable to pass the current conversation thread_id through
+# the agent → tool → service call chain without threading it through
+# every function signature.  Set by the API layer before invoking the
+# agent graph, read by the memory-write path to tag new memories with
+# their originating conversation.
+current_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_thread_id", default=""
+)
 
 
 @dataclass

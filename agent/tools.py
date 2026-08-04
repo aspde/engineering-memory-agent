@@ -14,6 +14,11 @@ from typing import Any
 from langchain_core.tools import tool
 
 from backend.service.chunk import chunk_code, chunk_text
+from backend.service.entity import (
+    get_entity_by_name,
+    get_entity_relations_for_tool,
+    get_memory_entities_batch,
+)
 from backend.service.extraction import extract_memory
 from backend.service.ingestion import ingest_repo
 from backend.service.memory import write_memory
@@ -47,21 +52,38 @@ async def search_memories_tool(
     if not results:
         return "No relevant memories found."
 
+    # Annotate with normalized entity links
+    memory_ids = [str(r["id"]) for r in results]
+    entity_map: dict[str, list[dict]] = {}
+    try:
+        entity_map = await get_memory_entities_batch(memory_ids)
+    except Exception:
+        pass  # entities table may not exist pre-migration
+
     lines = [f"Found {len(results)} relevant memories:"]
     sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
         score = r.get("rerank_score", r.get("weighted_score", 0))
         decay = r.get("decay_factor", 1.0)
-        lines.append(
+        mid = str(r["id"])
+        entities = entity_map.get(mid, [])
+        entity_names = [e["canonical_name"] for e in entities]
+
+        line = (
             f"[{i + 1}] (relevance: {score:.2f}, decay: {decay:.2f}) "
             f"{r['summary']}"
         )
+        if entity_names:
+            line += f"  [entities: {', '.join(entity_names)}]"
+        lines.append(line)
+
         sources.append({
-            "id": str(r["id"]),
+            "id": mid,
             "type": "memory",
             "summary": str(r["summary"])[:200],
             "relevance": round(float(score), 4),
             "decay": round(float(decay), 4),
+            "entities": entities,
         })
     return json.dumps(
         {"display": "\n".join(lines), "sources": sources},
@@ -179,6 +201,49 @@ async def extract_memory_tool(content: str) -> str:
     )
 
 
+# ── Entity tools ─────────────────────────────────────────────────────
+
+
+@tool
+async def query_entity_tool(entity_name: str) -> str:
+    """Look up a normalized entity by name and return its profile, related
+    entities, and recent memories.
+
+    Use this when the user asks about a specific technology, person,
+    project, or concept — e.g. \"what do we know about PostgreSQL?\" or
+    \"show me everything related to Kafka\".
+
+    Args:
+        entity_name: The entity name to look up (fuzzy match against
+            canonical_name and name).
+    """
+    entity = await get_entity_by_name(entity_name)
+    if entity is None:
+        return json.dumps(
+            {"found": False, "message": f"No entity found matching '{entity_name}'."},
+            ensure_ascii=False,
+        )
+
+    relations = await get_entity_relations_for_tool(str(entity["id"]))
+
+    return json.dumps(
+        {
+            "found": True,
+            "entity": {
+                "id": str(entity["id"]),
+                "name": str(entity["name"]),
+                "canonical_name": str(entity["canonical_name"]),
+                "type": str(entity["type"]),
+                "memory_count": entity["memory_count"],
+            },
+            "related_entities": relations["related_entities"],
+            "recent_memories": relations["recent_memories"],
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 # ── Ingestion tools ──────────────────────────────────────────────────
 
 
@@ -250,6 +315,7 @@ async def ingest_document_tool(
 
 ALL_TOOLS: list = [
     search_memories_tool,
+    query_entity_tool,
     retrieve_chunks_tool,
     write_memory_tool,
     extract_memory_tool,

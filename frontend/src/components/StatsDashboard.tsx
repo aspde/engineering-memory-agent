@@ -7,11 +7,23 @@ interface StatsDashboardProps {
   onRetry: () => void;
 }
 
-function KpiCard({ label, value }: { label: string; value: number }) {
+function KpiCard({
+  label,
+  value,
+  format,
+}: {
+  label: string;
+  value: number;
+  format?: 'number' | 'percent';
+}) {
+  const display =
+    format === 'percent'
+      ? `${(value * 100).toFixed(0)}%`
+      : value.toLocaleString();
   return (
     <div className="rounded-lg border border-gray-200 bg-white p-4">
       <p className="text-sm text-gray-500">{label}</p>
-      <p className="mt-1 text-2xl font-bold text-gray-900">{value.toLocaleString()}</p>
+      <p className="mt-1 text-2xl font-bold text-gray-900">{display}</p>
     </div>
   );
 }
@@ -68,6 +80,30 @@ export default function StatsDashboard({ stats, isLoading, error, onRetry }: Sta
         <KpiCard label="对话数" value={stats.total_conversations} />
         <KpiCard label="近 7 天新增" value={stats.recent_count_7d} />
       </div>
+
+      {/* Entity graph KPI row */}
+      {stats.entity_graph && (
+        <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
+          <KpiCard
+            label="实体总数"
+            value={stats.entity_graph.total_entities}
+          />
+          <KpiCard
+            label="图谱覆盖率"
+            value={stats.entity_graph.coverage_ratio}
+            format="percent"
+          />
+          <KpiCard
+            label="实体密度"
+            value={stats.entity_graph.density}
+          />
+          <KpiCard
+            label="7 日增长率"
+            value={stats.entity_graph.growth_rate_7d}
+            format="percent"
+          />
+        </div>
+      )}
 
       <div className="mt-6 grid grid-cols-1 gap-6 md:grid-cols-2">
         {/* Source distribution */}
