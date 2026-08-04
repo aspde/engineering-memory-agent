@@ -10,7 +10,14 @@
 | [agent-design.md](agent-design.md) | LangGraph 单 Agent 工作流设计 |
 | [memory-system.md](memory-system.md) | 记忆系统设计（含 RAG 检索、Git 知识提取） |
 | [deployment.md](deployment.md) | Docker Compose 部署与运行配置 |
+| [design/domain-model.md](design/domain-model.md) | 领域模型：核心概念、实体关系、演进路线 |
+| [decisions/ADR-006-extension-roadmap.md](decisions/ADR-006-extension-roadmap.md) | 四阶段扩展路线图 |
+| [design/phase-1-entity-graph-spec.md](design/phase-1-entity-graph-spec.md) | Phase 1 Spec: 知识图谱化 |
+| [design/phase-2-connectors-spec.md](design/phase-2-connectors-spec.md) | Phase 2 Spec: 多源连接器 |
+| [design/phase-3-proactive-agent-spec.md](design/phase-3-proactive-agent-spec.md) | Phase 3 Spec: 主动 Agent |
+| [design/phase-4-vertical-scenarios-spec.md](design/phase-4-vertical-scenarios-spec.md) | Phase 4 Spec: 垂直场景孵化 |
 | [decisions/](decisions/) | 架构决策记录（ADR） |
+| [design/](design/) | 设计文档（前端测试、删除 API、React 迁移等） |
 
 ## 维护约定
 
