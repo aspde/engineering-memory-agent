@@ -1,6 +1,23 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+// ── Source badge styling ─────────────────────────────────────────────
+
+const SOURCE_STYLES: Record<string, { icon: string; colors: string }> = {
+  pingcode: { icon: '📋', colors: 'bg-blue-100 text-blue-700' },
+  pingcode_bug: { icon: '🐛', colors: 'bg-blue-100 text-blue-700' },
+  ci_build: { icon: '🔄', colors: 'bg-green-100 text-green-700' },
+  ci_regression: { icon: '📉', colors: 'bg-green-100 text-green-700' },
+  feishu: { icon: '💬', colors: 'bg-purple-100 text-purple-700' },
+  git_commit: { icon: '📦', colors: 'bg-gray-100 text-gray-700' },
+  conversation: { icon: '💭', colors: 'bg-indigo-100 text-indigo-700' },
+  api: { icon: '📄', colors: 'bg-cyan-100 text-cyan-700' },
+};
+
+function sourceStyle(sourceType: string): { icon: string; colors: string } {
+  return SOURCE_STYLES[sourceType] ?? { icon: '📌', colors: 'bg-gray-100 text-gray-600' };
+}
+
 interface MemoryCardProps {
   /** Raw memory record from searchMemories (or a full MemoryGetResponse). */
   memory: Record<string, unknown>;
@@ -35,8 +52,10 @@ export default function MemoryCard({ memory, onDelete, isDeleting }: MemoryCardP
       {/* Header: summary + source badge */}
       <div className="flex items-start justify-between gap-3">
         <p className="font-semibold text-gray-900">{shortSummary}</p>
-        <span className="shrink-0 rounded bg-gray-100 px-2 py-0.5 font-mono text-xs text-gray-600">
-          {sourceType}
+        <span
+          className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium ${sourceStyle(sourceType).colors}`}
+        >
+          {sourceStyle(sourceType).icon} {sourceType}
         </span>
         {onDelete && (
           <div className="ml-2 shrink-0">

@@ -314,3 +314,27 @@ class TestSearchMemoriesToolWithEntities:
         assert data["sources"][0]["entities"][0]["canonical_name"] == "PostgreSQL"
         assert "PostgreSQL" in data["display"]
         assert "pgvector" in data["display"]
+
+
+class TestConnectorAwareness:
+    """Tool descriptions and prompts should mention connector data sources."""
+
+    def test_search_memories_tool_mentions_connectors(self):
+        """The tool description should mention connector source types."""
+        desc = search_memories_tool.description.lower()
+        assert "pingcode" in desc
+        assert "ci" in desc or "ci/cd" in desc
+        assert "feishu" in desc or "飞书" in desc
+
+    def test_query_entity_tool_mentions_connectors(self):
+        """The entity tool description should mention connector-derived entities."""
+        desc = query_entity_tool.description.lower()
+        assert any(
+            word in desc for word in ("pingcode", "ci", "feishu", "飞书", "connectors", "sources")
+        )
+
+    def test_tool_count_unchanged(self):
+        """Sanity check: the ALL_TOOLS roster should still have 7 tools."""
+        from agent.tools import ALL_TOOLS
+
+        assert len(ALL_TOOLS) == 7

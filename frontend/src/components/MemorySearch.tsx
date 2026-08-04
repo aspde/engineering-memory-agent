@@ -1,8 +1,19 @@
-import { useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useMemories } from '../hooks/useMemories';
 import MemoryCard from './MemoryCard';
 
 const TOP_K_OPTIONS = [5, 10, 20, 30, 50];
+
+const SOURCE_FILTER_LABELS: Record<string, string> = {
+  conversation: '💭 对话',
+  api: '📄 API',
+  git_commit: '📦 Git',
+  pingcode: '📋 PingCode',
+  pingcode_bug: '🐛 PingCode 缺陷',
+  ci_build: '🔄 CI',
+  ci_regression: '📉 CI 回归',
+  feishu: '💬 飞书',
+};
 
 interface ToastState {
   type: 'success' | 'error';
@@ -16,9 +27,30 @@ export default function MemorySearch() {
     useMemories();
   const [query, setQuery] = useState('');
   const [topK, setTopK] = useState(20);
+  const [sourceFilter, setSourceFilter] = useState<string>('');
   const [prompt, setPrompt] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  // Collect distinct source_types from search results for the filter dropdown.
+  const sourceTypes = useMemo(() => {
+    if (!searchResults) return [];
+    const seen = new Set<string>();
+    for (const r of searchResults) {
+      const st = typeof r.source_type === 'string' ? r.source_type : '';
+      if (st) seen.add(st);
+    }
+    return Array.from(seen).sort();
+  }, [searchResults]);
+
+  // Client-side source_type filtering.
+  const filteredResults = useMemo(() => {
+    if (!searchResults) return null;
+    if (!sourceFilter) return searchResults;
+    return searchResults.filter(
+      (r) => String(r.source_type ?? '') === sourceFilter,
+    );
+  }, [searchResults, sourceFilter]);
 
   const toastTimerRef = useRef<number | null>(null);
 
@@ -75,6 +107,20 @@ export default function MemorySearch() {
           className="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 placeholder:text-gray-400 focus:border-blue-500 focus:outline-none"
         />
         <div className="flex shrink-0 items-center gap-2">
+          {sourceTypes.length > 0 && (
+            <select
+              value={sourceFilter}
+              onChange={(e) => setSourceFilter(e.target.value)}
+              className="rounded-lg border border-gray-300 bg-white px-2 py-2 text-sm text-gray-700 focus:border-blue-500 focus:outline-none"
+            >
+              <option value="">全部来源</option>
+              {sourceTypes.map((st) => (
+                <option key={st} value={st}>
+                  {SOURCE_FILTER_LABELS[st] ?? st}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             value={topK}
             onChange={(e) => setTopK(Number(e.target.value))}
@@ -106,15 +152,20 @@ export default function MemorySearch() {
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-blue-600" />
             搜索中…
           </div>
-        ) : searchResults !== null ? (
-          searchResults.length === 0 ? (
+        ) : filteredResults !== null ? (
+          filteredResults.length === 0 ? (
             <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
               没有找到匹配的记忆。尝试换个关键词，或者在聊天中让 EMA 记录一些内容。
             </p>
           ) : (
             <div className="space-y-3">
-              <p className="text-sm text-gray-500">找到 {searchResults.length} 条记忆</p>
-              {searchResults.map((mem, idx) => (
+              <p className="text-sm text-gray-500">
+                找到 {filteredResults.length} 条记忆
+                {sourceFilter && searchResults && searchResults.length > filteredResults.length && (
+                  <span className="text-gray-400">（共 {searchResults.length} 条，已按来源筛选）</span>
+                )}
+              </p>
+              {filteredResults.map((mem, idx) => (
                 <MemoryCard
                   key={idx}
                   memory={mem}

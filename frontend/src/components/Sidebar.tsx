@@ -94,6 +94,13 @@ export default function Sidebar() {
         >
           🔗 实体图谱
         </button>
+        <button
+          type="button"
+          onClick={() => navigate('/connectors')}
+          className="w-full rounded-lg bg-amber-600 px-3 py-2 text-left text-sm font-medium text-white transition-colors hover:bg-amber-700"
+        >
+          🔌 连接器
+        </button>
       </div>
 
       {/* Thread list */}

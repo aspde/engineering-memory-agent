@@ -49,6 +49,40 @@ async def lifespan(app: FastAPI):
     """Startup: init DB tables and PostgresSaver checkpoint table."""
     await init_db()
 
+    # Register connectors at startup.  Connectors missing required
+    # configuration (API keys, etc.) are still registered but flagged
+    # as "pending" so the frontend can show their status.
+    try:
+        from backend.connectors.registry import register_connector
+        from backend.connectors.ci import CIConnector
+        from backend.connectors.feishu import FeishuConnector
+        from backend.connectors.pingcode import PingCodeConnector
+
+        _pingcode_secret = os.getenv("WEBHOOK_PINGCODE_SECRET", "")
+        register_connector(
+            "pingcode",
+            PingCodeConnector(),
+            status="active" if _pingcode_secret else "pending",
+        )
+        _ci_secret = os.getenv("WEBHOOK_CI_SECRET", "")
+        register_connector(
+            "ci",
+            CIConnector(),
+            status="active" if _ci_secret else "pending",
+        )
+        _feishu_secret = os.getenv("WEBHOOK_FEISHU_SECRET", "")
+        register_connector(
+            "feishu",
+            FeishuConnector(),
+            status="active" if _feishu_secret else "pending",
+        )
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "Failed to register connectors — webhook endpoints will be unavailable."
+        )
+
     # Create checkpoint table for conversation persistence
     try:
         from backend.service.agent_service import _setup_checkpointer

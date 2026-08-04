@@ -1,6 +1,7 @@
 import { Route, Routes } from 'react-router-dom';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
+import ConnectorsPage from './pages/ConnectorsPage';
 import EntityGraphPage from './pages/EntityGraphPage';
 import MemoriesPage from './pages/MemoriesPage';
 
@@ -13,6 +14,7 @@ export default function App() {
           <Route path="/" element={<ChatPage />} />
           <Route path="/memories" element={<MemoriesPage />} />
           <Route path="/graph" element={<EntityGraphPage />} />
+          <Route path="/connectors" element={<ConnectorsPage />} />
         </Routes>
       </main>
     </div>

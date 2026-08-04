@@ -226,6 +226,34 @@ export interface MemoryStatsResponse {
   entity_graph: EntityGraphStats | null;
 }
 
+// ── Connector API types ──────────────────────────────────────────────
+
+export interface ConnectorInfo {
+  source_type: string;
+  display_name: string;
+  status: 'active' | 'pending' | 'error';
+  batch_mode: 'supported' | 'pending' | 'not_applicable';
+}
+
+export interface ConnectorListResponse {
+  connectors: ConnectorInfo[];
+}
+
+export interface ConnectorLogEntry {
+  id: string;
+  source: string;
+  event_type: string | null;
+  status: string;
+  payload_summary: string | null;
+  memory_id: string | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface ConnectorLogsResponse {
+  logs: ConnectorLogEntry[];
+}
+
 // ── App state ────────────────────────────────────────────────────
 
 export interface AppState {

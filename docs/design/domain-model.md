@@ -13,7 +13,7 @@
 | **Conversation（对话）** | 用户与 EMA Agent 的一次或多次交互，通过 thread_id 关联。 | ✅ 已实现（`conversations` 表 + LangGraph checkpoints） |
 | **Source（来源）** | 记忆的出处类型：`git_commit`、`doc`、`conversation`、`api`。 | ✅ 已实现（`memories.source_type`） |
 | **Decay（衰减）** | 艾宾浩斯遗忘曲线：`R = e^(-t/S)`，`S = 1 + recall_count × 2`。记忆随时间衰减，召回时恢复。 | ✅ 已实现 |
-| **Connector（连接器）** | 对接外部系统的输入适配器，将外部数据（Jira、CI、Slack）转化为 EMA 可消化的内容。 | ❌ 未实现 |
+| **Connector（连接器）** | 对接外部系统的输入适配器，将外部数据（PingCode、CI、飞书）转化为 EMA 可消化的内容。 | ❌ 未实现 |
 | **Ingestion Pipeline（摄入管线）** | 将原始内容转化为 Memory 或 Chunk 的完整流程：分块 → 嵌入 → 提取 → 去重 → 存储。 | ✅ 已实现 |
 | **HITL（人机协同）** | Human-in-the-Loop：Agent 在执行敏感操作前暂停，等待用户审批；或在记忆冲突时等待用户仲裁。 | ✅ 已实现 |
 
@@ -22,7 +22,7 @@
 ```
                          ┌─────────────────────────────┐
                          │        Connector             │
-                         │  (Jira / CI / Slack / …)     │
+                         │ (PingCode / CI / 飞书 / …)    │
                          └─────────────┬───────────────┘
                                        │ 产生
                                        ▼

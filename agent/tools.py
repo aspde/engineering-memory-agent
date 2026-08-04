@@ -37,9 +37,15 @@ async def search_memories_tool(
     """Search long-term engineering memories for knowledge, decisions,
     lessons learned, and past context.
 
+    Memories come from multiple sources: manual conversations, PingCode
+    work items (pingcode / pingcode_bug), CI/CD builds (ci_build /
+    ci_regression), 飞书 discussions (feishu), Git commits, and document
+    ingestion.  This tool searches across ALL sources by default.
+
     Use this when the user asks about project history, technical
     decisions, architecture, past discussions, or anything that might
-    have been recorded as a memory.
+    have been recorded as a memory — regardless of which source it
+    came from.
 
     Args:
         query: Natural-language search query.
@@ -208,6 +214,11 @@ async def extract_memory_tool(content: str) -> str:
 async def query_entity_tool(entity_name: str) -> str:
     """Look up a normalized entity by name and return its profile, related
     entities, and recent memories.
+
+    Entities are extracted from all sources — conversations, PingCode work items,
+    CI builds, 飞书 discussions, and Git commits.  This tool shows the full
+    picture: which memories mention this entity, which other entities it
+    relates to, and where those memories came from.
 
     Use this when the user asks about a specific technology, person,
     project, or concept — e.g. \"what do we know about PostgreSQL?\" or

@@ -102,6 +102,23 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_conversations_updated
         ON conversations (updated_at DESC)
     """,
+    # ── Phase 2: connectors ─────────────────────────────────────────
+    """
+    CREATE TABLE IF NOT EXISTS webhook_logs (
+        id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source          TEXT NOT NULL,
+        event_type      TEXT,
+        status          TEXT NOT NULL DEFAULT 'received',
+        payload_summary TEXT,
+        memory_id       UUID,
+        error           TEXT,
+        created_at      TIMESTAMPTZ DEFAULT now()
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_webhook_logs_source
+        ON webhook_logs (source, created_at DESC)
+    """,
 ]
 
 
