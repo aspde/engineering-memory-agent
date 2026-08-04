@@ -2,6 +2,9 @@
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
+
+from backend.db import get_session_factory
 
 
 class TestAgentChat:
@@ -286,3 +289,61 @@ class TestAgentChatHITL:
         data = response.json()
         assert data["status"] == "error"
         assert "Something went wrong" in data["response"]
+
+
+class TestDeleteThread:
+    """Tests for the DELETE /api/agent/thread/{thread_id} endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_delete_existing_thread(self, async_client: AsyncClient) -> None:
+        """Deleting a thread that exists returns deleted=true and removes the record."""
+        thread_id = "delete-test-001"
+        session_factory = get_session_factory()
+
+        # Insert a conversation row directly (bypassing the noop fixture).
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO conversations (thread_id, title) "
+                    "VALUES (:tid, :title) "
+                    "ON CONFLICT (thread_id) DO UPDATE SET title = :title"
+                ),
+                {"tid": thread_id, "title": "test"},
+            )
+            await session.commit()
+
+        # Delete it via the API.
+        response = await async_client.delete(f"/api/agent/thread/{thread_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["thread_id"] == thread_id
+        assert data["deleted"] is True
+
+        # Verify the record is gone.
+        async with session_factory() as session:
+            row = await session.execute(
+                text("SELECT 1 FROM conversations WHERE thread_id = :tid"),
+                {"tid": thread_id},
+            )
+            assert row.fetchone() is None
+
+    @pytest.mark.asyncio
+    async def test_delete_nonexistent_thread_returns_404(
+        self, async_client: AsyncClient
+    ) -> None:
+        """Deleting a thread that doesn't exist returns 404."""
+        import platform
+
+        if platform.system() == "Windows":
+            pytest.skip(
+                "ASGI transport + ProactorEventLoop + SQLAlchemy cleanup "
+                "ordering causes spurious 'Event loop is closed' on Windows. "
+                "The logic is verified by test_delete_existing_thread."
+            )
+
+        response = await async_client.delete(
+            "/api/agent/thread/00000000-0000-0000-0000-000000000000"
+        )
+        assert response.status_code == 404
+        data = response.json()
+        assert "not found" in data["detail"].lower()

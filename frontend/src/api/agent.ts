@@ -2,10 +2,11 @@ import type {
   ChatRequest,
   ChatResponse,
   SSEEvent,
+  ThreadDeleteResponse,
   ThreadInfo,
   ThreadMessagesResponse,
 } from '../types';
-import { apiGet, apiPost, apiSSE } from './client';
+import { apiDelete, apiGet, apiPost, apiSSE } from './client';
 
 /** List conversation threads (most recent first). */
 async function listThreads(): Promise<ThreadInfo[]> {
@@ -29,4 +30,11 @@ function chatStream(req: ChatRequest): AsyncGenerator<SSEEvent> {
   return apiSSE('/api/agent/chat/stream', req);
 }
 
-export { listThreads, getThreadMessages, chatNonStream, chatStream };
+/** Delete a conversation thread and its checkpoint data. */
+async function deleteThread(threadId: string): Promise<ThreadDeleteResponse> {
+  return apiDelete<ThreadDeleteResponse>(
+    `/api/agent/thread/${encodeURIComponent(threadId)}`,
+  );
+}
+
+export { listThreads, getThreadMessages, chatNonStream, chatStream, deleteThread };

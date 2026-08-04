@@ -57,6 +57,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     case 'SET_LOADED_THREAD':
       return { ...state, loadedThreadId: action.threadId };
+    case 'REMOVE_THREAD': {
+      const filtered = state.threads.filter((t) => t.thread_id !== action.threadId);
+      // If the deleted thread was the active one, start a new conversation.
+      if (action.threadId === state.threadId) {
+        return {
+          ...state,
+          threads: filtered,
+          threadId: crypto.randomUUID(),
+          messages: [],
+          pendingInterrupt: null,
+          waitingForApproval: false,
+          loadedThreadId: null,
+        };
+      }
+      return { ...state, threads: filtered };
+    }
     case 'INVALIDATE_THREADS':
       return { ...state, threadsFetchedAt: 0 };
     default:

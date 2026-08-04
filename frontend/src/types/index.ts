@@ -35,6 +35,11 @@ export interface ThreadMessagesResponse {
   messages: MessageFromBackend[];
 }
 
+export interface ThreadDeleteResponse {
+  thread_id: string;
+  deleted: boolean;
+}
+
 // ── Message types ─────────────────────────────────────────────────
 
 /** Raw message from backend (GET /api/agent/thread/{id}). */
@@ -188,4 +193,5 @@ export type AppAction =
   | { type: 'CLEAR_MEM_FILTER' }
   | { type: 'NEW_CONVERSATION'; threadId: string }
   | { type: 'SET_LOADED_THREAD'; threadId: string | null }
+  | { type: 'REMOVE_THREAD'; threadId: string }
   | { type: 'INVALIDATE_THREADS' };

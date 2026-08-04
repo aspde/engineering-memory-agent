@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAppDispatch, useAppState } from '../context/AppContext';
-import { listThreads } from '../api/agent';
+import { deleteThread, listThreads } from '../api/agent';
 
 const THREADS_CACHE_TTL_MS = 30_000;
 
@@ -9,6 +9,11 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const { threadId, threads, threadsFetchedAt } = useAppState();
   const dispatch = useAppDispatch();
+
+  // Track which thread (if any) is in the delete-confirm state.
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useEffect(() => {
     // Skip if we already have a fresh thread list within the cache TTL.
@@ -22,8 +27,6 @@ export default function Sidebar() {
         }
       })
       .catch(() => {
-        // On error, record an (empty) fetch so we show the empty state
-        // rather than a perpetual loading skeleton, and respect the TTL.
         if (!cancelled) {
           dispatch({ type: 'SET_THREADS', threads: [] });
         }
@@ -44,6 +47,20 @@ export default function Sidebar() {
   const handleOpenThread = (id: string) => {
     dispatch({ type: 'SET_THREAD_ID', threadId: id });
     navigate('/');
+  };
+
+  const handleDelete = async (id: string) => {
+    setIsDeleting(true);
+    setConfirmingId(null);
+    setDeleteError(null);
+    try {
+      await deleteThread(id);
+      dispatch({ type: 'REMOVE_THREAD', threadId: id });
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : '删除失败，请重试');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -89,27 +106,90 @@ export default function Sidebar() {
         ) : (
           threads.map((t) => {
             const active = t.thread_id === threadId;
+            const isConfirming = confirmingId === t.thread_id;
+
             return (
-              <button
-                key={t.thread_id}
-                type="button"
-                onClick={() => handleOpenThread(t.thread_id)}
-                disabled={active}
-                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors ${
-                  active
-                    ? 'bg-blue-50 font-medium text-blue-700'
-                    : 'text-gray-700 hover:bg-gray-100 disabled:opacity-50'
-                }`}
-              >
-                <span
-                  className={`h-2 w-2 shrink-0 rounded-full ${active ? 'bg-blue-500' : 'bg-transparent'}`}
-                />
-                <span className="truncate">{t.title || '未命名对话'}</span>
-              </button>
+              <div key={t.thread_id} className="group relative">
+                <button
+                  type="button"
+                  onClick={() => handleOpenThread(t.thread_id)}
+                  disabled={active || isDeleting}
+                  className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 pr-8 text-left text-sm transition-colors ${
+                    active
+                      ? 'bg-blue-50 font-medium text-blue-700'
+                      : 'text-gray-700 hover:bg-gray-100 disabled:opacity-50'
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 shrink-0 rounded-full ${active ? 'bg-blue-500' : 'bg-transparent'}`}
+                  />
+                  <span className="truncate">{t.title || '未命名对话'}</span>
+                </button>
+
+                {/* Delete button — visible on hover */}
+                <div className="absolute right-1 top-1/2 -translate-y-1/2">
+                  {!isConfirming ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmingId(t.thread_id);
+                      }}
+                      disabled={isDeleting}
+                      className="hidden rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors group-hover:block"
+                      title="删除对话"
+                    >
+                      <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  ) : (
+                    <span className="flex items-center gap-1 rounded bg-red-50 px-2 py-1 text-xs text-red-700">
+                      删除?
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void handleDelete(t.thread_id);
+                        }}
+                        disabled={isDeleting}
+                        className="rounded px-1 py-0.5 font-medium bg-red-500 text-white hover:bg-red-600 disabled:opacity-50"
+                      >
+                        是
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setConfirmingId(null);
+                        }}
+                        disabled={isDeleting}
+                        className="rounded px-1 py-0.5 font-medium text-gray-600 hover:bg-gray-200"
+                      >
+                        否
+                      </button>
+                    </span>
+                  )}
+                </div>
+              </div>
             );
           })
         )}
       </div>
+
+      {/* Delete error feedback */}
+      {deleteError && (
+        <div className="mx-3 mb-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">
+          {deleteError}
+          <button
+            type="button"
+            onClick={() => setDeleteError(null)}
+            className="ml-2 font-medium underline hover:no-underline"
+          >
+            关闭
+          </button>
+        </div>
+      )}
     </aside>
   );
 }

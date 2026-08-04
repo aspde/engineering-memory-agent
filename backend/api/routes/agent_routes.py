@@ -8,7 +8,7 @@ import logging
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
@@ -180,6 +180,11 @@ class ThreadMessagesResponse(BaseModel):
     messages: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class ThreadDeleteResponse(BaseModel):
+    thread_id: str
+    deleted: bool
+
+
 # ── Conversation history routes ──────────────────────────────────────
 
 
@@ -271,6 +276,51 @@ async def get_thread_messages(thread_id: str) -> ThreadMessagesResponse:
     messages = displayed
 
     return ThreadMessagesResponse(thread_id=thread_id, messages=messages)
+
+
+@router.delete("/thread/{thread_id}", response_model=ThreadDeleteResponse)
+async def delete_thread(thread_id: str) -> ThreadDeleteResponse:
+    """Delete a conversation and its checkpoint data.
+
+    Returns 404 if the conversation does not exist.
+    """
+    session_factory = get_session_factory()
+
+    # Verify the conversation exists (outside the write-session to
+    # avoid __aexit__ errors swallowing HTTPException on 404).
+    async with session_factory() as ro:
+        r = await ro.execute(
+            text("SELECT 1 FROM conversations WHERE thread_id = :tid"),
+            {"tid": thread_id},
+        )
+        if r.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+
+    try:
+        async with session_factory() as session:
+            # Delete checkpoint data — these tables may not exist when
+            # the checkpointer fell back to InMemorySaver (e.g. database
+            # unreachable, or Windows ProactorEventLoop incompatibility).
+            for tbl in ("checkpoint_writes", "checkpoint_blobs", "checkpoints"):
+                try:
+                    await session.execute(
+                        text(f"DELETE FROM {tbl} WHERE thread_id = :tid"),
+                        {"tid": thread_id},
+                    )
+                except Exception:
+                    pass  # table doesn't exist — skip
+
+            # Delete the conversation record
+            await session.execute(
+                text("DELETE FROM conversations WHERE thread_id = :tid"),
+                {"tid": thread_id},
+            )
+            await session.commit()
+    except Exception as exc:
+        logger.warning("Failed to delete thread %s: %s", thread_id, exc)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return ThreadDeleteResponse(thread_id=thread_id, deleted=True)
 
 
 # ── Chat routes ──────────────────────────────────────────────────────
