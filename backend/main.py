@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import os
 
-# ── Windows: limit OpenBLAS threads BEFORE numpy/torch are imported ──
-# sentence-transformers → torch → numpy → OpenBLAS spawns one thread pool
-# per core; on Windows this quickly exhausts address space and triggers
-# "Memory allocation still failed after 10 retries".  Single-thread each
-# BLAS backend — embedding calls are already batched & run on a thread.
+# ── Offline mode & BLAS env vars — MUST be set BEFORE any import that
+# may transitively pull in transformers / huggingface_hub / numpy / torch.
+# langchain-core → transformers → huggingface_hub reads HF_HUB_OFFLINE
+# at import time; setting it later has no effect.
 for _k, _v in {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
     "OPENBLAS_NUM_THREADS": "1",
     "OMP_NUM_THREADS": "1",
     "MKL_NUM_THREADS": "1",
 }.items():
-    os.environ.setdefault(_k, _v)
+    os.environ[_k] = _v
 
 import asyncio
 import sys
@@ -61,6 +62,26 @@ async def lifespan(app: FastAPI):
             "Error: %s",
             _exc,
         )
+
+    # Warm the embedding model in a background thread so the first
+    # request doesn't block for 30+ seconds loading BGE-M3.
+    try:
+        from backend.service.embedding_service import get_embedding_provider
+
+        async def _warm_embedding() -> None:
+            try:
+                await asyncio.to_thread(get_embedding_provider)
+            except Exception:
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "Background embedding warmup failed — model will "
+                    "load on first use (may delay the first request)."
+                )
+
+        asyncio.create_task(_warm_embedding())
+    except Exception:
+        pass
 
     yield
     await close_db()

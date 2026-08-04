@@ -48,13 +48,13 @@ _checkpointer: InMemorySaver | object | None = None
 _pool = None  # psycopg AsyncConnectionPool, closed on shutdown
 
 
-# ── Eager-init embedding provider (ensures offline flags are set) ───
+# ── Trigger offline flags before SentenceTransformer sees them ──────
+# Importing embedding_service sets HF_HUB_OFFLINE / TRANSFORMERS_OFFLINE
+# at module level; the expensive model load is deferred to first use.
 try:
-    from backend.service.embedding_service import get_embedding_provider
-
-    get_embedding_provider()
+    import backend.service.embedding_service  # noqa: F401
 except Exception:
-    pass  # will be retried lazily at first tool call
+    pass
 
 
 def _get_checkpointer() -> InMemorySaver | object:

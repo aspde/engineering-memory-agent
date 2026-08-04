@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 
 # ── Force offline BEFORE any HF/transformers imports ──────────────────
 # Must be at module top-level: when `from backend.service.embedding_service
@@ -12,7 +13,7 @@ import os
 # caller), these are set before SentenceTransformer / AutoTokenizer sees
 # the module for the first time.
 for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
-    os.environ.setdefault(_k, _v)
+    os.environ[_k] = _v  # force-override — setdefault may leave stale values
 
 from backend.model.embedding import EmbeddingProvider  # noqa: E402
 from backend.shared.config import config  # noqa: E402
@@ -150,30 +151,39 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
 
 _provider: EmbeddingProvider | None = None
+_lock: threading.Lock = threading.Lock()
 
 
 def get_embedding_provider() -> EmbeddingProvider:
-    """Return a singleton embedding provider based on config."""
+    """Return a singleton embedding provider based on config.
+
+    Thread-safe: the lock prevents the background warmup and the first
+    real request from racing to initialise the provider.
+    """
     global _provider
     if _provider is not None:
         return _provider
 
-    provider_name = config.embedding.provider
-    if provider_name == "local":
-        _provider = BGEEmbeddingProvider(
-            model_name=config.embedding.model,
-            normalize=config.embedding.normalize,
-            batch_size=config.embedding.batch_size,
-            hf_endpoint=config.embedding.hf_endpoint,
-        )
-    elif provider_name == "openai":
-        _provider = OpenAIEmbeddingProvider(
-            api_key=config.embedding.api_key,
-            base_url=config.embedding.base_url,
-            model=config.embedding.model,
-            batch_size=config.embedding.batch_size,
-        )
-    else:
-        raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
+    with _lock:
+        if _provider is not None:  # double-check after acquiring lock
+            return _provider
 
-    return _provider
+        provider_name = config.embedding.provider
+        if provider_name == "local":
+            _provider = BGEEmbeddingProvider(
+                model_name=config.embedding.model,
+                normalize=config.embedding.normalize,
+                batch_size=config.embedding.batch_size,
+                hf_endpoint=config.embedding.hf_endpoint,
+            )
+        elif provider_name == "openai":
+            _provider = OpenAIEmbeddingProvider(
+                api_key=config.embedding.api_key,
+                base_url=config.embedding.base_url,
+                model=config.embedding.model,
+                batch_size=config.embedding.batch_size,
+            )
+        else:
+            raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
+
+        return _provider
