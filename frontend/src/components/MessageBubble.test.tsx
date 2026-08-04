@@ -55,10 +55,8 @@ describe('MessageBubble', () => {
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
 
-  it('renders the ToolCallPanel below an assistant message with tool calls', () => {
+  it('does not render SourcesPanel when only toolCalls are present', () => {
     render(<MessageBubble message={makeMessage({ _meta: { toolCalls, sources: [] } })} />);
-    expect(screen.getByText('🔧 工具调用')).toBeInTheDocument();
-    expect(screen.getByText('写入记忆')).toBeInTheDocument();
     expect(screen.queryByTestId('sources-panel')).not.toBeInTheDocument();
   });
 
@@ -67,15 +65,13 @@ describe('MessageBubble', () => {
     expect(screen.getByTestId('sources-panel')).toBeInTheDocument();
   });
 
-  it('renders both panels when tool calls and sources are present', () => {
+  it('renders SourcesPanel when both toolCalls and sources are present', () => {
     render(<MessageBubble message={makeMessage({ _meta: { toolCalls, sources } })} />);
-    expect(screen.getByText('🔧 工具调用')).toBeInTheDocument();
     expect(screen.getByTestId('sources-panel')).toBeInTheDocument();
   });
 
   it('renders no panels when the message has no metadata', () => {
     render(<MessageBubble message={makeMessage()} />);
-    expect(screen.queryByText('🔧 工具调用')).not.toBeInTheDocument();
     expect(screen.queryByTestId('sources-panel')).not.toBeInTheDocument();
   });
 });

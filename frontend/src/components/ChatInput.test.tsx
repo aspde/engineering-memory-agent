@@ -22,7 +22,7 @@ describe('ChatInput', () => {
 
     await user.type(textarea, '  hello  ');
     await user.click(screen.getByRole('button', { name: '发送' }));
-    expect(onSend).toHaveBeenCalledWith('hello');
+    expect(onSend).toHaveBeenCalledWith('hello', false);
   });
 
   it('calls onSend when Enter is pressed', async () => {
@@ -32,7 +32,7 @@ describe('ChatInput', () => {
     const textarea = screen.getByPlaceholderText('向 EMA 提问…');
 
     await user.type(textarea, 'hello{enter}');
-    expect(onSend).toHaveBeenCalledWith('hello');
+    expect(onSend).toHaveBeenCalledWith('hello', false);
   });
 
   it('inserts a newline on Shift+Enter without sending', async () => {
