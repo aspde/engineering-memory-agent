@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from backend.service.chunk import chunk_text
+from backend.service.chunk import chunk_code, chunk_text
 from backend.service.extraction import extract_memory
 from backend.service.ingestion import ingest_repo
 from backend.service.memory import write_memory
@@ -215,21 +215,33 @@ async def ingest_git_repo_tool(
 async def ingest_document_tool(
     document_id: str,
     content: str,
+    language: str = "text",
     metadata: dict[str, Any] | None = None,
 ) -> str:
     """Chunk, embed, and store a document for later retrieval.
 
-    Splits content into overlapping chunks, computes embeddings, and
-    stores them in the vector database.  Use this when the user asks
-    to index a document, code file, or any text for future search.
+    Splits content into chunks — prose documents use recursive separator
+    splitting, Python code uses AST-aware function/class boundaries so a
+    200-line function is never cut in half.
+
+    Use this when the user asks to index a document, code file, or any
+    text for future search.
 
     Args:
-        document_id: Unique identifier for the document (e.g. filename).
+        document_id: Unique identifier (e.g. filename or path).
         content: Full text content of the document.
-        metadata: Optional metadata (source, language, author, etc.).
+        language: "python" for AST-aware code chunking, "text" (default)
+            for recursive separator splitting.
+        metadata: Optional metadata (source, author, etc.).
     """
-    chunks = chunk_text(content)
-    count = await write_chunks(document_id, chunks, meta=metadata)
+    meta = (metadata or {}) | {"language": language}
+
+    if language == "python":
+        chunks = chunk_code(content)
+    else:
+        chunks = chunk_text(content)
+
+    count = await write_chunks(document_id, chunks, meta=meta)
     return f"Ingested {count} chunks from document '{document_id}'."
 
 

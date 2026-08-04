@@ -187,3 +187,44 @@ class TestIngestDocument:
         )
         assert "2 chunks" in result
         assert "test.py" in result
+
+    @pytest.mark.asyncio
+    async def test_python_language_uses_chunk_code(self, monkeypatch) -> None:
+        from agent import tools as mod
+
+        monkeypatch.setattr(mod, "chunk_code", lambda code, **kw: ["def foo(): pass", "class Bar: pass"])
+        monkeypatch.setattr(mod, "write_chunks", AsyncMock(return_value=2))
+
+        result = await ingest_document_tool.ainvoke(
+            {"document_id": "app.py", "content": "def foo(): pass\nclass Bar: pass", "language": "python"}
+        )
+        assert "2 chunks" in result
+        assert "app.py" in result
+
+    @pytest.mark.asyncio
+    async def test_python_language_includes_language_in_metadata(self, monkeypatch) -> None:
+        from agent import tools as mod
+
+        monkeypatch.setattr(mod, "chunk_code", lambda code, **kw: ["chunk1"])
+        mock_write = AsyncMock(return_value=1)
+        monkeypatch.setattr(mod, "write_chunks", mock_write)
+
+        await ingest_document_tool.ainvoke(
+            {"document_id": "app.py", "content": "x = 1", "language": "python"}
+        )
+        # Verify the metadata passed to write_chunks includes language
+        call_args = mock_write.call_args
+        meta = call_args[1]["meta"] if "meta" in call_args[1] else call_args[0][2]
+        assert meta["language"] == "python"
+
+    @pytest.mark.asyncio
+    async def test_default_language_uses_chunk_text(self, monkeypatch) -> None:
+        from agent import tools as mod
+
+        monkeypatch.setattr(mod, "chunk_text", lambda content, **kw: ["paragraph 1"])
+        monkeypatch.setattr(mod, "write_chunks", AsyncMock(return_value=1))
+
+        result = await ingest_document_tool.ainvoke(
+            {"document_id": "readme.md", "content": "# Hello\n\nWorld"}
+        )
+        assert "1 chunks" in result
