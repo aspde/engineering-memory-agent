@@ -364,4 +364,5 @@ export type AppAction =
   | { type: 'REMOVE_THREAD'; threadId: string }
   | { type: 'INVALIDATE_THREADS' }
   | { type: 'SET_ACTIVE_SCENARIO'; scenario: string }
-  | { type: 'CLEAR_ACTIVE_SCENARIO' };
+  | { type: 'CLEAR_ACTIVE_SCENARIO' }
+  | { type: 'PREPEND_THREAD'; threadId: string; title: string };

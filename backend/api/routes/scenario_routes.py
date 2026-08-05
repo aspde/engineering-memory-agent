@@ -8,7 +8,9 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 
+from backend.db import get_session_factory
 from backend.service.scenarios import SCENARIOS, visible_scenarios
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,7 @@ class ScenarioInfo(BaseModel):
 
 class ScenarioRunRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
+    thread_id: str | None = Field(default=None, description="Client-side thread ID for persistence")
 
 
 class ScenarioRunResponse(BaseModel):
@@ -83,6 +86,32 @@ async def run_scenario(name: str, body: ScenarioRunRequest = ScenarioRunRequest(
             status_code=500,
             detail=f"Scenario '{name}' compose function not loadable: {exc}",
         ) from exc
+
+    # Persist the client thread_id through the compose chain via ContextVar.
+    from backend.service.scenarios import scenario_thread_id
+
+    tid = body.thread_id or ""
+    if tid:
+        scenario_thread_id.set(tid)
+        # Create the conversation record immediately so the thread appears
+        # in the history sidebar before the (potentially slow) scenario completes.
+        label = scenario.get("name", name)
+        try:
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        "INSERT INTO conversations (thread_id, title, updated_at) "
+                        "VALUES (:tid, :title, now()) "
+                        "ON CONFLICT (thread_id) DO UPDATE SET "
+                        "title = :title, "
+                        "updated_at = now()"
+                    ),
+                    {"tid": tid, "title": label},
+                )
+                await session.commit()
+        except Exception:
+            logger.warning("Failed to persist scenario conversation", exc_info=True)
 
     try:
         result = await compose_func(**body.params)

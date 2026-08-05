@@ -29,7 +29,7 @@ def mock_agent():
     return agent
 
 
-MOCK_AGENT_PATH = "agent.graph.get_default_agent"
+MOCK_AGENT_PATH = "backend.service.agent_service.get_agent"
 
 
 class TestListScenarios:

@@ -73,7 +73,7 @@ class TestComposePostmortemInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_postmortem(
@@ -99,7 +99,7 @@ class TestComposePostmortemInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_postmortem(
@@ -124,7 +124,7 @@ class TestComposePostmortemInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_postmortem()
@@ -143,7 +143,7 @@ class TestComposePostmortemInvocation:
         mock_agent.ainvoke.side_effect = RuntimeError("LLM timeout")
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_postmortem(incident_memory_id="test-id")
@@ -172,7 +172,7 @@ class TestComposePostmortemInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_postmortem(incident_memory_id="test")

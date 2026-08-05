@@ -8,6 +8,7 @@ tools, no new tables, no changes to the agent graph.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,6 +16,12 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
+
+# Context variable to pass the scenario thread_id from the API layer into
+# invoke_scenario_agent without threading it through every compose function.
+scenario_thread_id: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "scenario_thread_id", default=""
+)
 
 
 # ── Shared agent-invocation helper ─────────────────────────────────────
@@ -29,10 +36,16 @@ async def invoke_scenario_agent(
     All four compose functions delegate to this helper so the agent-
     invocation boilerplate (build messages, call ``ainvoke()``, extract
     ``final_response``, error handling) lives in one place.
-    """
-    from agent.graph import get_default_agent
 
-    agent = get_default_agent()
+    Uses ``scenario_thread_id`` ContextVar when set (from the API layer),
+    falling back to a generated UUID for background / patrol-triggered runs.
+    """
+    import uuid
+
+    from backend.service.agent_service import get_agent
+
+    agent = get_agent()
+    tid = scenario_thread_id.get() or f"scenario-{uuid.uuid4()}"
     try:
         result = await agent.ainvoke(
             {
@@ -40,7 +53,11 @@ async def invoke_scenario_agent(
                     SystemMessage(content=system_prompt),
                     HumanMessage(content=user_message),
                 ]
-            }
+            },
+            config={
+                "configurable": {"thread_id": tid},
+                "recursion_limit": 50,
+            },
         )
     except Exception as exc:
         logger.exception("Scenario agent invocation failed")

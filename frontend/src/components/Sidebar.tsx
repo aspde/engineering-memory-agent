@@ -67,8 +67,16 @@ export default function Sidebar() {
   const isLoading = threadsFetchedAt === 0;
 
   const handleScenarioClick = (key: string) => {
-    dispatch({ type: 'NEW_CONVERSATION', threadId: crypto.randomUUID() });
+    const newThreadId = crypto.randomUUID();
+    const info = scenarios.find((s) => s.key === key);
+    dispatch({ type: 'NEW_CONVERSATION', threadId: newThreadId });
     dispatch({ type: 'SET_ACTIVE_SCENARIO', scenario: key });
+    // Optimistically add to sidebar thread list so it appears immediately
+    dispatch({
+      type: 'PREPEND_THREAD',
+      threadId: newThreadId,
+      title: info?.name ?? key,
+    });
     navigate('/');
   };
 

@@ -24,6 +24,17 @@ export default function ChatPage() {
 
   // Track which thread has already been auto-triggered for a scenario.
   const triggeredRef = useRef<string | null>(null);
+  // Map threadId → scenario key for retry support.
+  const scenarioForThreadRef = useRef<Record<string, { key: string; label: string }>>({});
+  const [retryingScenario, setRetryingScenario] = useState(false);
+  const [retryMessage, setRetryMessage] = useState<string | null>(null);
+
+  const SCENARIO_LABELS: Record<string, string> = {
+    postmortem: '故障复盘',
+    code_review: '代码审查助手',
+    onboarding: '新人 Onboarding',
+    tech_debt: '技术债雷达',
+  };
 
   // Auto-trigger scenario via API when a new conversation is created with an active scenario.
   useEffect(() => {
@@ -34,6 +45,12 @@ export default function ChatPage() {
 
     triggeredRef.current = threadId;
     const scenarioKey = activeScenario;
+    const triggeredForThreadId = threadId;
+    // Save mapping so we can offer retry if the user returns later
+    scenarioForThreadRef.current[triggeredForThreadId] = {
+      key: scenarioKey,
+      label: SCENARIO_LABELS[scenarioKey] ?? scenarioKey,
+    };
     dispatch({ type: 'CLEAR_ACTIVE_SCENARIO' });
 
     // Add a placeholder that will be replaced when the API returns
@@ -46,8 +63,10 @@ export default function ChatPage() {
       message: { role: 'assistant', content: '正在执行场景…' },
     });
 
-    runScenario(scenarioKey)
+    runScenario(scenarioKey, {}, triggeredForThreadId)
       .then((res) => {
+        // Guard: if the user switched threads while waiting, discard the result
+        if (triggeredRef.current !== triggeredForThreadId) return;
         // Replace the placeholder with the scenario result
         dispatch({
           type: 'UPDATE_LAST_MESSAGE',
@@ -60,12 +79,16 @@ export default function ChatPage() {
             content: res.result || '(场景返回为空)',
           },
         });
+        // Sync sidebar in case the title was updated on the backend
+        dispatch({ type: 'INVALIDATE_THREADS' });
       })
       .catch((err) => {
+        if (triggeredRef.current !== triggeredForThreadId) return;
         dispatch({
           type: 'UPDATE_LAST_MESSAGE',
           appendContent: `\n\n场景执行失败: ${err instanceof Error ? err.message : String(err)}`,
         });
+        dispatch({ type: 'INVALIDATE_THREADS' });
       });
   }, [activeScenario, threadId, loadedThreadId, isLoading, messages.length, dispatch]);
 
@@ -111,6 +134,10 @@ export default function ChatPage() {
         if (!cancelled) {
           dispatch({ type: 'SET_LOADED_THREAD', threadId });
           setIsLoading(false);
+          // Reset the scenario trigger ref so stale .then() callbacks
+          // from a previous scenario run won't add duplicate messages
+          // on top of the checkpoint state we just loaded.
+          triggeredRef.current = null;
         }
       });
 
@@ -143,14 +170,57 @@ export default function ChatPage() {
     [sendMessage],
   );
 
-  const inputDisabled = isLoading || isStreaming || waitingForApproval;
+  const inputDisabled = isLoading || isStreaming || waitingForApproval || retryingScenario;
   const placeholder = isLoading
     ? '加载中…'
     : waitingForApproval
       ? '等待批准…'
       : isStreaming
         ? '回复生成中…'
-        : '向 EMA 提问…';
+        : retryingScenario
+          ? '重新执行场景中…'
+          : '向 EMA 提问…';
+
+  // Check if the current thread is a scenario that may need retry
+  const scenarioInfo = scenarioForThreadRef.current[threadId];
+  const lastMsg = messages.length > 0 ? messages[messages.length - 1] : null;
+  const lastIsError = lastMsg?.role === 'assistant' && (
+    lastMsg.content.includes('场景执行失败') || lastMsg.content.includes('错误')
+  );
+  const showRetry = !isLoading && scenarioInfo && (messages.length === 0 || lastIsError);
+
+  const handleRetryScenario = useCallback(async () => {
+    if (!scenarioInfo || retryingScenario) return;
+    setRetryingScenario(true);
+    setRetryMessage(null);
+
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: { role: 'user', content: `触发场景: ${scenarioInfo.key}` },
+    });
+    dispatch({
+      type: 'ADD_MESSAGE',
+      message: { role: 'assistant', content: '正在执行场景…' },
+    });
+
+    try {
+      const res = await runScenario(scenarioInfo.key, {}, threadId);
+      dispatch({ type: 'UPDATE_LAST_MESSAGE', appendContent: '' });
+      dispatch({
+        type: 'ADD_MESSAGE',
+        message: { role: 'assistant', content: res.result || '(场景返回为空)' },
+      });
+      dispatch({ type: 'INVALIDATE_THREADS' });
+    } catch (err) {
+      dispatch({
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: `\n\n场景执行失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      setRetryMessage(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRetryingScenario(false);
+    }
+  }, [scenarioInfo, retryingScenario, dispatch, threadId]);
 
   return (
     <div className="flex h-full flex-col">
@@ -162,6 +232,32 @@ export default function ChatPage() {
         waitingForApproval={waitingForApproval}
         onResume={resume}
       />
+      {/* Retry prompt for incomplete / failed scenario threads */}
+      {showRetry && (
+        <div className="mx-auto mb-2 max-w-3xl px-4">
+          <div className="rounded-lg border border-orange-200 bg-orange-50 px-4 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-sm font-medium text-orange-800">
+                  {scenarioInfo.label} — {messages.length === 0 ? '场景尚未执行或已被中断' : '上次执行失败'}
+                </p>
+                {retryMessage && (
+                  <p className="mt-0.5 text-xs text-orange-600">{retryMessage}</p>
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={handleRetryScenario}
+                disabled={retryingScenario}
+                className="shrink-0 rounded bg-orange-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-orange-700 disabled:opacity-50"
+              >
+                {retryingScenario ? '执行中…' : '🔄 重试'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <ChatInput onSend={handleSend} disabled={inputDisabled} placeholder={placeholder} />
 
       {/* Toast notification for force-write result */}

@@ -5,11 +5,12 @@ services:
     environment:
       POSTGRES_USER: ema
       POSTGRES_PASSWORD: ema123
-      POSTGRES_DB: ema_prod
+      POSTGRES_DB: ema_dev
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
 
 volumes:
   postgres_data:

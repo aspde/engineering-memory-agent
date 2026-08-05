@@ -55,7 +55,7 @@ class TestComposeCodeReviewInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_review_context(
@@ -85,7 +85,7 @@ class TestComposeCodeReviewInvocation:
         long_diff = "x" * 12000
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_review_context(pr_diff=long_diff)
@@ -112,7 +112,7 @@ class TestComposeCodeReviewInvocation:
         long_desc = "y" * 3000
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_review_context(pr_description=long_desc)
@@ -128,8 +128,20 @@ class TestComposeCodeReviewInvocation:
         """When both diff and description are empty, returns guidance."""
         from backend.service.scenarios.code_review import compose_review_context
 
-        result = await compose_review_context()
-        assert "PR diff" in result or "PR 描述" in result
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "请提供 PR diff 或 PR 描述以生成审查上下文。",
+            "messages": [],
+        }
+
+        with patch(
+            "backend.service.agent_service.get_agent",
+            return_value=mock_agent,
+        ):
+            result = await compose_review_context()
+            assert "PR diff" in result or "PR 描述" in result
+            # Agent must be invoked so the checkpoint is populated
+            mock_agent.ainvoke.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_compose_passes_system_message(self):
@@ -143,7 +155,7 @@ class TestComposeCodeReviewInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_review_context(pr_diff="diff content")

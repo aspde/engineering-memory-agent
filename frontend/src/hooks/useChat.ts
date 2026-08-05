@@ -93,6 +93,9 @@ export function useChat() {
       dispatch({ type: 'ADD_MESSAGE', message: { role: 'user', content: text } });
       dispatch({ type: 'SET_LOADED_THREAD', threadId });
       dispatch({ type: 'ADD_MESSAGE', message: { role: 'assistant', content: '' } });
+      // Invalidate thread list cache immediately so the new conversation
+      // appears in the sidebar right away, not only after the reply arrives.
+      dispatch({ type: 'INVALIDATE_THREADS' });
 
       tokenBufferRef.current = '';
       const yieldedNodes = new Set<string>();

@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -239,6 +239,9 @@ async def get_thread_messages(thread_id: str) -> ThreadMessagesResponse:
         turn_traces, turn_sources = _extract_tool_traces(turn_buf)
 
         for m in turn_buf:
+            # SystemMessages are agent instructions, not user-visible content.
+            if isinstance(m, SystemMessage):
+                continue
             if isinstance(m, ToolMessage):
                 continue
             if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):

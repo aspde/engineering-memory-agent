@@ -59,11 +59,13 @@ except Exception:
 
 def _get_checkpointer() -> InMemorySaver | object:
     """Return the active checkpointer, or InMemorySaver as fallback."""
+    global _checkpointer
     if _checkpointer is not None:
         return _checkpointer
 
     logger.warning("No checkpointer set — using InMemorySaver")
-    return InMemorySaver()
+    _checkpointer = InMemorySaver()
+    return _checkpointer
 
 
 async def _setup_checkpointer() -> None:

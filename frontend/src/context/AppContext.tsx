@@ -81,6 +81,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, activeScenario: action.scenario };
     case 'CLEAR_ACTIVE_SCENARIO':
       return { ...state, activeScenario: null };
+    case 'PREPEND_THREAD': {
+      // Optimistically add a thread to the front of the list, deduplicating
+      // by thread_id so a subsequent full list fetch won't create a duplicate.
+      const deduped = state.threads.filter((t) => t.thread_id !== action.threadId);
+      return {
+        ...state,
+        threads: [{ thread_id: action.threadId, title: action.title }, ...deduped],
+      };
+    }
     default:
       return state;
   }

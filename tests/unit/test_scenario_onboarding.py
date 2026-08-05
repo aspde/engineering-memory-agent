@@ -61,7 +61,7 @@ class TestComposeOnboardingInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_onboarding_guide(scope="full")
@@ -84,7 +84,7 @@ class TestComposeOnboardingInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_onboarding_guide(scope="PostgreSQL")
@@ -107,7 +107,7 @@ class TestComposeOnboardingInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_onboarding_guide()
@@ -130,7 +130,7 @@ class TestComposeOnboardingInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_onboarding_guide()

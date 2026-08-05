@@ -57,9 +57,6 @@ async def compose_review_context(pr_diff: str = "", pr_description: str = "") ->
     Returns:
         Formatted review context in Markdown.
     """
-    if not pr_diff and not pr_description:
-        return "请提供 PR diff 或 PR 描述以生成审查上下文。"
-
     parts: list[str] = ["请审查以下 Pull Request：\n"]
 
     if pr_description:
@@ -74,7 +71,13 @@ async def compose_review_context(pr_diff: str = "", pr_description: str = "") ->
             diff += "\n... (diff 已截断)"
         parts.append(f"## 变更文件 (diff)\n```diff\n{diff}\n```")
 
-    parts.append("\n请先搜索变更文件和实体的历史记忆，然后按模板输出审查上下文。")
-    user_message = "\n".join(parts)
+    if not pr_diff and not pr_description:
+        parts.append(
+            "\n用户未提供 PR diff 或描述。请在回复中友善地提示用户提供这些信息，"
+            "并说明你可以如何帮助他们审查代码。"
+        )
+    else:
+        parts.append("\n请先搜索变更文件和实体的历史记忆，然后按模板输出审查上下文。")
 
+    user_message = "\n".join(parts)
     return await invoke_scenario_agent(CODE_REVIEW_SYSTEM_PROMPT, user_message)

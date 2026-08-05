@@ -75,7 +75,7 @@ class TestComposeTechDebtInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_tech_debt_report()
@@ -94,7 +94,7 @@ class TestComposeTechDebtInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_tech_debt_report()
@@ -118,7 +118,7 @@ class TestComposeTechDebtInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_tech_debt_report()
@@ -142,7 +142,7 @@ class TestComposeTechDebtInvocation:
         }
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             await compose_tech_debt_report()
@@ -162,7 +162,7 @@ class TestComposeTechDebtInvocation:
         mock_agent.ainvoke.side_effect = RuntimeError("Agent crash")
 
         with patch(
-            "agent.graph.get_default_agent",
+            "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
             result = await compose_tech_debt_report()
