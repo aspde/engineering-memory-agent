@@ -14,6 +14,7 @@ const FINDING_GROUPS: Record<string, { label: string; color: string; emoji: stri
 const PATROL_TYPE_LABELS: Record<string, string> = {
   daily: '每日巡检',
   weekly: '每周巡检',
+  contradiction_scan: '矛盾扫描',
   event_driven: '事件驱动',
   manual: '手动触发',
 };
@@ -30,11 +31,12 @@ export default function PatrolPage() {
   const [detail, setDetail] = useState<PatrolLogDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [filterType, setFilterType] = useState<string>('');
 
   const fetchLogs = useCallback(async (newOffset: number) => {
     setLoading(true);
     try {
-      const data = await listPatrolLogs({ limit: PAGE_SIZE, offset: newOffset });
+      const data = await listPatrolLogs({ limit: PAGE_SIZE, offset: newOffset, patrol_type: filterType || undefined });
       setLogs(data.items);
       setTotal(data.total);
       setOffset(newOffset);
@@ -44,11 +46,15 @@ export default function PatrolPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [filterType]);
 
   useEffect(() => {
     void fetchLogs(0);
-  }, [fetchLogs]);
+  }, [filterType]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFilterChange = useCallback((type: string) => {
+    setFilterType(type);
+  }, []);
 
   const handleSelect = useCallback(async (id: string) => {
     setSelectedId(id);
@@ -96,30 +102,54 @@ export default function PatrolPage() {
       <div className="w-80 shrink-0 border-r border-gray-200 flex flex-col bg-gray-50">
         <div className="px-4 py-3 border-b border-gray-200">
           <h2 className="text-lg font-semibold text-gray-900">巡检日志</h2>
-          <div className="mt-2 flex gap-2">
+          {/* Filter tabs */}
+          <div className="mt-2 flex gap-1 flex-wrap">
+            {[
+              { key: '', label: '全部' },
+              { key: 'daily', label: '每日巡检' },
+              { key: 'weekly', label: '每周巡检' },
+              { key: 'contradiction_scan', label: '矛盾扫描' },
+            ].map(({ key, label }) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => handleFilterChange(key)}
+                className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                  filterType === key
+                    ? 'bg-blue-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* Trigger buttons */}
+          <div className="mt-2 flex gap-1.5 text-[10px] text-gray-400">
+            <span className="py-1">执行：</span>
             <button
               type="button"
               onClick={() => handleTrigger('daily')}
               disabled={triggering}
-              className="rounded bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              className="rounded border border-blue-200 px-2 py-0.5 text-blue-600 hover:bg-blue-50 disabled:opacity-40"
             >
-              每日
+              ▶ 每日
             </button>
             <button
               type="button"
               onClick={() => handleTrigger('weekly')}
               disabled={triggering}
-              className="rounded bg-violet-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-violet-700 disabled:opacity-50"
+              className="rounded border border-violet-200 px-2 py-0.5 text-violet-600 hover:bg-violet-50 disabled:opacity-40"
             >
-              每周
+              ▶ 每周
             </button>
             <button
               type="button"
               onClick={() => handleTrigger('contradiction_scan')}
               disabled={triggering}
-              className="rounded bg-orange-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-orange-700 disabled:opacity-50"
+              className="rounded border border-orange-200 px-2 py-0.5 text-orange-600 hover:bg-orange-50 disabled:opacity-40"
             >
-              矛盾
+              ▶ 矛盾
             </button>
           </div>
         </div>
