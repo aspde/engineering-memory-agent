@@ -312,7 +312,10 @@ async def delete_thread(thread_id: str) -> ThreadDeleteResponse:
                         {"tid": thread_id},
                     )
                 except Exception:
-                    pass  # table doesn't exist — skip
+                    # Table may not exist (e.g. InMemorySaver on Windows).
+                    # Roll back the aborted sub-transaction so subsequent
+                    # statements in this session aren't blocked.
+                    await session.rollback()
 
             # Delete the conversation record
             await session.execute(
