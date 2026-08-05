@@ -8,15 +8,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from backend.db import close_db, get_session_factory
+from backend.db import get_session_factory
 from backend.main import app
-
-
-@pytest.fixture(autouse=True)
-async def _dispose_db_engine() -> None:
-    """Dispose the async engine after each test (see test_memory_routes)."""
-    yield
-    await close_db()
 
 
 @pytest.fixture

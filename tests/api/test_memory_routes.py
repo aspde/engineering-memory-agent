@@ -11,22 +11,8 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
-from backend.db import close_db, get_session_factory
+from backend.db import get_session_factory
 from backend.main import app
-
-
-@pytest.fixture(autouse=True)
-async def _dispose_db_engine() -> None:
-    """Dispose the async engine after each test.
-
-    pytest-asyncio runs each test in a fresh event loop.  The SQLAlchemy
-    engine's asyncpg connections are bound to the loop that created them, so
-    pooled connections orphaned by a closed loop break the next test on
-    Windows (ProactorEventLoop).  Disposing the engine here keeps every test
-    independent and leak-free.
-    """
-    yield
-    await close_db()
 
 
 @pytest.fixture

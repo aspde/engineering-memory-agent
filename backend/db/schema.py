@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from sqlalchemy import text
 
-from backend.db import engine
+from backend.db import get_engine
 
 _STATEMENTS = [
     """
@@ -141,7 +141,7 @@ _STATEMENTS = [
 
 async def init_db() -> None:
     """Create tables and indexes if they don't exist."""
-    async with engine.begin() as conn:
+    async with get_engine().begin() as conn:
         await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         for stmt in _STATEMENTS:
             await conn.execute(text(stmt))

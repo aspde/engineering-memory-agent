@@ -15,7 +15,7 @@ from backend.connectors.registry import (
     CONNECTOR_REGISTRY,
     register_connector,
 )
-from backend.db import close_db, get_session_factory
+from backend.db import get_session_factory
 from backend.main import app
 
 
@@ -39,12 +39,6 @@ class _FakeConnector(Connector):
 
     def build_metadata(self, payload: dict) -> dict:
         return {"job_name": payload.get("job_name", "")}
-
-
-@pytest.fixture(autouse=True)
-async def _dispose_db_engine() -> None:
-    yield
-    await close_db()
 
 
 @pytest.fixture(autouse=True)
