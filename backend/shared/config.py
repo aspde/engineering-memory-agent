@@ -69,7 +69,7 @@ class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     database_url: str = field(
-        default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/memory")
+        default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/ema_prod")
     )
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "development"))
     max_agent_steps: int = field(
