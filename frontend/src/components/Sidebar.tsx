@@ -121,7 +121,7 @@ export default function Sidebar() {
           <button
             type="button"
             onClick={() => setScenariosOpen((v) => !v)}
-            className="flex w-full items-center gap-1 rounded-md px-1 py-1 text-xs font-medium text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+            className="flex w-full items-center gap-1 rounded-md px-1 py-1 text-xs font-semibold text-gray-500 hover:bg-gray-100 hover:text-gray-700 transition-colors"
           >
             <span className="text-[10px] transition-transform" style={{ transform: scenariosOpen ? 'rotate(90deg)' : undefined }}>
               ▶
@@ -151,7 +151,7 @@ export default function Sidebar() {
       )}
 
       {/* Thread list */}
-      <div className="px-3 pb-1.5 pt-3 text-[11px] font-semibold uppercase tracking-wider text-gray-400">
+      <div className="px-3 pb-1.5 pt-3 text-sm font-semibold text-gray-400">
         历史对话
       </div>
       <div className="flex-1 space-y-0.5 overflow-y-auto px-2 pb-4">
