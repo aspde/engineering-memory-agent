@@ -11,6 +11,7 @@ Flow for each extracted entity:
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -27,7 +28,8 @@ TOP_K_CANDIDATES = 3
 _ENTITY_MATCH_PROMPT = """\
 Are "{new_name}" and "{existing_name}" the same {entity_type} entity?
 Consider: abbreviations, aliases, version-specific references, and common synonyms.
-Reply with ONLY "YES" or "NO"."""
+
+Reply with ONLY a JSON object: {{"match": true}} or {{"match": false}}"""
 
 
 async def normalize_entities(
@@ -162,8 +164,9 @@ async def _llm_confirm_match(
 ) -> bool:
     """Ask the LLM whether *new_name* refers to the same entity as *existing_name*.
 
-    Fails safe: if the LLM call fails, assume NO match so a new entity
-    is created rather than incorrectly linking unrelated entities.
+    Fails safe: if the LLM call fails or the response cannot be parsed,
+    assume NO match so a new entity is created rather than incorrectly
+    linking unrelated entities.
     """
     from backend.service.llm_service import get_llm_provider
 
@@ -175,7 +178,8 @@ async def _llm_confirm_match(
             entity_type=entity_type,
         )
         response = await llm.chat([{"role": "user", "content": prompt}])
-        return response.strip().upper().startswith("YES")
+        data = json.loads(response.strip())
+        return bool(data.get("match", False))
     except Exception:
         logger.warning(
             "LLM entity-match call failed for '%s' vs '%s' — assuming no match",

@@ -104,8 +104,8 @@ async def _find_similar(embedding, session_factory):
 async def _detect_conflict(existing: dict, extracted: dict) -> bool:
     """Ask the LLM whether *extracted* contradicts *existing*.
 
-    Fails safe: if the LLM call fails, assume no conflict rather than
-    blocking the write.
+    Fails safe: if the LLM call fails or the response cannot be parsed,
+    assume no conflict rather than blocking the write.
     """
     from backend.service.llm_service import get_llm_provider
 
@@ -116,7 +116,8 @@ async def _detect_conflict(existing: dict, extracted: dict) -> bool:
             new_summary=extracted["summary"],
         )
         response = await llm.chat([{"role": "user", "content": prompt}])
-        return response.strip().lower().startswith("yes")
+        data = json.loads(response.strip())
+        return bool(data.get("conflict", False))
     except Exception:
         logger.warning("LLM conflict detection failed, assuming no conflict")
         return False
@@ -130,7 +131,7 @@ Existing summary: {existing_summary}
 
 New summary: {new_summary}
 
-Does the new summary CONTRADICT the existing one? Reply with ONLY "Yes" or "No"."""
+Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}"""
 
 
 async def _merge_memory(existing, extracted, embedding, source_type, metadata):

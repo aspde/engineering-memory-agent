@@ -31,7 +31,7 @@ def _get_cross_encoder():
         logger.info("Loading reranker model: %s", model_name)
         _cross_encoder = CrossEncoder(
             model_name,
-            default_activation_function=__import__("torch").nn.Sigmoid(),
+            activation_fn=__import__("torch").nn.Sigmoid(),
         )
     return _cross_encoder
 
@@ -84,6 +84,9 @@ async def rerank_llm(
         prompt = _RERANK_PROMPT.format(query=query, text=text)
         try:
             response = await llm.chat([{"role": "user", "content": prompt}])
+        except Exception:
+            return idx, 0.0
+        try:
             score = float(response.strip())
             return idx, max(0.0, min(1.0, score))
         except (ValueError, TypeError):
