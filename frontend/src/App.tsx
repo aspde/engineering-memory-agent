@@ -1,4 +1,5 @@
 import { Route, Routes } from 'react-router-dom';
+import NavBar from './components/NavBar';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
 import ConnectorsPage from './pages/ConnectorsPage';
@@ -9,6 +10,7 @@ import PatrolPage from './pages/PatrolPage';
 export default function App() {
   return (
     <div className="flex h-screen bg-white text-gray-900">
+      <NavBar />
       <Sidebar />
       <main className="flex-1 min-w-0 overflow-hidden">
         <Routes>
