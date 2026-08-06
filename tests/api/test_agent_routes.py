@@ -347,6 +347,18 @@ class TestAgentChatHITL:
 class TestDeleteThread:
     """Tests for the DELETE /api/agent/thread/{thread_id} endpoint."""
 
+    @pytest.fixture(autouse=True)
+    async def _ensure_tables(self) -> None:
+        """Ensure conversations table exists before tests (idempotent).
+
+        Matches the pattern in test_connector_routes / test_webhook_routes.
+        Without this the direct INSERT below fails when agent_routes runs
+        before the connector/webhook suites have called init_db().
+        """
+        from backend.db.schema import init_db
+
+        await init_db()
+
     @pytest.mark.asyncio
     async def test_delete_existing_thread(self, async_client: AsyncClient) -> None:
         """Deleting a thread that exists returns deleted=true and removes the record."""
