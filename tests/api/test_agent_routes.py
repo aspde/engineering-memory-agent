@@ -158,6 +158,59 @@ class TestAgentChat:
         assert data["status"] == "completed"
 
 
+class TestTokenUsageEndpoint:
+    """Tests for the /api/agent/usage cost-monitoring endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_usage_returns_zero_initially(self, async_client: AsyncClient) -> None:
+        from backend.shared.metrics import reset_token_usage
+
+        reset_token_usage()
+        response = await async_client.get("/api/agent/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_tokens"] == 0
+        assert data["by_scenario"] == {}
+        assert data["scenarios"] == 0
+
+    @pytest.mark.asyncio
+    async def test_usage_reflects_recorded_tokens(self, async_client: AsyncClient) -> None:
+        from types import SimpleNamespace
+
+        from backend.shared.metrics import (
+            record_usage,
+            reset_token_usage,
+        )
+
+        reset_token_usage()
+        record_usage("agent_chat", SimpleNamespace(total_tokens=500))
+        record_usage("conflict_detection", {"total_tokens": 120})
+
+        response = await async_client.get("/api/agent/usage")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total_tokens"] == 620
+        assert data["by_scenario"]["agent_chat"] == 500
+        assert data["by_scenario"]["conflict_detection"] == 120
+        assert data["scenarios"] == 2
+
+        reset_token_usage()
+
+    @pytest.mark.asyncio
+    async def test_usage_reset_clears_counters(self, async_client: AsyncClient) -> None:
+        from types import SimpleNamespace
+
+        from backend.shared.metrics import record_usage
+
+        record_usage("x", SimpleNamespace(total_tokens=999))
+        response = await async_client.post("/api/agent/usage/reset")
+        assert response.status_code == 200
+        assert response.json() == {"reset": True}
+
+        get_resp = await async_client.get("/api/agent/usage")
+        assert get_resp.json()["total_tokens"] == 0
+
+
 class TestAgentChatHITL:
     """Tests for Human-in-the-Loop interrupt/resume flow."""
 

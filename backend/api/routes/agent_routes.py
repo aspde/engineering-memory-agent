@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -358,6 +359,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     if req.resume_data is None and title:
         await _upsert_conversation(req.thread_id, title)
 
+    t0 = time.perf_counter()
     try:
         if req.resume_data is not None:
             result = await agent.ainvoke(
@@ -370,6 +372,8 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
                 config=config,
             )
     except Exception as exc:
+        t1 = time.perf_counter()
+        logger.warning("agent_chat failed in %.0fms: %s", (t1 - t0) * 1000, exc)
         return ChatResponse(
             thread_id=req.thread_id,
             status="error",
@@ -379,6 +383,11 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     # Check for interrupt first
     interrupts = result.get("__interrupt__")
     if interrupts:
+        t1 = time.perf_counter()
+        logger.info(
+            "agent_chat interrupted in %.0fms thread_id=%s",
+            (t1 - t0) * 1000, req.thread_id,
+        )
         interrupt_payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
         return ChatResponse(
             thread_id=req.thread_id,
@@ -400,6 +409,19 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
 
     # Extract tool call traces and sources in a single pass
     tool_call_traces, sources = _extract_tool_traces(result.get("messages", []))
+
+    # Count AIMessages with tool_calls to estimate ReAct steps
+    tool_call_count = sum(
+        1 for m in result.get("messages", [])
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+    )
+
+    t1 = time.perf_counter()
+    logger.info(
+        "agent_chat completed in %.0fms tool_calls=%d traces=%d thread_id=%s msg=%r",
+        (t1 - t0) * 1000, tool_call_count, len(tool_call_traces),
+        req.thread_id, (req.message or "")[:60],
+    )
 
     return ChatResponse(
         thread_id=req.thread_id,
@@ -507,3 +529,43 @@ async def agent_chat_stream(req: ChatRequest):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ── Cost / observability endpoints ───────────────────────────────────
+
+
+@router.get("/usage")
+async def get_token_usage_endpoint() -> dict[str, Any]:
+    """Return cumulative LLM token usage broken down by scenario.
+
+    Scenarios are tagged at each LLM call site via the ``scenario=``
+    kwarg and include:
+      - ``agent_chat`` — ReAct LLM calls (with tools)
+      - ``agent_final`` — final answer generation
+      - ``extraction_summary`` / ``extraction_entities`` / ``extraction_relations``
+      - ``conflict_detection`` — memory conflict check (0.75-0.92 band)
+      - ``memory_merge`` — summary merge (≥0.92 band)
+      - ``entity_normalization`` — LLM entity-match judgement
+      - ``rerank_llm`` — LLM-based rerank (when ``use_llm_rerank=True``)
+
+    To start a fresh measurement window during an interview demo, call
+    ``POST /api/agent/usage/reset`` to clear counters.
+    """
+    from backend.shared.metrics import get_token_usage
+
+    usage = get_token_usage()
+    total = sum(usage.values())
+    return {
+        "total_tokens": total,
+        "by_scenario": usage,
+        "scenarios": len(usage),
+    }
+
+
+@router.post("/usage/reset")
+async def reset_token_usage_endpoint() -> dict[str, Any]:
+    """Reset all token usage counters."""
+    from backend.shared.metrics import reset_token_usage
+
+    reset_token_usage()
+    return {"reset": True}

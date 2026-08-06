@@ -197,7 +197,7 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     dicts = _messages_to_dicts(messages)
 
     try:
-        raw = await provider.chat_raw(messages=dicts, tools=tool_schemas)
+        raw = await provider.chat_raw(messages=dicts, tools=tool_schemas, scenario="agent_chat")
     except Exception as exc:
         logger.exception("LLM call failed in call_llm_node")
         return {
@@ -292,7 +292,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     # ── Call LLM here (once) so the response is persisted ──
     provider = get_llm_provider()
     try:
-        response = await provider.chat(messages)
+        response = await provider.chat(messages, scenario="agent_final")
     except Exception as exc:
         logger.exception("Final answer LLM call failed")
         response = f"抱歉，生成回复时出现错误: {exc}"

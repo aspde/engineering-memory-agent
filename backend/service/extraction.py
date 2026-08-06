@@ -26,7 +26,7 @@ async def extract_summary(content: str) -> str:
     try:
         llm = get_llm_provider()
         msg = _SUMMARY_PROMPT.format(content=content)
-        summary = await llm.chat([{"role": "user", "content": msg}])
+        summary = await llm.chat([{"role": "user", "content": msg}], scenario="extraction_summary")
         return summary.strip()
     except Exception:
         logger.exception("LLM summary extraction failed, using raw content fallback")
@@ -59,7 +59,7 @@ async def extract_entities(content_or_summary: str) -> list[dict]:
     try:
         llm = get_llm_provider()
         msg = _ENTITIES_PROMPT.format(input_text=content_or_summary)
-        raw = await llm.chat([{"role": "user", "content": msg}])
+        raw = await llm.chat([{"role": "user", "content": msg}], scenario="extraction_entities")
         raw = raw.strip()
 
         try:
@@ -110,7 +110,7 @@ async def extract_relations(
         msg = _RELATIONS_PROMPT.format(
             summary=summary, entities=json.dumps(entity_names, ensure_ascii=False)
         )
-        raw = await llm.chat([{"role": "user", "content": msg}])
+        raw = await llm.chat([{"role": "user", "content": msg}], scenario="extraction_relations")
         raw = raw.strip()
 
         try:

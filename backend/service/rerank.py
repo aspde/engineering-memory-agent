@@ -83,7 +83,7 @@ async def rerank_llm(
     async def _score_one(idx: int, text: str) -> tuple[int, float]:
         prompt = _RERANK_PROMPT.format(query=query, text=text)
         try:
-            response = await llm.chat([{"role": "user", "content": prompt}])
+            response = await llm.chat([{"role": "user", "content": prompt}], scenario="rerank_llm")
         except Exception:
             return idx, 0.0
         try:

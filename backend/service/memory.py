@@ -115,7 +115,7 @@ async def _detect_conflict(existing: dict, extracted: dict) -> bool:
             existing_summary=existing["summary"],
             new_summary=extracted["summary"],
         )
-        response = await llm.chat([{"role": "user", "content": prompt}])
+        response = await llm.chat([{"role": "user", "content": prompt}], scenario="conflict_detection")
         data = json.loads(response.strip())
         return bool(data.get("conflict", False))
     except Exception:
@@ -148,7 +148,7 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
             existing_summary=existing["summary"],
             new_summary=extracted["summary"],
         )
-        merged_summary = await llm.chat([{"role": "user", "content": prompt}])
+        merged_summary = await llm.chat([{"role": "user", "content": prompt}], scenario="memory_merge")
         merged_summary = merged_summary.strip()
     except Exception:
         logger.warning("LLM merge failed, keeping existing summary for %s", existing["id"])
@@ -408,7 +408,7 @@ async def resolve_conflict(
                 existing_summary=existing_summary,
                 new_summary=extracted["summary"],
             )
-            merged_summary = (await llm.chat([{"role": "user", "content": prompt}])).strip()
+            merged_summary = (await llm.chat([{"role": "user", "content": prompt}], scenario="memory_merge")).strip()
         except Exception:
             merged_summary = extracted["summary"]
 

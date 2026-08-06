@@ -7,6 +7,7 @@ import logging
 
 from backend.model.llm import LLMProvider
 from backend.shared.config import config
+from backend.shared.metrics import pop_scenario, record_usage
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class OpenAICompatibleProvider(LLMProvider):
         logger.info("LLM provider ready: %s @ %s", model, base_url)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
+        scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
         response = await self._async_client.chat.completions.create(
@@ -49,6 +51,7 @@ class OpenAICompatibleProvider(LLMProvider):
             messages=messages,  # type: ignore[arg-type]
             **kwargs,
         )
+        record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
     async def chat_raw(
@@ -57,6 +60,7 @@ class OpenAICompatibleProvider(LLMProvider):
         tools: list[dict[str, object]] | None = None,
         **kwargs,
     ) -> dict[str, object]:
+        scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
         create_kwargs: dict[str, object] = {
@@ -68,6 +72,7 @@ class OpenAICompatibleProvider(LLMProvider):
             create_kwargs["tools"] = tools
 
         response = await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+        record_usage(scenario, getattr(response, "usage", None))
         msg = response.choices[0].message
         result: dict[str, object] = {"content": msg.content or ""}
 
@@ -83,6 +88,7 @@ class OpenAICompatibleProvider(LLMProvider):
         return result
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
+        scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
         response = self._sync_client.chat.completions.create(
@@ -90,6 +96,7 @@ class OpenAICompatibleProvider(LLMProvider):
             messages=messages,  # type: ignore[arg-type]
             **kwargs,
         )
+        record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
     @property
@@ -123,6 +130,7 @@ class AnthropicProvider(LLMProvider):
         logger.info("Anthropic provider ready: %s", model)
 
     async def chat(self, messages: list[dict[str, str]], **kwargs) -> str:
+        scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
         response = await self._async_client.messages.create(
@@ -131,6 +139,7 @@ class AnthropicProvider(LLMProvider):
             messages=user_messages,  # type: ignore[arg-type]
             **kwargs,
         )
+        record_usage(scenario, getattr(response, "usage", None))
         return self._extract_text(response.content)
 
     async def chat_raw(
@@ -139,6 +148,7 @@ class AnthropicProvider(LLMProvider):
         tools: list[dict[str, object]] | None = None,
         **kwargs,
     ) -> dict[str, object]:
+        scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
         create_kwargs: dict[str, object] = {
@@ -151,6 +161,7 @@ class AnthropicProvider(LLMProvider):
             create_kwargs["tools"] = tools
 
         response = await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
+        record_usage(scenario, getattr(response, "usage", None))
         content_blocks: list[object] = response.content  # type: ignore[assignment]
         result: dict[str, object] = {"content": self._extract_text(content_blocks)}
 
@@ -177,6 +188,7 @@ class AnthropicProvider(LLMProvider):
         return result
 
     def chat_sync(self, messages: list[dict[str, str]], **kwargs) -> str:
+        scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
         response = self._sync_client.messages.create(
@@ -185,6 +197,7 @@ class AnthropicProvider(LLMProvider):
             messages=user_messages,  # type: ignore[arg-type]
             **kwargs,
         )
+        record_usage(scenario, getattr(response, "usage", None))
         return self._extract_text(response.content)
 
     @staticmethod

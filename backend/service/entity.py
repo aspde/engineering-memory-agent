@@ -177,7 +177,7 @@ async def _llm_confirm_match(
             existing_name=existing_name,
             entity_type=entity_type,
         )
-        response = await llm.chat([{"role": "user", "content": prompt}])
+        response = await llm.chat([{"role": "user", "content": prompt}], scenario="entity_normalization")
         data = json.loads(response.strip())
         return bool(data.get("match", False))
     except Exception:
