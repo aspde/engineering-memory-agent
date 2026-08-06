@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import threading
+import time
 
 # ── Force offline BEFORE any HF/transformers imports ──────────────────
 # Must be at module top-level: when `from backend.service.embedding_service
@@ -50,11 +51,19 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         self._batch_size = batch_size
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        t0 = time.perf_counter()
         embeddings = await asyncio.to_thread(
             self._model.encode,
             texts,
             normalize_embeddings=self._normalize,
             batch_size=self._batch_size,
+        )
+        t1 = time.perf_counter()
+        n = len(texts)
+        logger.info(
+            "BGE embed latency: total=%.0fms per_item=%.2fms count=%d batch_size=%d",
+            (t1 - t0) * 1000, (t1 - t0) * 1000 / max(n, 1),
+            n, self._batch_size,
         )
         return embeddings.tolist()
 
@@ -119,6 +128,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         all_embeddings: list[list[float]] = []
+        t0 = time.perf_counter()
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
             response = await self._async_client.embeddings.create(
@@ -128,6 +138,12 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             all_embeddings.extend(
                 [d.embedding for d in response.data]
             )
+        t1 = time.perf_counter()
+        n = len(texts)
+        logger.info(
+            "OpenAI embed latency: total=%.0fms per_item=%.2fms count=%d model=%s",
+            (t1 - t0) * 1000, (t1 - t0) * 1000 / max(n, 1), n, self._model,
+        )
         return all_embeddings
 
     # ── sync ──────────────────────────────────────────────────────────

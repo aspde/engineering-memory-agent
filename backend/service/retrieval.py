@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -195,19 +196,30 @@ async def query_memories(
     """
     from backend.service.rerank import rerank_cross_encoder, rerank_llm
 
+    t0 = time.perf_counter()
+
     provider = get_embedding_provider()
     vectors = await provider.embed([query])
     query_vec = vectors[0]
+    t_embed = time.perf_counter()
 
     candidates = await search_memories(query_vec, top_k=max(top_k * 4, 20), threshold=threshold)
+    t_search = time.perf_counter()
 
     if not candidates:
+        logger.info(
+            "query_memories latency: total=%.0fms embed=%.0fms search=%.0fms "
+            "rerank=0ms results=0 (no candidates) query=%r",
+            (t_search - t0) * 1000, (t_embed - t0) * 1000,
+            (t_search - t_embed) * 1000, query[:60],
+        )
         return []
 
     reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
     ranked = await reranker(
         query, [c["summary"] for c in candidates], top_k=top_k
     )
+    t_rerank = time.perf_counter()
 
     # Re-attach full memory rows in ranked order, and update decay
     # Drop results where the reranker score is below the minimum threshold —
@@ -224,4 +236,15 @@ async def query_memories(
         new_decay = await update_decay(memory_id)
         entry = {**candidates[idx], "rerank_score": score, "decay_factor": new_decay}
         result.append(entry)
+
+    t_end = time.perf_counter()
+    logger.info(
+        "query_memories latency: total=%.0fms embed=%.0fms search=%.0fms "
+        "rerank=%.0fms decay=%.0fms top_k=%d candidates=%d results=%d "
+        "llm_rerank=%s query=%r",
+        (t_end - t0) * 1000, (t_embed - t0) * 1000,
+        (t_search - t_embed) * 1000, (t_rerank - t_search) * 1000,
+        (t_end - t_rerank) * 1000, top_k, len(candidates), len(result),
+        use_llm_rerank, query[:60],
+    )
     return result
