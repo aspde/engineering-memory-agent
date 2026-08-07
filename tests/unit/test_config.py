@@ -68,3 +68,11 @@ class TestValidateConfig:
 
         problems = config_mod.validate_config()
         assert any("AGENT_TIMEOUT" in p for p in problems)
+
+    def test_rerank_concurrency_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "rerank_concurrency", 0)
+
+        problems = config_mod.validate_config()
+        assert any("LLM_RERANK_CONCURRENCY" in p for p in problems)

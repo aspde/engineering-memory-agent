@@ -347,19 +347,38 @@ async def _mark_conflict(existing, extracted, embedding, source_type, metadata, 
     }
 
 
+# Max concurrent entity-normalisation runs.  Each run does embedding +
+# vector search + up to 3 LLM round-trips, so an unbounded burst (e.g. 200
+# commits ingested at once) would spawn hundreds of concurrent provider
+# calls and slam the connection pool.  Excess runs queue on the semaphore
+# instead of being dropped — normalisation is best-effort, but skipping it
+# silently would leave entities unlinked.  (``asyncio.Semaphore`` binds no
+# loop until first use, so the same instance is safe across the pytest
+# function-scoped event loops.)
+_NORMALIZATION_MAX_CONCURRENCY = 4
+_normalization_semaphore = asyncio.Semaphore(_NORMALIZATION_MAX_CONCURRENCY)
+
+
 def _schedule_normalization(memory_id: str, entities: list[dict]) -> None:
     """Fire-and-forget entity normalisation — never blocks the caller.
 
     Runs in a background asyncio Task so that memory-write latency is not
     gated on embedding + vector search + LLM round-trips.  Failures are
     logged but never propagated (spec: normalisation is best-effort).
+
+    Concurrency is bounded by ``_normalization_semaphore``: at most
+    ``_NORMALIZATION_MAX_CONCURRENCY`` normalisation runs execute at once,
+    the rest queue.  Without this, ingesting a large batch of memories at
+    once would open one provider call per entity (embedding + search + up
+    to 3 LLM judgements) and exhaust the connection pool.
     """
 
     async def _run() -> None:
-        try:
-            await normalize_entities(memory_id, entities)
-        except Exception:
-            logger.exception("Entity normalisation failed for memory %s", memory_id)
+        async with _normalization_semaphore:
+            try:
+                await normalize_entities(memory_id, entities)
+            except Exception:
+                logger.exception("Entity normalisation failed for memory %s", memory_id)
 
     try:
         asyncio.create_task(_run())

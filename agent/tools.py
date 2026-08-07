@@ -8,6 +8,7 @@ return formatted strings because that's what the LLM reads via
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -372,10 +373,13 @@ async def ingest_document_tool(
     """
     meta = (metadata or {}) | {"language": language}
 
+    # Chunking is CPU-bound (recursive separator splitting, or AST parsing
+    # for Python) — offload it to the thread pool so the event loop isn't
+    # blocked while the LLM is waiting on the tool result.
     if language == "python":
-        chunks = chunk_code(content)
+        chunks = await asyncio.to_thread(chunk_code, content)
     else:
-        chunks = chunk_text(content)
+        chunks = await asyncio.to_thread(chunk_text, content)
 
     count = await write_chunks(document_id, chunks, meta=meta)
     return f"Ingested {count} chunks from document '{document_id}'."

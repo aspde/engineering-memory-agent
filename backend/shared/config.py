@@ -83,6 +83,12 @@ class LLMConfig:
     structured_backoff: float = field(
         default_factory=lambda: float(os.getenv("LLM_STRUCTURED_BACKOFF", "0.5"))
     )
+    # LLM-based rerank (rerank_llm) sends one provider call per candidate;
+    # this caps concurrent in-flight calls so a 20-40 candidate list can't
+    # self-inflict a rate-limit storm on the provider.
+    rerank_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("LLM_RERANK_CONCURRENCY", "4"))
+    )
 
 
 @dataclass
@@ -209,6 +215,10 @@ def validate_config() -> list[str]:
     if config.llm.structured_max_attempts < 1:
         problems.append(
             f"LLM_STRUCTURED_MAX_ATTEMPTS={config.llm.structured_max_attempts} must be >= 1"
+        )
+    if config.llm.rerank_concurrency < 1:
+        problems.append(
+            f"LLM_RERANK_CONCURRENCY={config.llm.rerank_concurrency} must be >= 1"
         )
     if config.agent_timeout <= 0:
         problems.append(f"AGENT_TIMEOUT={config.agent_timeout} must be > 0")

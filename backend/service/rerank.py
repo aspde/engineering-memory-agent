@@ -70,6 +70,11 @@ async def rerank_llm(
 ) -> list[tuple[int, float]]:
     """Rerank candidates by asking the LLM to score each one (pointwise).
 
+    One provider call per candidate; concurrent in-flight calls are capped
+    by ``LLM_RERANK_CONCURRENCY`` (default 4) so a 20-40 candidate list
+    can't self-inflict a rate-limit storm — the previous ``asyncio.gather``
+    fired them all at once.
+
     Args:
         query: The user query.
         candidates: Candidate text chunks from vector recall.
@@ -85,17 +90,22 @@ async def rerank_llm(
 
     llm = get_llm_provider()
 
+    # Call-local semaphore — bounded concurrency within one rerank call,
+    # no coupling between concurrent rerank invocations.
+    semaphore = asyncio.Semaphore(config.llm.rerank_concurrency)
+
     async def _score_one(idx: int, text: str) -> tuple[int, float]:
-        prompt = _RERANK_PROMPT.format(query=query, text=text)
-        try:
-            response = await llm.chat([{"role": "user", "content": prompt}], scenario="rerank_llm")
-        except Exception:
-            return idx, 0.0
-        try:
-            score = float(response.strip())
-            return idx, max(0.0, min(1.0, score))
-        except (ValueError, TypeError):
-            return idx, 0.0
+        async with semaphore:
+            prompt = _RERANK_PROMPT.format(query=query, text=text)
+            try:
+                response = await llm.chat([{"role": "user", "content": prompt}], scenario="rerank_llm")
+            except Exception:
+                return idx, 0.0
+            try:
+                score = float(response.strip())
+                return idx, max(0.0, min(1.0, score))
+            except (ValueError, TypeError):
+                return idx, 0.0
 
     tasks = [_score_one(i, c) for i, c in enumerate(candidates)]
     results = await asyncio.gather(*tasks)

@@ -9,6 +9,7 @@ similarity grading, and persistence is deferred to the memory service.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -67,7 +68,12 @@ async def _ingest_commit(
     repo: pygit2.Repository, commit: pygit2.Commit, repo_path: Path
 ) -> dict[str, Any] | None:
     """Process a single commit through the memory pipeline."""
-    content = _format_commit(repo, commit)
+    # Assembling the LLM-ready commit block walks the full diff (pygit2
+    # C code, plus line-by-line string building) — CPU/IO bound, so run it
+    # in the thread pool instead of blocking the event loop.  ingest_repo
+    # walks commits sequentially, so at most one diff is in flight at a time
+    # and the shared ``repo`` object is never touched concurrently.
+    content = await asyncio.to_thread(_format_commit, repo, commit)
     ts = _commit_time(commit)
 
     try:

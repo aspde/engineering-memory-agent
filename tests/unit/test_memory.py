@@ -368,3 +368,52 @@ class TestWriteMemoryIdempotency:
 
         assert result["action"] == "inserted"
         mock_extract.assert_awaited_once()
+
+
+class TestNormalizationBackpressure:
+    """Fire-and-forget entity normalisation is bounded by a semaphore.
+
+    Without the cap, ingesting a batch of memories spawns one background
+    task per memory, each opening embedding + vector-search + LLM calls —
+    hundreds of concurrent provider calls against a small connection pool.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_runs_are_bounded(self, monkeypatch) -> None:
+        import asyncio
+
+        from backend.service import memory as mod
+
+        active = 0
+        peak = 0
+        done: list[str] = []
+
+        async def fake_normalize(memory_id, entities):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.05)
+            active -= 1
+            done.append(memory_id)
+
+        monkeypatch.setattr(mod, "normalize_entities", fake_normalize)
+        # Fresh semaphore so this test doesn't inherit stale state from other
+        # runs; the cap itself stays the module's configured constant.
+        monkeypatch.setattr(
+            mod,
+            "_normalization_semaphore",
+            asyncio.Semaphore(mod._NORMALIZATION_MAX_CONCURRENCY),
+        )
+
+        for i in range(8):
+            mod._schedule_normalization(
+                f"m-{i}", [{"name": "X", "type": "concept"}]
+            )
+
+        # Wait for all 8 queued tasks to finish (4 run at a time).
+        await asyncio.sleep(0.5)
+
+        # Concurrency never exceeds the cap, and excess runs queue rather
+        # than being dropped.
+        assert peak <= mod._NORMALIZATION_MAX_CONCURRENCY
+        assert sorted(done) == [f"m-{i}" for i in range(8)]
