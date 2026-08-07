@@ -240,7 +240,7 @@ S = 1 + recall_count × 2   (相对强度)
 |------|------|------|
 | 数据源接入数 | 4 个（Git / PingCode / CI / 飞书） | — |
 | 记忆库规模 | 评估集 30 条种子记忆（生产待部署） | tests/eval/seed_memories.jsonl |
-| 检索 Recall@5 | **1.000**（hybrid: 向量 + jieba 分词 BM25，无 rerank） | tests/eval 实测（30 query）；向量 baseline 0.833；hybrid+rerank 0.967 |
+| 检索 Recall@5 | **1.000**（向量与 hybrid 无 rerank 同达 1.000） | tests/eval 实测（30 query 当前语料）；旧 baseline 0.833 基于重新播种前语料；hybrid+rerank 0.967（floor 误伤 q015） |
 | 检索 MRR | **0.983** | tests/eval 实测；29/30 query rank-1 命中 |
 | 检索 NDCG@5 | **0.988** | tests/eval 实测 |
 | 检索 MAP@5 | 0.983 | tests/eval 实测 |

@@ -49,19 +49,19 @@ EMA 全称 Engineering Memory Agent，一句话讲就是把研发过程中的代
 
 ## 量化成果（30 秒，约 110 字）
 
-目前 EMA 已经接入了 4 个数据源——Git、PingCode、CI、飞书。检索质量上，我建了 30 条标注 query 的评估集。向量召回 Recall@5 0.83；加 hybrid（jieba 中文分词 + BM25）后 0.97；A/B 发现 rerank 在小语料下有害，跳过后 **Recall@5 1.00、MRR 0.98、NDCG@5 0.99，稳态延迟 235ms**。工程上后端 6500 行、452 个测试用例。生产部署后的日均检索量等运行数据待上线统计。整个项目我独立完成，从架构设计到代码实现。
+目前 EMA 已经接入了 4 个数据源——Git、PingCode、CI、飞书。检索上我建了 30 条标注 query 的评估集，当前语料下 BGE-M3 稠密召回 **Recall@5 1.00、MRR 0.98**。生产瓶颈上我重点处理了 sparse_search 的 O(N) 扫描——把 jieba 分词结果落到 chunks 表的 tokens 列 + GIN 索引，用 `tokens &&` 过滤把候选集限制在真实 token 重叠的行，1000 条语料实测延迟 -69%；rerank 经 A/B 验证在小语料下有害（0.15 floor 误伤低分相关结果），跳过 rerank 后延迟从 17.5s 降到 0.19s，收益 scale-dependent。工程上后端 6500 行、452 个测试用例。整个项目我独立完成，从架构设计到代码实现。
 
 ---
 
 ## 评估驱动的优化发现（8 分钟版展开，5 分钟版跳过，约 1.5 分钟）
 
-评估集带出三次假设的迭代。我看 Recall@5 是 0.83，有 5 个概念查询没命中，就想提升。第一个假设：score 低的 query 召回不可靠，用 score 阈值按需触发 query 改写。但跑了一下数据验证，结果打脸了——命中的 query top-1 score 最低 0.54，没命中的最高 0.69，**两者完全重叠**。没命中的 query 看起来 score 很"自信"，实际召回了错的结果。score 根本不能当置信度用。
+评估集带出几轮假设检验。第一版评估 Recall@5 是 0.83，5 个概念查询 miss。第一个假设：score 低的 query 召回不可靠，用 score 阈值按需触发 query 改写。跑数据验证打脸——命中的 top-1 score 最低 0.54，没命中的最高 0.69，**完全重叠**。score 根本不能当置信度用。
 
-第二个假设：改写和 hybrid 能救回。我实现了 LLM query 改写，DeepSeek 把"之前出过什么问题"扩展成了具体的兼容性 bug 描述，改写质量很高——但改写后向量召回还是 **0/5 救回**。又加了 hybrid search，用 Postgres tsvector 做 BM25 关键词召回，结果 sparse 对中文 query 返回 0 行——`simple` 分词器把中文当整体 token，根本分不了词。这时我差点下结论"根因是种子数据太短，算法救不了"。
+第二个假设：hybrid 用关键词补位。我先用 Postgres 原生 tsvector 做 BM25——结果 `simple` 分词器把整段中文当一个 token，对中文 query 返回 **0 行**，这条路对中文无效。排查到这里我发现评估本身有问题：语料种子太短、指纹跟内容对不上。**把语料改成真实的工程记录后，BGE-M3 稠密召回直接到 1.00**——当时的 5 个 miss 一部分是语料/标注问题，不是纯检索算法缺陷。第一课：**评估集的语料质量决定你测出来的"瓶颈"是真瓶颈还是标注伪影**。
 
-但我没停在这，换了第三个假设：既然 simple 分词器分不了中文，换 jieba 试试。我在 Python 侧用 jieba 分词 + Jaccard 相似度重写了 sparse_search，再跑评估——**4/5 救回，Recall@5 从 0.83 直接升到 0.97**。这时回头看，前两次失败的真正根因不是数据太短，是分词器不支持中文——我之前归因到数据层是错的。
+真正要解决的工程瓶颈浮出来了：**中文 sparse 检索的 O(N) 扫描**。jieba 分词若在 Python 侧全表扫描，万级语料直接退化。我把 jieba 分词结果落到 chunks 表的 **tokens 列 + GIN 索引**，sparse_search 用 `tokens && :query` 把候选集限制在真实 token 重叠的行——O(log N) 发现候选，Jaccard 只在小候选集上算，1000 条语料实测延迟 -69%。
 
-剩下 1 个 miss 我查了，是 cross-encoder 打了 0.142 分，刚好低于 0.15 的 rerank floor 被滤掉。我没就此停手，做了第四步 A/B：跳过 rerank 跑了一遍——**Recall@5 直接到 1.00，MRR 0.98，延迟从 20s 降到 235ms**。rerank 在当前 30 条语料下是有害的：候选池覆盖了 73% 的语料，dense similarity 本身已经接近完美排序，cross-encoder 的打分噪声反而干扰了排序，0.15 floor 还误伤了 1 条。我据此在开发期关闭 rerank，但在 docs 里标注了"万级语料需重新评估"——rerank 的收益是 scale-dependent 的，小语料下噪声盖过收益，大语料下才会反过来。这件事让我学到两件事：**别在没排查完基础设施之前就归因到数据层；也别假设"更重的模型一定更好"——rerank 收益是 scale-dependent 的**。
+rerank 单独 A/B：cross-encoder + 0.15 floor 在小语料下误伤低分相关结果（q015 打分 0.142 被滤掉），跳过 rerank 延迟从 17.5s 降到 0.19s。rerank 收益 scale-dependent，大语料候选池缩小时才值得重新开。第二课：**别假设"更重的模型一定更好"——先 A/B，再下结论**。
 
 ---
 
@@ -91,8 +91,8 @@ EMA 一句话：研发知识自动沉淀为长期记忆，解决"人走知识没
   1. 四级相似度去重(0.92合并/0.75冲突/0.60关联/<0.60新增)
   2. 艾宾浩斯衰减(R=e^(-t/S), S=1+recall×2, 相似度×decay排序)
   3. LangGraph 手动 StateGraph + 双 HITL 卡点(审批/仲裁) + PostgresSaver
-成果：4 数据源 / 评估集30条 向量0.83→hybrid+jieba 0.97→跳过rerank 1.00 MRR 0.98 NDCG 0.99 235ms / 后端6500行 452测试 / 独立完成
-四步迭代：①score阈值不可行(hit/miss重叠 0.54 vs 0.69) ②改写+simple hybrid 0/5(中文分词无效) ③jieba分词 4/5救回(0.83→0.97) ④A/B跳过rerank 1.00(小语料rerank有害,20s→235ms) → 根因是分词不是数据+rerank是scale-dependent
+成果：4 数据源 / 评估集30条 dense 1.00 MRR 0.98 / sparse O(N)→jieba tokens+GIN(tokens&&) -69% / rerank可跳过(0.15 floor误伤q015) 17.5s→0.19s / 后端6500行 452测试 / 独立完成
+评估迭代：①score阈值不可行(hit/miss重叠 0.54 vs 0.69) ②tsvector simple切不了中文(0行)→jieba ③语料改真实→dense 1.00(瓶颈真假取决于评估语料质量) ④真瓶颈=sparse O(N)→jieba tokens落库+GIN ⑤rerank可跳过(0.15 floor误伤,17.5s→0.19s,scale-dependent)
 动机：JD 匹配 / 想做更大场景(万级记忆/多Agent/多租户) / 往 AI 工程专家走
 收尾：引导到项目深讲
 ```
@@ -107,7 +107,7 @@ EMA 一句话：研发知识自动沉淀为长期记忆，解决"人走知识没
 
 ### 8 分钟版（技术面主问）
 
-完整版 + 在"三亮点"每点后加 1 个具体技术细节（如衰减公式、相似度阈值来源、HITL 的 Command 路由机制）+ 展开"评估驱动的优化发现"段落（四步迭代：score 阈值不可行 → simple hybrid 0/5 → jieba 分词 4/5 救回 0.83→0.97 → A/B 跳过 rerank 1.00/235ms，rerank 在小语料下有害是 scale-dependent 的取舍）。
+完整版 + 在"三亮点"每点后加 1 个具体技术细节（如衰减公式、相似度阈值来源、HITL 的 Command 路由机制）+ 展开"评估驱动的优化发现"段落（score 阈值不可行 → tsvector simple 切不了中文 → 语料改真实后 dense 1.00 → jieba 分词落库 + GIN 解决 sparse O(N) 瓶颈 → rerank 可跳过，scale-dependent）。
 
 ### 1 分钟电梯版
 

@@ -256,8 +256,8 @@ python -m tests.eval.seed --memories --clear
 python -m tests.eval.run_eval --retriever memory
 ```
 
-**待回填数字**（跑完后填入 self-introduction.md / ema-deep-dive.md）：
-- chunks 路径（vector_search，无 rerank）：Recall@5=**0.833** / MRR=**0.817** / NDCG@5=**0.819** / MAP@5=0.811（30 query，稳态延迟 ~200ms/query）
+**待回填数字**（跑完后填入 self-introduction.md / ema-deep-dive.md；**注**：以下 chunks 路径数字为 08-06 06:11 旧 baseline，基于重新播种前语料——当前语料下 vector 单独即 Recall@5=1.000，见 §11 更正）：
+- chunks 路径（vector_search，无 rerank）：Recall@5=**0.833** / MRR=**0.817** / NDCG@5=**0.819** / MAP@5=0.811（30 query，旧 baseline，当前语料已 1.000）
 - memory 路径：[待跑，需先 `python -m tests.eval.seed --memories` 灌结构化记忆]
 - LLM rerank vs CE Δ recall@5：[待跑，cross-encoder rerank 单 query 50s（CPU 瓶颈），30 query 需 25min，建议 GPU 环境或降候选数后跑]
 - easy/medium/hard recall@5：**0.714 / 0.929 / 0.778**（medium 最高，easy 反而最低——部分 easy query 词重合但向量区分度不足；hard 概念查询 0.778 优于预期）
@@ -283,7 +283,7 @@ python -m tests.eval.run_eval --retriever memory
 | 单次对话平均 token 数 | LLMProvider 加计数（见 §4） | [待测] | "平均 [X] token/轮" |
 | 单次对话平均 tool 调用数 | 在 Agent 加计数 | [待测] | "平均调 [X] 个 tool" |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms（CPU） | "embed 150-230ms/条，CPU 推理" |
-| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever hybrid_norerank` | 1.000 | "hybrid+jieba 无 rerank Recall@5 1.00（向量 baseline 0.83），评估集 30 query" |
+| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever hybrid_norerank` | 1.000 | "hybrid+jieba 无 rerank Recall@5 1.00（当前语料下向量 baseline 亦 1.00），评估集 30 query" |
 | 检索 MRR | 同上 | 0.983 | "MRR 0.98" |
 | 检索 NDCG@5 | 同上 | 0.988 | "NDCG@5 0.99" |
 
@@ -691,13 +691,13 @@ async def eval_extraction():
 
 ## 十一、检索召回优化方案（补 RAG 高级技巧短板）
 
-> **2026-08-06 更新**：jieba 中文分词 + 跳过 rerank 已落地，Recall@5 0.833→1.000（5/5 miss 全救回），MRR 0.983，延迟 235ms。详见 §11.5 实测结果表。本节 §11.1-11.4 保留为历史诊断过程，体现"做了、测了、错了、再测、纠正归因、连默认假设都敢质疑"的迭代。
+> **2026-08-07 更新（语料更正）**：旧版"0.833→1.000（5/5 救回）"的 baseline 生成于 08-06 06:11，早于 07:12 的语料重新播种，且旧指纹与 seed 内容不匹配——**对比不一致，旧结论在当前语料上不可复现**。当前语料 + 当前指纹下 BGE-M3 稠密召回即 Recall@5=1.000。详见 §11.5 实测表与 [eval-report.md](eval-report.md)。
 >
-> 实测发现：vector_search Recall@5=0.833，5 个概念查询 miss；cross-encoder rerank 对 Recall 影响 **0**（相关结果不在 top-20 候选池），对 MRR 影响 **+0.017**。**瓶颈在召回不在排序**。本方案给出 2 个可落地的召回优化，补 §9.2 表里的 "RAG 高级技巧 ❌ 无"。
+> **真正的生产瓶颈是 sparse_search 的 O(N) 扫描，不是 rerank**：中文 sparse 必须把 jieba 分词结果落到 `chunks.tokens` 列 + GIN 索引，用 `tokens && :q` 把候选集限制在真实 token 重叠的行（O(log N) 发现候选），Jaccard 只在小候选集上算。rerank（cross-encoder）经 A/B 验证在小语料下有害（0.15 floor 误伤 q015），可跳过，收益 scale-dependent。§11.1-11.4 保留为历史诊断过程，体现"做了、测了、错了、再测、纠正归因、连默认假设都敢质疑"的迭代。
 
 ### 11.1 现状问题（实测数据支撑）
 
-**评估数据**（[eval-report.json](eval-report.json)，30 query）：
+**评估数据**（[eval-report.json](eval-report.json)，30 query；**注**：以下为 08-06 06:11 旧 baseline，基于重新播种前的语料——当前语料下 dense 单独即 Recall@5=1.000）：
 - Recall@5=0.833（25 命中 / 5 miss）
 - 5 个 miss query 的相关结果**均不在 top-20 候选池** → rerank 无法救回
 - miss 全是概念查询，query 和相关记忆词重合度低：
@@ -786,7 +786,7 @@ async def retrieve_multi_query(
 - q007 "koa-connect 之前出过什么问题" 预期被改写成 "koa-connect ctx 泄漏 / 中间件 wrapper 问题"，词重合度提升
 
 **面试话术**：
-> 「我评估发现 5 个 miss query 全是概念查询，dense vector 词面不重合就召回不了。所以加了 query rewriting——做成 Agent 的显式 tool（query_rewrite_and_search），让 Agent 自主判断概念查询时调用，retrieve 默认走 hybrid 不自动改写，延迟决策权交给 Agent。改写单独测 0/5 救回（simple 分词器瓶颈），配合 jieba hybrid 后多路召回才生效。fails safe 设计，改写失败退回原 query。」
+> 「概念查询（如"之前出过什么问题"）dense 词面召回弱，我做了 query rewriting 作为 Agent 的显式 tool（query_rewrite_and_search），让 Agent 自主判断概念查询时调用，fails safe 失败退回原 query。但单独改写救不回稠密召回——真正的瓶颈是中文 sparse 通道不可用 + 检索的 O(N) 扩容。Postgres `simple` 分词器对中文返回 0 行，我把 jieba 分词结果落库（tokens 列 + GIN 索引），`tokens &&` 过滤把候选集限制在真实重叠的行，sparse 才既可用又不退化。」
 
 ### 11.3 方案 B：Hybrid Search（dense + sparse BM25，4-6h）
 
@@ -838,7 +838,7 @@ async def retrieve_hybrid(query: str, top_k: int = 5) -> list[Chunk]:
 - q029 "连接器支持哪些平台" → sparse 命中含 "Git/PingCode/CI/飞书" 的记忆
 
 **面试话术**：
-> 「dense vector 对概念查询召回弱，我加了 hybrid search——先用 Postgres ts_vector 做 BM25，发现 simple 分词器分不了中文（0/5 救回）；换成 Python 侧 jieba 分词 + Jaccard 重写 sparse_search，Recall@5 从 0.833 升到 0.97。再 A/B 跳过 rerank 到 1.00/235ms——30 条语料下 rerank 有害。选 Postgres/Python 不选 ES 是为了不引新组件。」
+> 「中文 sparse 检索的生产瓶颈是 O(N) 扫描。我先试 Postgres 原生 tsvector，`simple` 分词器分不了中文（对中文返回 0 行）；换成 jieba 分词 + Jaccard，并把 jieba 结果落到 chunks.tokens 列 + GIN 索引，`tokens &&` 过滤把候选集限制在真实重叠的行——1000 条语料延迟 -69%。rerank 单独 A/B 在小语料下有害（0.15 floor 误伤 q015），可跳过，收益 scale-dependent。选 Postgres/Python 不选 ES 是不引新组件。」
 
 ### 11.4 方案对比与选型
 
@@ -875,7 +875,7 @@ python -m tests.eval.run_eval --retriever rewrite --report-json rewrite.json
 python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 ```
 
-**实测结果**（30 query 全量评估）：
+**实测结果**（30 query 全量评估；**注**：baseline 0.833 为重新播种前的旧语料，hybrid 行在播种后——0.83→0.97 增量混入了语料变更，非纯 jieba 收益。当前语料下 vector 单独即 1.000，见 [eval-report.md](eval-report.md)）：
 
 | 方案 | Recall@5 | MRR | 救回 miss | 延迟/query | 实测结论 |
 |------|----------|-----|----------|-----------|---------|
@@ -888,7 +888,7 @@ python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 **根因分析**（四步迭代，第四步 A/B 推翻"rerank 必要"的默认假设）：
 1. **simple hybrid 失效**：Postgres `simple` 分词器把中文当整体 token，匹配不到任何行。前两次失败的真正根因——不是数据太短，是分词器不支持中文。
 2. **rewrite 单独失效**：改写扩宽了 query 语义，但 simple 分词器仍是瓶颈，hybrid 通道返回 0 行。
-3. **jieba 成功**：换 jieba 分词后，sparse 通道对中文 query 有效，4/5 miss 救回，Recall@5 0.83→0.97。
+3. **jieba 成功（中文可用性）**：换 jieba 分词后，sparse 通道对中文 query 才有效（`simple` 分词器对中文返回 0 行）。但"4/5 救回、0.83→0.97"混入了 07-12 语料重新播种的变更——当前语料下 dense 单独即 1.000，sparse 的真实增益是"中文 sparse 通道可用 + DB 侧落库解决 O(N)"，而非"救回稠密漏掉的结果"。
 4. **A/B 跳过 rerank → 1.00**：剩下 q015 miss 查了是 cross-encoder 打了 0.142 < 0.15 floor 被滤掉。做了 A/B 跳过 rerank，Recall@5 直接到 1.00、MRR 0.98、延迟 20s→235ms。**rerank 在 30 条语料下是有害的**：候选池覆盖 73% 语料，dense similarity 本身已接近完美排序，cross-encoder 打分噪声反而干扰排序，0.15 floor 还误伤 1 条。
 5. **归因教训**：①第二次失败时差点归因到"数据太短"——错了，根因是分词器；②第四步推翻了"rerank 一定提升质量"的默认假设——rerank 收益是 scale-dependent 的，小语料下噪声盖过收益，大语料下才会反过来。
 
@@ -896,7 +896,7 @@ python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 
 | 方向 | 预期收益 | 代价 | 优先级 |
 |------|---------|------|--------|
-| ✅ jieba 中文分词（已落地） | Recall@5 0.83→0.97 | Python 侧分词 +900ms | 已完成 |
+| ✅ jieba 中文分词（已落地） | 中文 sparse 通道可用（`simple` 分词器对中文 0 行） | 落库 + 重建索引 | 已完成 |
 | ✅ 跳过 rerank（已落地） | 0.97→1.00，延迟 20s→235ms | 大语料需重新评估 | 已完成 |
 | ✅ 1000 条 LLM 干扰语料实测（已落地） | 验证临界点：Recall 1.00→0.933 | 24min 跑一轮 | 已完成 |
 | 万级语料重新评估 rerank | rerank 预期转正（候选池 0.4%） | 重新跑 eval + 重调 floor | P2（生产部署前） |
