@@ -35,6 +35,11 @@ logger = logging.getLogger(__name__)
 _token_usage: dict[str, int] = defaultdict(int)
 _token_usage_lock = threading.Lock()
 
+# Structured-output failures (enrichment call sites degrade to []/defaults
+# after retries).  Keyed by scenario so degradations are visible, not silent.
+_structured_failures: dict[str, int] = defaultdict(int)
+_structured_failures_lock = threading.Lock()
+
 
 # ── Internal helpers ─────────────────────────────────────────────────
 
@@ -107,3 +112,32 @@ def reset_token_usage() -> None:
     """Reset all counters — used in tests and to start a fresh measurement."""
     with _token_usage_lock:
         _token_usage.clear()
+
+
+def record_structured_failure(scenario: str) -> None:
+    """Count one structured-output degradation for *scenario*.
+
+    Called by enrichment call sites (entity/relation extraction) when a
+    structured call exhausts its retries and falls back to ``[]``.  The
+    counter is surfaced on ``GET /api/agent/usage`` so degradations are
+    observable rather than silent.
+    """
+    with _structured_failures_lock:
+        _structured_failures[scenario] += 1
+        logger.warning(
+            "Structured output degraded: scenario=%s total=%d",
+            scenario,
+            _structured_failures[scenario],
+        )
+
+
+def get_structured_failures() -> dict[str, int]:
+    """Return a snapshot of structured-output failure counts per scenario."""
+    with _structured_failures_lock:
+        return dict(_structured_failures)
+
+
+def reset_structured_failures() -> None:
+    """Reset structured-failure counters — used in tests."""
+    with _structured_failures_lock:
+        _structured_failures.clear()

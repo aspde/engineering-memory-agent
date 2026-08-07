@@ -11,7 +11,6 @@ Flow for each extracted entity:
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
@@ -164,29 +163,32 @@ async def _llm_confirm_match(
 ) -> bool:
     """Ask the LLM whether *new_name* refers to the same entity as *existing_name*.
 
-    Fails safe: if the LLM call fails or the response cannot be parsed,
-    assume NO match so a new entity is created rather than incorrectly
-    linking unrelated entities.
+    Structured output is enforced and retried.  This is correctness-critical:
+    on persistent failure the judgement is *not* silently defaulted to
+    "no match" (which would create a duplicate entity).
+    :class:`LLMStructuredError` propagates; ``normalize_entities`` catches
+    it per-entity and skips that entity.
     """
-    from backend.service.llm_service import get_llm_provider
+    from backend.service.structured import chat_structured
 
-    try:
-        llm = get_llm_provider()
-        prompt = _ENTITY_MATCH_PROMPT.format(
-            new_name=new_name,
-            existing_name=existing_name,
-            entity_type=entity_type,
-        )
-        response = await llm.chat([{"role": "user", "content": prompt}], scenario="entity_normalization")
-        data = json.loads(response.strip())
-        return bool(data.get("match", False))
-    except Exception:
-        logger.warning(
-            "LLM entity-match call failed for '%s' vs '%s' — assuming no match",
-            new_name,
-            existing_name,
-        )
-        return False
+    prompt = _ENTITY_MATCH_PROMPT.format(
+        new_name=new_name,
+        existing_name=existing_name,
+        entity_type=entity_type,
+    )
+    data = await chat_structured(
+        [{"role": "user", "content": prompt}],
+        json_schema=_MATCH_SCHEMA,
+        scenario="entity_normalization",
+    )
+    return bool(data.get("match", False))
+
+
+_MATCH_SCHEMA = {
+    "type": "object",
+    "required": ["match"],
+    "properties": {"match": {"type": "boolean"}},
+}
 
 
 async def get_entity_by_name(name: str) -> dict | None:

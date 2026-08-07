@@ -99,6 +99,31 @@ class OpenAICompatibleProvider(LLMProvider):
         record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
+    async def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict | None = None,
+        **kwargs,
+    ) -> str:
+        """Constrained JSON output via ``response_format=json_object``.
+
+        Supported by DeepSeek and OpenAI; guarantees a valid JSON response
+        shape so downstream ``jsonschema`` validation only has to fight
+        structural drift, not malformed text.
+        """
+        scenario = pop_scenario(kwargs)
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        response = await self._async_client.chat.completions.create(
+            model=self._model,
+            messages=messages,  # type: ignore[arg-type]
+            response_format={"type": "json_object"},
+            **kwargs,
+        )
+        record_usage(scenario, getattr(response, "usage", None))
+        return response.choices[0].message.content or ""
+
     @property
     def model(self) -> str:
         return self._model
@@ -199,6 +224,53 @@ class AnthropicProvider(LLMProvider):
         )
         record_usage(scenario, getattr(response, "usage", None))
         return self._extract_text(response.content)
+
+    async def chat_json(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_schema: dict | None = None,
+        **kwargs,
+    ) -> str:
+        """Constrained JSON output via a forced ``tool_use`` block.
+
+        Anthropic has no ``response_format``; its structured-output idiom is
+        a tool whose ``input_schema`` the model must fill.  Because that
+        schema must be an *object* schema (our callers often want a top-level
+        array), the caller's schema is wrapped in a ``{"result": <schema>}``
+        envelope and unwrapped here.
+        """
+        scenario = pop_scenario(kwargs)
+        system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        schema = json_schema or {"type": "object"}
+        response = await self._async_client.messages.create(
+            model=self._model,
+            system=system,
+            messages=user_messages,  # type: ignore[arg-type]
+            tools=[
+                {
+                    "name": "emit_json",
+                    "description": (
+                        'Return the requested data as a JSON value in the "result" field.'
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"result": schema},
+                        "required": ["result"],
+                    },
+                }
+            ],
+            tool_choice={"type": "tool", "name": "emit_json"},
+            **kwargs,
+        )
+        record_usage(scenario, getattr(response, "usage", None))
+        for block in response.content:  # type: ignore[attr-defined]
+            if getattr(block, "type", "") == "tool_use":
+                return json.dumps(
+                    block.input.get("result", block.input), ensure_ascii=False
+                )
+        return ""
 
     @staticmethod
     def _split_messages(

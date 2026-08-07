@@ -62,6 +62,14 @@ class LLMConfig:
     timeout: int = field(
         default_factory=lambda: int(os.getenv("LLM_TIMEOUT", "60"))
     )
+    # Structured-output calls (chat_structured) retry this many times with
+    # linear backoff before raising LLMStructuredError.
+    structured_max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("LLM_STRUCTURED_MAX_ATTEMPTS", "3"))
+    )
+    structured_backoff: float = field(
+        default_factory=lambda: float(os.getenv("LLM_STRUCTURED_BACKOFF", "0.5"))
+    )
 
 
 @dataclass

@@ -163,15 +163,17 @@ class TestTokenUsageEndpoint:
 
     @pytest.mark.asyncio
     async def test_usage_returns_zero_initially(self, async_client: AsyncClient) -> None:
-        from backend.shared.metrics import reset_token_usage
+        from backend.shared.metrics import reset_structured_failures, reset_token_usage
 
         reset_token_usage()
+        reset_structured_failures()
         response = await async_client.get("/api/agent/usage")
         assert response.status_code == 200
         data = response.json()
         assert data["total_tokens"] == 0
         assert data["by_scenario"] == {}
         assert data["scenarios"] == 0
+        assert data["structured_failures"] == {}
 
     @pytest.mark.asyncio
     async def test_usage_reflects_recorded_tokens(self, async_client: AsyncClient) -> None:
@@ -200,15 +202,17 @@ class TestTokenUsageEndpoint:
     async def test_usage_reset_clears_counters(self, async_client: AsyncClient) -> None:
         from types import SimpleNamespace
 
-        from backend.shared.metrics import record_usage
+        from backend.shared.metrics import record_structured_failure, record_usage
 
         record_usage("x", SimpleNamespace(total_tokens=999))
+        record_structured_failure("extraction_entities")
         response = await async_client.post("/api/agent/usage/reset")
         assert response.status_code == 200
         assert response.json() == {"reset": True}
 
         get_resp = await async_client.get("/api/agent/usage")
         assert get_resp.json()["total_tokens"] == 0
+        assert get_resp.json()["structured_failures"] == {}
 
 
 class TestAgentChatHITL:

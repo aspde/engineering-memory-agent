@@ -30,7 +30,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/衰减/去重全链路已实现 |
 | Entity Graph | PostgreSQL + pgvector | 实体归一化、一度关系查询、图谱可视化已实现 |
 | Storage | PostgreSQL + pgvector | docker-compose 已就绪 |
-| LLM | OpenAI SDK / Anthropic SDK | provider 抽象 + chat_raw 工具调用已实现 |
+| LLM | OpenAI SDK / Anthropic SDK | provider 抽象 + chat_raw 工具调用 + chat_json 结构化输出已实现 |
 | Embedding | BGE-M3 (local) / OpenAI (API) | 本地离线 + OpenAI 兼容 API 双模式 |
 
 ## Layer Responsibilities
@@ -85,6 +85,8 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Anthropic Claude | anthropic | `LLM_PROVIDER=anthropic` |
 
 Agent 工具调用通过新增的 `chat_raw(messages, tools, **kwargs) → dict` 方法，返回结构化响应 `{content, tool_calls}`。
+
+结构化输出（实体/关系提取、矛盾检测、实体匹配）通过 `chat_json(messages, json_schema, **kwargs) → str` 强制合法 JSON——OpenAI 兼容用 `response_format=json_object`，Anthropic 用 forced `tool_use`。`chat_structured` 统一负责解析、`jsonschema` 校验、退避重试，重试耗尽抛 `LLMStructuredError`。
 
 ### Embedding
 

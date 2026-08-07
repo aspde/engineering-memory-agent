@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -152,3 +153,75 @@ class TestPopScenario:
     def test_defaults_for_non_string(self) -> None:
         kwargs: dict = {"scenario": None, "temperature": 0.5}
         assert pop_scenario(kwargs) == "default"
+
+
+# ── chat_json — structured-output constraint per provider ─────────────
+
+
+class TestOpenAICompatibleChatJson:
+    """OpenAI-compatible provider must pass response_format=json_object
+    and return the raw JSON content string."""
+
+    @pytest.mark.asyncio
+    async def test_passes_response_format_and_returns_content(self) -> None:
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content='{"ok": true}'))]
+        resp.usage = None
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.return_value = resp
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        raw = await provider.chat_json(
+            [{"role": "user", "content": "hi"}], json_schema={"type": "object"}
+        )
+        assert raw == '{"ok": true}'
+        kwargs = mock_client.chat.completions.create.await_args.kwargs
+        assert kwargs["response_format"] == {"type": "json_object"}
+
+
+class TestAnthropicChatJson:
+    """Anthropic has no response_format; chat_json must drive a forced
+    tool_use whose input_schema wraps the caller schema in an envelope,
+    then unwrap it back to a plain JSON string."""
+
+    @pytest.mark.asyncio
+    async def test_forced_tool_and_envelope_unwrap(self, monkeypatch) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _ToolUseBlock:
+            type = "tool_use"
+            input = {"result": [{"from": "a", "to": "b", "type": "depends_on"}]}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [_ToolUseBlock()]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+        raw = await provider.chat_json(
+            [{"role": "system", "content": "sys"}, {"role": "user", "content": "hi"}],
+            json_schema={"type": "array"},
+        )
+        assert raw == '[{"from": "a", "to": "b", "type": "depends_on"}]'
+        assert captured["tool_choice"] == {"type": "tool", "name": "emit_json"}
+        # system message promoted to top-level param; envelope wraps the schema
+        assert captured["system"] == "sys"
+        assert captured["tools"][0]["input_schema"]["properties"]["result"] == {"type": "array"}  # type: ignore[index]

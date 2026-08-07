@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.model.llm import LLMStructuredError
+
 
 class _MockRow:
     """Simulates a SQLAlchemy Row so ``row._mapping`` doesn't crash."""
@@ -194,9 +196,8 @@ class TestNormalizeEntities:
             assert entity_ids[0] == new_id
 
     @pytest.mark.asyncio
-    async def test_normalize_entity_llm_fails_safe(self):
-        """When LLM call inside _llm_confirm_match fails, fallback returns
-        False → create new entity (not skip)."""
+    async def test_normalize_entity_llm_rejects_match_creates_new(self):
+        """When the LLM judges no match, a new entity is created."""
         from backend.service.entity import normalize_entities
 
         with (
@@ -214,7 +215,7 @@ class TestNormalizeEntities:
             mock_emb.embed.return_value = [[0.1] * 1024]
             mock_emb_provider.return_value = mock_emb
 
-            # _llm_confirm_match returns False (LLM call failed internally)
+            # The LLM judges the candidate is NOT the same entity
             mock_llm_confirm.return_value = False
 
             new_id = "44444444-4444-4444-4444-444444444444"
@@ -247,3 +248,41 @@ class TestNormalizeEntities:
             # Falls back to creating new entity (LLM returned False = no match)
             assert len(entity_ids) == 1
             assert entity_ids[0] == new_id
+
+
+class TestLLMConfirmMatch:
+    """_llm_confirm_match — the correctness-critical entity-match judgement."""
+
+    @pytest.mark.asyncio
+    async def test_returns_true_on_match(self, monkeypatch) -> None:
+        from backend.service.entity import _llm_confirm_match
+
+        mock_llm = AsyncMock()
+        mock_llm.chat_json.return_value = '{"match": true}'
+        monkeypatch.setattr("backend.service.structured.get_llm_provider", lambda: mock_llm)
+
+        assert await _llm_confirm_match("pg16", "PostgreSQL", "technology") is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_no_match(self, monkeypatch) -> None:
+        from backend.service.entity import _llm_confirm_match
+
+        mock_llm = AsyncMock()
+        mock_llm.chat_json.return_value = '{"match": false}'
+        monkeypatch.setattr("backend.service.structured.get_llm_provider", lambda: mock_llm)
+
+        assert await _llm_confirm_match("pg16", "MySQL", "technology") is False
+
+    @pytest.mark.asyncio
+    async def test_propagates_on_exhaustion(self, monkeypatch) -> None:
+        """Never silently defaults to \"no match\" (which would create a
+        duplicate entity) when the structured judgement fails."""
+        from backend.service.entity import _llm_confirm_match
+
+        async def _raise(*args, **kwargs):
+            raise LLMStructuredError("no schema-valid JSON after retries")
+
+        monkeypatch.setattr("backend.service.structured.chat_structured", _raise)
+
+        with pytest.raises(LLMStructuredError):
+            await _llm_confirm_match("pg16", "PostgreSQL", "technology")

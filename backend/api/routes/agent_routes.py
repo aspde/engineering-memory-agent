@@ -550,8 +550,12 @@ async def get_token_usage_endpoint() -> dict[str, Any]:
 
     To start a fresh measurement window during an interview demo, call
     ``POST /api/agent/usage/reset`` to clear counters.
+
+    ``structured_failures`` counts structured-output calls (entity/relation
+    extraction) that exhausted their retries and degraded to empty — so
+    silent degradation is observable.
     """
-    from backend.shared.metrics import get_token_usage
+    from backend.shared.metrics import get_structured_failures, get_token_usage
 
     usage = get_token_usage()
     total = sum(usage.values())
@@ -559,13 +563,15 @@ async def get_token_usage_endpoint() -> dict[str, Any]:
         "total_tokens": total,
         "by_scenario": usage,
         "scenarios": len(usage),
+        "structured_failures": get_structured_failures(),
     }
 
 
 @router.post("/usage/reset")
 async def reset_token_usage_endpoint() -> dict[str, Any]:
-    """Reset all token usage counters."""
-    from backend.shared.metrics import reset_token_usage
+    """Reset all usage counters (tokens + structured-output failures)."""
+    from backend.shared.metrics import reset_structured_failures, reset_token_usage
 
     reset_token_usage()
+    reset_structured_failures()
     return {"reset": True}

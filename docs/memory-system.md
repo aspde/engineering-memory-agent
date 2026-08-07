@@ -52,7 +52,7 @@ extract_entities(content) ─┘
 - **实体**：JSON 数组 `[{name, type}]`，类型包括 person/project/technology/decision/event/file/concept
 - **关系**：JSON 数组 `[{from, to, type}]`，类型包括 depends_on/causes/part_of/contradicts/supersedes/relates_to
 
-每个阶段独立调用 LLM，一个失败不影响其他。
+每个阶段独立调用 LLM，一个失败不影响其他（各阶段的失败语义见「分层容错」）。
 
 ### 3. 智能写入与去重
 
@@ -65,7 +65,7 @@ extract_entities(content) ─┘
 | 0.60–0.75 | 插入为新记忆，关联到最相似记忆 |
 | < 0.60 | 作为全新记忆插入 |
 
-合并和矛盾检测的 LLM 调用失败时降级处理：合并失败保留原有摘要，矛盾检测失败假定无矛盾——不会阻塞写入。
+合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本）；矛盾检测失败则**传播失败**——写入不落库，绝不把可能矛盾的记忆静默写入。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数，写入继续。
 
 ### 4. 艾宾浩斯遗忘衰减
 
@@ -154,6 +154,6 @@ backend/
 
 - **函数优先**：每个功能一个函数，没有不必要的 class wrapper
 - **独立可测**：每个函数单独 mock LLM/embedding 即可测试
-- **容错降级**：LLM 调用失败不阻塞写入，merge/conflict 检测失败走安全路径
+- **分层容错**：结构化输出经 `response_format`/forced tool 强制 + `jsonschema` 校验 + 有界重试（`chat_structured`）。重试耗尽后，增强类（实体/关系提取）**大声降级**——ERROR 日志 + 失败计数；正确性关键类（矛盾检测、实体匹配）**传播失败**，绝不静默写入错误数据
 - **不依赖 LangChain**：chunk、retrieval、rerank 全部自实现，不引入链条式黑盒
 - **SQL 可见**：向量搜索手写 SQL，`<=>` 操作符和参数完全可控

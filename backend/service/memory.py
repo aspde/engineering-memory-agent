@@ -104,24 +104,30 @@ async def _find_similar(embedding, session_factory):
 async def _detect_conflict(existing: dict, extracted: dict) -> bool:
     """Ask the LLM whether *extracted* contradicts *existing*.
 
-    Fails safe: if the LLM call fails or the response cannot be parsed,
-    assume no conflict rather than blocking the write.
+    Structured output is enforced and retried.  This is correctness-critical:
+    on persistent failure the conflict is *not* silently assumed away.
+    :class:`LLMStructuredError` propagates, so ``write_memory`` fails rather
+    than storing a possibly-contradictory memory unmarked.
     """
-    from backend.service.llm_service import get_llm_provider
+    from backend.service.structured import chat_structured
 
-    try:
-        llm = get_llm_provider()
-        prompt = _CONFLICT_PROMPT.format(
-            existing_summary=existing["summary"],
-            new_summary=extracted["summary"],
-        )
-        response = await llm.chat([{"role": "user", "content": prompt}], scenario="conflict_detection")
-        data = json.loads(response.strip())
-        return bool(data.get("conflict", False))
-    except Exception:
-        logger.warning("LLM conflict detection failed, assuming no conflict")
-        return False
+    prompt = _CONFLICT_PROMPT.format(
+        existing_summary=existing["summary"],
+        new_summary=extracted["summary"],
+    )
+    data = await chat_structured(
+        [{"role": "user", "content": prompt}],
+        json_schema=_CONFLICT_SCHEMA,
+        scenario="conflict_detection",
+    )
+    return bool(data.get("conflict", False))
 
+
+_CONFLICT_SCHEMA = {
+    "type": "object",
+    "required": ["conflict"],
+    "properties": {"conflict": {"type": "boolean"}},
+}
 
 _CONFLICT_PROMPT = """\
 You are a conflict detector. Compare two summaries and determine if the new one
