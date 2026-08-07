@@ -205,7 +205,7 @@ class TestWebhookSignature:
     async def test_no_secret_configured_skips_verification(
         self, async_client: AsyncClient, monkeypatch
     ):
-        """When no secret is set, unauthenticated requests succeed."""
+        """When no secret is set, unauthenticated requests succeed (dev)."""
         monkeypatch.delenv("WEBHOOK_FAKE_CI_SECRET", raising=False)
         body = {"job_name": "unauthenticated-job"}
         resp = await async_client.post(
@@ -213,6 +213,36 @@ class TestWebhookSignature:
             json=body,
         )
         # Without secret, signature check is skipped
+        assert resp.status_code == 202
+
+    @pytest.mark.asyncio
+    async def test_production_rejects_when_no_secret(
+        self, async_client: AsyncClient, monkeypatch
+    ):
+        """In production, a source without a secret is refused (fail closed)."""
+        import backend.api.routes.webhook_routes as mod
+
+        monkeypatch.delenv("WEBHOOK_FAKE_CI_SECRET", raising=False)
+        monkeypatch.setattr(mod.config, "app_env", "production")
+        body = {"job_name": "prod-job"}
+        resp = await async_client.post(
+            "/api/webhook/fake_ci",
+            json=body,
+        )
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_production_accepts_when_secret_configured(
+        self, async_client: AsyncClient, monkeypatch
+    ):
+        """Production + valid signature + secret configured → accepted."""
+        import backend.api.routes.webhook_routes as mod
+
+        monkeypatch.setattr(mod.config, "app_env", "production")
+        raw, headers = _signed_post({"job_name": "prod-signed-job"})
+        resp = await async_client.post(
+            "/api/webhook/fake_ci", content=raw, headers=headers
+        )
         assert resp.status_code == 202
 
 

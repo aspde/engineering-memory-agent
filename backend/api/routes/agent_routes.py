@@ -441,13 +441,22 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
                 "请重试或简化问题。"
             ),
         )
-    except Exception as exc:
+    except Exception:
+        # Internal exception text (provider keys, DB URLs, stack details) must
+        # not leak to the client — log it server-side and return a generic
+        # message.  The streaming path streams its own error text; this is the
+        # non-streaming fallback.
         t1 = time.perf_counter()
-        logger.warning("agent_chat failed in %.0fms: %s", (t1 - t0) * 1000, exc)
+        logger.exception(
+            "agent_chat failed in %.0fms thread_id=%s msg=%r",
+            (t1 - t0) * 1000,
+            req.thread_id,
+            (req.message or "")[:60],
+        )
         return ChatResponse(
             thread_id=req.thread_id,
             status="error",
-            response=f"Agent error: {exc}",
+            response="Agent 处理出错，请稍后重试或简化问题。",
         )
 
     # Check for interrupt first
@@ -617,9 +626,11 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
             )
             await _mark_interrupted_thread(agent, req.thread_id)
             yield f"data: {json.dumps({'type': 'error', 'message': f'Agent 处理超时（超过 {config.agent_timeout} 秒），已停止本轮处理，请重试或简化问题。'}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
+        except Exception:
+            # Internal exception text must not leak to the SSE client — log
+            # the traceback and emit a generic error event.
             logger.exception("Streaming error")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'message': '流式响应出错，请稍后重试。'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         _stream(),

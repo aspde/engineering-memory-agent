@@ -37,6 +37,7 @@ from pydantic import BaseModel
 from backend.connectors.registry import get_connector, list_connectors
 from backend.db import get_session_factory
 from backend.service.conflicts import persist_pending_conflict
+from backend.shared.config import config
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -73,13 +74,27 @@ def _verify_signature(source: str, body: bytes, request: Request) -> bool:
     * ``X-Webhook-Signature``  (generic, format ``sha256=<hex>``)
     * ``X-Hub-Signature-256``  (GitHub-style, format ``sha256=<hex>``)
 
-    Returns True if no secret is configured for *source* (unauthenticated
-    mode, convenient for dev / internal networks).
+    When no secret is configured for *source*, the request is accepted
+    unauthenticated in non-production environments (convenient for dev /
+    internal networks) but **rejected in production** — an unauthenticated
+    payload must never be trusted on a deployed system (fail closed).
     """
     secret = os.getenv(f"WEBHOOK_{source.upper()}_SECRET", "")
     if not secret:
-        # No secret configured — accept unauthenticated (dev-friendly).
-        logger.debug("No webhook secret configured for source=%s — skipping verification", source)
+        if config.app_env == "production":
+            logger.error(
+                "Webhook source=%s has no %s secret configured and "
+                "APP_ENV=production — rejecting unauthenticated payload",
+                source,
+                f"WEBHOOK_{source.upper()}_SECRET",
+            )
+            return False
+        # Dev / test: accept unauthenticated (dev-friendly).
+        logger.warning(
+            "No webhook secret configured for source=%s — accepting "
+            "unauthenticated payload (dev/test only; production rejects)",
+            source,
+        )
         return True
 
     sig_header: str | None = None

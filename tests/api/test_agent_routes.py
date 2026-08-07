@@ -187,6 +187,38 @@ class TestAgentChat:
         assert data["status"] == "error"
         assert "超时" in data["response"]
 
+    @pytest.mark.asyncio
+    async def test_agent_chat_error_does_not_leak_internal_exception(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A failing agent run returns a generic error, never the exception text.
+
+        Internal details (provider keys, DB URLs, stack traces) must stay
+        server-side — the response should be a user-facing message only.
+        """
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = RuntimeError(
+            "secret: postgresql://user:pass@db:5432/ema_prod"
+        )
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={"message": "hi", "thread_id": "leak-thread-1"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "error"
+        assert "secret" not in data["response"]
+        assert "postgresql://" not in data["response"]
+        assert "RuntimeError" not in data["response"]
+
 
 class TestTokenUsageEndpoint:
     """Tests for the /api/agent/usage cost-monitoring endpoint."""
@@ -357,7 +389,8 @@ class TestAgentChatHITL:
 
     @pytest.mark.asyncio
     async def test_agent_error_returns_error_status(self, async_client: AsyncClient, monkeypatch) -> None:
-        """When ainvoke raises, return status='error' instead of 500."""
+        """When ainvoke raises, return status='error' (not 500) without leaking the
+        internal exception text to the client."""
         from unittest.mock import AsyncMock
 
         mock_agent = AsyncMock()
@@ -375,7 +408,8 @@ class TestAgentChatHITL:
         assert response.status_code == 200
         data = response.json()
         assert data["status"] == "error"
-        assert "Something went wrong" in data["response"]
+        assert "Something went wrong" not in data["response"]
+        assert "RuntimeError" not in data["response"]
 
 
 class TestDeleteThread:
@@ -483,19 +517,20 @@ class TestStreamFinalAnswer:
     ) -> None:
         """A custom-stream token carrying an LLM error is forwarded as SSE.
 
-        The nodes emit error text through the same custom stream as real
-        tokens (see ``test_streams_error_text_on_llm_failure``); this guards
-        the route half of the chain — the regression was that errors were
-        persisted to state but never streamed, leaving the assistant message
-        empty on provider failure.
+        The nodes emit a *generic* error message through the same custom
+        stream as real tokens (see ``test_streams_error_text_on_llm_failure``);
+        this guards the route half of the chain — the regression was that
+        errors were persisted to state but never streamed, leaving the
+        assistant message empty on provider failure.
         """
         from unittest.mock import AsyncMock
 
         mock_agent = AsyncMock()
 
+        error_text = "抱歉，当前回答生成失败，请稍后重试。"
         async def _astream(*args, **kwargs):
-            yield (), "custom", {"type": "token", "content": "LLM call failed: API down"}
-            yield (), "updates", {"generate_final": {"final_response": "LLM call failed: API down"}}
+            yield (), "custom", {"type": "token", "content": error_text}
+            yield (), "updates", {"generate_final": {"final_response": error_text}}
 
         mock_agent.astream = _astream
         mock_agent.aget_state.return_value = None
@@ -511,4 +546,33 @@ class TestStreamFinalAnswer:
         )
         assert response.status_code == 200
         assert '"type": "token"' in response.text
-        assert "LLM call failed: API down" in response.text
+        assert error_text in response.text
+
+    @pytest.mark.asyncio
+    async def test_stream_outer_error_does_not_leak_internal_exception(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """An exception thrown while iterating the graph stream yields a generic
+        SSE error event — never the internal exception text."""
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("secret-db-url")
+            yield  # pragma: no cover
+
+        mock_agent.astream = _boom
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={"message": "hi"},
+        )
+        assert response.status_code == 200
+        assert '"type": "error"' in response.text
+        assert "secret-db-url" not in response.text
