@@ -4,12 +4,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from langgraph.types import Command
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
     _messages_to_dicts,
     _to_openai_tools,
+    _truncate_tool_content,
+    _window_messages,
 )
 from agent.state import AgentState
 
@@ -275,10 +277,11 @@ class TestCallLLMNode:
 
         await mod.call_llm_node(_make_state([HumanMessage(content="hi")]), tools=[])
 
-        assert any(
-            e.get("type") == "token" and "LLM call failed" in e.get("content", "")
-            for e in emitted
-        )
+        error_tokens = [e for e in emitted if e.get("type") == "token"]
+        assert error_tokens, "the error must be streamed as a token"
+        # The exception text must not reach the client — only a generic
+        # user-facing message is streamed.
+        assert all("API down" not in e.get("content", "") for e in error_tokens)
 
 
 class TestGenerateFinalNode:
@@ -356,6 +359,100 @@ class TestGenerateFinalNode:
             e.get("type") == "token" and "生成回复时出现错误" in e.get("content", "")
             for e in emitted
         )
+        # The exception text stays server-side.
+        assert "synthesis down" not in result["final_response"]
+
+    @pytest.mark.asyncio
+    async def test_harvest_parses_envelope_before_truncating(self, monkeypatch) -> None:
+        """A large JSON-envelope tool result still yields its clean display text.
+
+        Regression: the harvest loop used to truncate the raw tool content to
+        800 chars *before* json.loads.  Search tools return a
+        ``{"display", "sources"}`` envelope whose ``sources`` alone exceeds
+        the cap, so truncate-first corrupted the JSON and the LLM received
+        truncated raw JSON instead of the display text — exactly the large
+        results the truncation exists for.
+        """
+        import json
+
+        from tests._fake_llm import text_stream
+
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        envelope = json.dumps(
+            {
+                "display": "CLEAN-DISPLAY-TEXT",
+                "sources": [{"snippet": "y" * 900}],  # pushes raw over the cap
+            },
+            ensure_ascii=False,
+        )
+        assert len(envelope) > mod._MAX_TOOL_CONTENT_CHARS
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="ask"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "c1", "name": "search_memories_tool",
+                         "args": {"query": "x"}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(content=envelope, tool_call_id="c1"),
+            ],
+        )
+        result = await mod.generate_final_node(state)
+        system = next(p for p in result["final_prompt"] if p["role"] == "system")
+        assert "CLEAN-DISPLAY-TEXT" in system["content"]
+        # Neither the truncation marker nor raw truncated JSON reached the LLM.
+        assert "…[truncated]" not in system["content"]
+        assert "snippet" not in system["content"]
+
+    @pytest.mark.asyncio
+    async def test_harvest_windows_tool_results(self, monkeypatch) -> None:
+        """The synthesis prompt harvests only the recent window of ToolMessages.
+
+        Regression: the harvest loop walked the *full* message history even
+        though the role loop below was windowed, so a long thread resubmitted
+        every tool result from every turn into each synthesis prompt.
+        """
+        from tests._fake_llm import text_stream
+
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        def _tool_msg(tool_call_id: str, content: str) -> ToolMessage:
+            return ToolMessage(content=content, tool_call_id=tool_call_id)
+
+        messages: list = []
+        # An old turn's tool result, then enough filler to push it out of the
+        # 12-message window, then the current turn's tool result.
+        messages += [
+            AIMessage(content="", tool_calls=[
+                {"id": "old", "name": "search_memories_tool",
+                 "args": {"query": "x"}, "type": "tool_call"}]),
+            _tool_msg("old", "OLD-MEMORY-RESULT"),
+        ]
+        messages += [HumanMessage(content=f"filler {i}") for i in range(14)]
+        messages += [
+            HumanMessage(content="current question"),
+            AIMessage(content="", tool_calls=[
+                {"id": "new", "name": "search_memories_tool",
+                 "args": {"query": "y"}, "type": "tool_call"}]),
+            _tool_msg("new", "RECENT-MEMORY-RESULT"),
+        ]
+
+        result = await mod.generate_final_node(_make_state(messages=messages))
+        system = next(p for p in result["final_prompt"] if p["role"] == "system")
+        assert "RECENT-MEMORY-RESULT" in system["content"]
+        assert "OLD-MEMORY-RESULT" not in system["content"]
 
     @pytest.mark.asyncio
     async def test_no_tools_produces_prompt(self) -> None:
@@ -708,3 +805,103 @@ class TestCheckConflictNode:
         result = await check_conflict_node(state)
         assert isinstance(result, Command)
         assert result.goto == "call_llm"
+
+
+class TestContextBounding:
+    """Windowed history + tool-content truncation bound the LLM context."""
+
+    def test_window_keeps_most_recent_messages(self) -> None:
+        messages = [HumanMessage(content=f"m{i}") for i in range(20)]
+        windowed = _window_messages(messages, max_messages=5)
+        assert len(windowed) == 5
+        # The oldest messages are dropped; the tail is kept.
+        assert windowed[0].content == "m15"
+        assert windowed[-1].content == "m19"
+
+    def test_window_pins_system_prompt(self) -> None:
+        messages = [SystemMessage(content="SYS")] + [
+            HumanMessage(content=f"m{i}") for i in range(20)
+        ]
+        windowed = _window_messages(messages, max_messages=5)
+        assert windowed[0].content == "SYS"
+        assert len(windowed) == 6  # pinned system + 5 recent
+        assert windowed[-1].content == "m19"
+
+    def test_window_passthrough_when_within_budget(self) -> None:
+        messages = [HumanMessage(content="a"), HumanMessage(content="b")]
+        assert _window_messages(messages) is messages
+
+    def test_truncate_caps_long_tool_content(self) -> None:
+        truncated = _truncate_tool_content("x" * 2000)
+        assert truncated.endswith("…[truncated]")
+        # 800 chars + "\n" + marker
+        assert len(truncated) == 800 + 1 + len("…[truncated]")
+
+    def test_truncate_leaves_short_content_untouched(self) -> None:
+        assert _truncate_tool_content("short") == "short"
+
+    def test_messages_to_dicts_truncates_tool_content(self) -> None:
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool",
+                     "args": {"query": "x"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="y" * 5000, tool_call_id="c1"),
+        ])
+        tool_msg = dicts[1]
+        assert "…[truncated]" in tool_msg["content"]
+        assert len(tool_msg["content"]) == 800 + 1 + len("…[truncated]")
+
+    @pytest.mark.asyncio
+    async def test_call_llm_sends_windowed_history(self, monkeypatch) -> None:
+        """Long history is windowed (system + most recent 12) before the LLM."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from agent.tools import ALL_TOOLS
+
+        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        await mod.call_llm_node(_make_state(history), tools=ALL_TOOLS)
+
+        sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
+        assert len(sent) == 1 + 12  # system prompt + windowed tail
+        assert sent[0]["role"] == "system"
+        assert sent[-1]["content"] == "old message 29"
+
+    @pytest.mark.asyncio
+    async def test_generate_final_windows_history(self, monkeypatch) -> None:
+        """The synthesis prompt carries a windowed history, not all of it."""
+        from tests._fake_llm import text_stream
+
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="search"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "c1", "name": "s",
+                                 "args": {}, "type": "tool_call"}],
+                ),
+                ToolMessage(content="result", tool_call_id="c1"),
+            ]
+            + [HumanMessage(content=f"m{i}") for i in range(28)],
+        )
+
+        result = await mod.generate_final_node(state)
+        prompt = result["final_prompt"]
+        history_msgs = [p for p in prompt if p["role"] in ("user", "assistant")]
+        assert len(history_msgs) <= 12
+        assert history_msgs[-1]["content"] == "m27"

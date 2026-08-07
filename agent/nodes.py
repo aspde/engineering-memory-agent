@@ -155,6 +155,10 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
                     parts.append(str(block.text))  # type: ignore[union-attr]
             content = " ".join(parts)
 
+        # 3. Bound tool-result size — full search output is too much context.
+        if role == "tool":
+            content = _truncate_tool_content(content)
+
         entry: dict[str, object] = {"role": role, "content": content or ""}
 
         # 3. Preserve tool_calls on assistant messages (OpenAI API requirement)
@@ -207,6 +211,43 @@ def _has_tool_results_this_turn(messages: list[BaseMessage]) -> bool:
     return False
 
 
+# ── Context bounding ───────────────────────────────────────────────
+# A long-lived thread must not resend unbounded history plus every full
+# ToolMessage on each turn.  The window caps how many recent messages reach
+# the LLM, and tool-result content is truncated per message.
+_MAX_CONTEXT_MESSAGES = 12  # most recent (non-system) messages kept
+_MAX_TOOL_CONTENT_CHARS = 800  # per-ToolMessage content cap
+
+
+def _window_messages(
+    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+) -> list[BaseMessage]:
+    """Keep the *max_messages* most recent messages for the LLM context.
+
+    System prompts are pinned to the front; anything older than the window
+    is dropped.  Only what gets *sent to the LLM* is windowed — nodes that
+    inspect the full state (plain-chat shortcut, approval/conflict gates)
+    use the raw list, so routing decisions are unaffected.
+    """
+    if len(messages) <= max_messages:
+        return messages
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    rest = [m for m in messages if not isinstance(m, SystemMessage)]
+    return system + rest[-max_messages:]
+
+
+def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
+    """Cap a ToolMessage's content before it is resent to the LLM.
+
+    Search/retrieval results can be thousands of characters; the model only
+    needs the relevant head.  The truncation marker keeps the model aware the
+    result was longer than shown.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "\n…[truncated]"
+
+
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
@@ -225,9 +266,11 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     """
     provider = get_llm_provider()
 
-    # Prepend system prompt if this is the first call
+    # Prepend system prompt if this is the first call, then bound the history
+    # sent to the LLM (recent window + pinned system prompt).
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
+    messages = _window_messages(messages)
     if not has_system:
         messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
 
@@ -249,11 +292,12 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
                 tool_calls = event.get("tool_calls")
     except Exception as exc:
         logger.exception("LLM call failed in call_llm_node")
-        # Stream the error text: it becomes this turn's final_response (the
-        # plain-chat shortcut in generate_final_node reuses it), and the SSE
-        # path only renders what the nodes stream — an unstreamed error
-        # would leave the client's assistant message empty.
-        error_text = f"LLM call failed: {exc}"
+        # Stream a generic error text: it becomes this turn's final_response
+        # (the plain-chat shortcut in generate_final_node reuses it), and the
+        # SSE path only renders what the nodes stream — an unstreamed error
+        # would leave the client's assistant message empty.  Provider details
+        # stay in the log and state.error; the client sees no exception text.
+        error_text = "抱歉，当前回答生成失败，请稍后重试。"
         writer({"type": "token", "content": error_text})
         return {
             "error": str(exc),
@@ -314,9 +358,12 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         )
         return {"final_prompt": None, "final_response": str(last.content)}
 
-    # ── Harvest context from ToolMessages in conversation history ──
+    # ── Harvest context from ToolMessages in the recent conversation ──
+    # Both this loop and the role loop below walk the *windowed* history so
+    # a long thread doesn't resend unbounded tool results into the synthesis
+    # prompt on every turn.
     context_parts: list[str] = []
-    for m in state["messages"]:
+    for m in _window_messages(state["messages"]):
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
@@ -327,16 +374,21 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         raw = str(m.content) if m.content else ""
         if not raw.strip():
             continue
-        # If the tool returned a JSON envelope with a "display" field,
-        # use only the display text for LLM context (hiding structured metadata).
+        # Parse the full envelope *before* truncating: tools return a
+        # {"display": ..., "sources": [...]} JSON envelope, and the sources
+        # array alone can exceed the truncation cap — cutting the raw text
+        # first would corrupt the JSON and fall back to sending the LLM
+        # truncated raw JSON instead of the clean display text.
+        content = raw
         try:
             parsed = json.loads(raw)
             if isinstance(parsed, dict) and "display" in parsed:
                 content = str(parsed["display"])
-            else:
-                content = raw
         except (json.JSONDecodeError, TypeError):
             content = raw
+        content = _truncate_tool_content(content)
+        if not content.strip():
+            continue
         context_parts.append(f"### {tool_name}\n{content}")
 
     context_str = "\n\n".join(context_parts) if context_parts else ""
@@ -357,8 +409,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         {"role": "system", "content": system_content},
     ]
 
-    # Include the conversation history (skip tool & system messages)
-    for m in state["messages"]:
+    # Include the recent conversation history (skip tool & system messages),
+    # windowed so a long thread doesn't resend unbounded history every turn.
+    for m in _window_messages(state["messages"]):
         if isinstance(m, (ToolMessage, SystemMessage)):
             continue
         role = "assistant" if isinstance(m, AIMessage) else "user"
@@ -379,11 +432,13 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
             response_parts.append(token)
             writer({"type": "token", "content": token})
         response = "".join(response_parts)
-    except Exception as exc:
+    except Exception:
         logger.exception("Final answer LLM call failed")
-        response = f"抱歉，生成回复时出现错误: {exc}"
-        # Stream it so the client isn't left with an empty assistant message —
-        # the answer's tokens normally arrive via the custom stream.
+        # Generic text only — the exception details stay in the log.  The
+        # message must still be streamed so the client isn't left with an
+        # empty assistant message (the answer's tokens normally arrive via
+        # the custom stream).
+        response = "抱歉，生成回复时出现错误，请稍后重试。"
         writer({"type": "token", "content": response})
 
     aimessage = AIMessage(content=response)
