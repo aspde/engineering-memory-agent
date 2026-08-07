@@ -225,3 +225,226 @@ class TestAnthropicChatJson:
         # system message promoted to top-level param; envelope wraps the schema
         assert captured["system"] == "sys"
         assert captured["tools"][0]["input_schema"]["properties"]["result"] == {"type": "array"}  # type: ignore[index]
+
+
+class TestAnthropicChatRaw:
+    """Anthropic has no OpenAI-style tool/function-calling format: chat_raw
+    must translate OpenAI-format tools and messages into Anthropic's
+    tool_use / tool_result shapes, and surface tool_use blocks back as
+    OpenAI-style tool_calls."""
+
+    @pytest.mark.asyncio
+    async def test_translates_tools_and_tool_messages(self, monkeypatch) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _ToolUseBlock:
+            type = "tool_use"
+            id = "toolu_1"
+            name = "search_memories_tool"
+            input = {"query": "pgvector"}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [_ToolUseBlock()]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+
+        openai_tools: list[dict[str, object]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_memories_tool",
+                    "description": "Search memories",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                },
+            }
+        ]
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_memories_tool",
+                            "arguments": '{"query": "pgvector"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": "Found 2 relevant memories",
+                "tool_call_id": "call_1",
+            },
+        ]
+
+        result = await provider.chat_raw(messages, tools=openai_tools)
+
+        # OpenAI schema → Anthropic input_schema
+        assert captured["tools"] == [
+            {
+                "name": "search_memories_tool",
+                "description": "Search memories",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            }
+        ]
+        # system promoted to top-level param; messages converted
+        assert captured["system"] == "sys"
+        assert captured["messages"][0] == {"role": "user", "content": "hi"}
+        assert captured["messages"][1]["role"] == "assistant"
+        assert captured["messages"][1]["content"][0] == {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "search_memories_tool",
+            "input": {"query": "pgvector"},
+        }
+        assert captured["messages"][2] == {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_1",
+                    "content": "Found 2 relevant memories",
+                }
+            ],
+        }
+        # tool_use block surfaced as OpenAI-style tool_calls for the agent
+        assert result["content"] == ""
+        assert result["tool_calls"] == [
+            {"id": "toolu_1", "name": "search_memories_tool", "args": {"query": "pgvector"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_results_coalesced_into_single_user_message(
+        self, monkeypatch
+    ) -> None:
+        """Two tool results for one assistant turn (parallel tool calls) must
+        be sent as a single user message with both tool_result blocks —
+        Anthropic rejects consecutive same-role messages."""
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = []
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+
+        messages: list[dict[str, object]] = [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_memories_tool",
+                            "arguments": '{"query": "a"}',
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "search_memories_tool",
+                            "arguments": '{"query": "b"}',
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "content": "Result A", "tool_call_id": "call_1"},
+            {"role": "tool", "content": "Result B", "tool_call_id": "call_2"},
+        ]
+
+        await provider.chat_raw(messages)
+
+        # user + assistant turn + one coalesced user result message
+        assert len(captured["messages"]) == 3
+        assert captured["messages"][2] == {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "Result A"},
+                {"type": "tool_result", "tool_use_id": "call_2", "content": "Result B"},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_plain_messages_without_tools(self, monkeypatch) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [SimpleNamespace(type="text", text="hello back")]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+        result = await provider.chat_raw(
+            [{"role": "user", "content": "hello"}]
+        )
+        assert result["content"] == "hello back"
+        assert "tool_calls" not in result
+        assert captured["messages"] == [{"role": "user", "content": "hello"}]
+        assert "tools" not in captured
+
+    def test_to_anthropic_tools_passes_through_anthropic_shape(self) -> None:
+        from backend.service.llm_service import AnthropicProvider
+
+        already = [
+            {"name": "t", "description": "d", "input_schema": {"type": "object"}}
+        ]
+        assert AnthropicProvider._to_anthropic_tools(already) == already

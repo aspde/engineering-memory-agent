@@ -209,11 +209,11 @@ class AnthropicProvider(LLMProvider):
         create_kwargs: dict[str, object] = {
             "model": self._model,
             "system": system,
-            "messages": user_messages,
+            "messages": self._to_anthropic_messages(user_messages),
             **kwargs,
         }
         if tools:
-            create_kwargs["tools"] = tools
+            create_kwargs["tools"] = self._to_anthropic_tools(tools)
 
         async def _op() -> Any:
             return await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
@@ -317,6 +317,112 @@ class AnthropicProvider(LLMProvider):
                     block.input.get("result", block.input), ensure_ascii=False
                 )
         return ""
+
+    @staticmethod
+    def _to_anthropic_tools(tools: list[dict[str, object]]) -> list[dict[str, object]]:
+        """Convert OpenAI-format tool schemas to Anthropic's ``input_schema`` shape.
+
+        The agent layer emits OpenAI function-calling schemas
+        (``{"type": "function", "function": {"name", "description",
+        "parameters"}}``); Anthropic's Messages API wants
+        ``{"name", "description", "input_schema"}``.  Schemas that already
+        use the ``name``/``input_schema`` shape are passed through.
+        """
+        converted: list[dict[str, object]] = []
+        for tool in tools:
+            fn = tool.get("function") if isinstance(tool, dict) else None
+            if isinstance(fn, dict):
+                converted.append(
+                    {
+                        "name": str(fn.get("name", "")),
+                        "description": str(fn.get("description", "")),
+                        "input_schema": fn.get("parameters")
+                        or {"type": "object", "properties": {}},
+                    }
+                )
+            else:
+                converted.append(tool)
+        return converted
+
+    @staticmethod
+    def _to_anthropic_messages(
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert OpenAI-compatible message dicts to Anthropic's message shape.
+
+        Anthropic has no ``role: "tool"`` and no ``tool_calls`` field: tool
+        results are delivered as ``tool_result`` content blocks inside a
+        ``user`` message, and a tool request is a ``tool_use`` content block
+        on the assistant message.  Both the OpenAI wire shape produced by
+        ``_messages_to_dicts`` and LangChain's native ``tool_call`` dicts are
+        accepted for the assistant ``tool_calls`` list.
+
+        Consecutive ``tool`` messages (parallel tool calls executed in one
+        assistant turn) are coalesced into a single ``user`` message carrying
+        all their ``tool_result`` blocks — Anthropic rejects consecutive
+        same-role messages and expects one combined result message per turn.
+        """
+        converted: list[dict[str, Any]] = []
+        pending_results: list[dict[str, Any]] = []
+
+        def _flush_results() -> None:
+            if pending_results:
+                # Copy the list: appending the live object then clearing it
+                # would empty the already-emitted message's content blocks.
+                converted.append({"role": "user", "content": list(pending_results)})
+                pending_results.clear()
+
+        for msg in messages:
+            role = msg.get("role")
+            content = str(msg.get("content", "") or "")
+
+            if role == "tool":
+                pending_results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": str(msg.get("tool_call_id", "")),
+                        "content": content,
+                    }
+                )
+                continue
+
+            _flush_results()
+
+            if role == "assistant" and msg.get("tool_calls"):
+                blocks: list[dict[str, Any]] = []
+                if content:
+                    blocks.append({"type": "text", "text": content})
+                for tc in msg["tool_calls"]:
+                    if not isinstance(tc, dict):
+                        continue
+                    if isinstance(tc.get("function"), dict):
+                        # OpenAI wire shape: {"id", "function": {"name", "arguments"}}
+                        fn = tc["function"]
+                        name = str(fn.get("name", ""))
+                        args_raw = fn.get("arguments")
+                        if isinstance(args_raw, str):
+                            try:
+                                args: Any = json.loads(args_raw)
+                            except (json.JSONDecodeError, TypeError):
+                                args = {}
+                        else:
+                            args = args_raw or {}
+                        tool_id = str(tc.get("id", ""))
+                    else:
+                        # LangChain tool_call shape: {"id", "name", "args"}
+                        name = str(tc.get("name", ""))
+                        args = tc.get("args") or {}
+                        tool_id = str(tc.get("id", ""))
+                    blocks.append(
+                        {"type": "tool_use", "id": tool_id, "name": name, "input": args}
+                    )
+                converted.append({"role": "assistant", "content": blocks})
+                continue
+
+            converted.append({"role": role, "content": content})
+
+        _flush_results()
+        return converted
 
     @staticmethod
     def _split_messages(
