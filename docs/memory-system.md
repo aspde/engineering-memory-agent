@@ -12,7 +12,7 @@ Write Path:
 
 Read Path:
   Query → embed_query() → vector_search() → rerank() → assemble() → LLM
-  Query → query_memories() → decay_weighted_search → update_decay() → rerank
+  Query → query_memories() → decay_weighted_search → update_decay_batch() → rerank
 ```
 
 每步一个函数，没有 class wrapper，没有 LangChain retriever/chain。
@@ -38,7 +38,7 @@ Read Path:
 | `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | 默认 |
 | `rerank_llm()` | 现有 LLMProvider | API 调用费用 | 需精细语义判断时 |
 
-**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 `max(dense similarity, sparse jaccard)` 直接排序。eval 报告（`docs/interview/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
+**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`docs/interview/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
 
 ### 2. 三阶段记忆提取
 
@@ -77,11 +77,11 @@ extract_entities(content) ─┘
 
 ### 4. 艾宾浩斯遗忘衰减
 
-每次检索记忆时更新衰减因子：
+衰减因子是一条**时间连续曲线**，检索时实时计算，不依赖存储快照：
 
 ```
 R = e^(-t / S)
-t = 距上次召回的小时数
+t = 距上次召回的小时数（now() - recalled_at，实时）
 S = 1 + recall_count × 2
 ```
 
@@ -89,7 +89,7 @@ S = 1 + recall_count × 2
 - 频繁召回的记忆衰减慢
 - 长期未召回的记忆自然沉底
 
-`search_memories(query_vector)` 用 `相似度 × decay_factor` 加权排序。`query_memories(query)` 封装了完整管道：embed → 衰减加权搜索 → rerank（默认 cross-encoder，可选 llm）→ 更新 decay 并返回。
+`search_memories(query_vector)` 在 SQL 里用 `recalled_at`/`recall_count` 实时算 `decay_factor`，乘以相似度加权排序——排名用的是「当前时刻」的衰减，而非上次召回时的快照值（快照会在两次召回之间冻结记忆的排名）。存储列 `decay_factor` 仍保留（由 `update_decay_batch` 写入，供展示/兼容），排序与返回都用实时值。`query_memories(query)` 封装完整管道：embed → 衰减加权搜索 → rerank（默认 cross-encoder，可选 llm）→ `update_decay_batch()`（单条原子 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；`recalled_at IS NULL` 的从未召回记忆也会记首次召回，因子为 1.0）→ 返回。
 
 ### 5. Chunk 策略
 
@@ -119,7 +119,7 @@ S = 1 + recall_count × 2
 | chunk_index | INT | 在原文档中的顺序 |
 | created_at | TIMESTAMPTZ | now() |
 
-索引：`ivfflat` on `embedding vector_cosine_ops`
+索引：`hnsw` on `embedding vector_cosine_ops`（pgvector ≥ 0.5；HNSW 无聚类质心依赖，小库召回稳定——替代了早期 `ivfflat lists=100` 在小数据量下聚类不稳的问题）
 
 ### memories — 结构化长期记忆
 
@@ -131,7 +131,7 @@ S = 1 + recall_count × 2
 | entities | JSONB | `[{name, type}]` |
 | relations | JSONB | `[{from, to, type}]` |
 | embedding | vector(N) | 摘要向量，维度同 embedding 配置 |
-| decay_factor | FLOAT | 艾宾浩斯衰减因子，默认 1.0 |
+| decay_factor | FLOAT | 艾宾浩斯衰减因子缓存快照（检索时实时计算，见 §4） |
 | recalled_at | TIMESTAMPTZ | 最后一次被检索的时间 |
 | recall_count | INT | 累计检索次数，默认 0 |
 | meta | JSONB | 冲突标记、补充关联等 |
@@ -139,7 +139,7 @@ S = 1 + recall_count × 2
 
 ### 维度迁移（切换 embedding 模型）
 
-`embedding` 列维度由 `config.embedding.dimension` 决定（模型名 → 已知维度映射，见 `backend/shared/config.py`），不再硬编码 1024。启动时 `init_db()` 会检测列的实际维度；与配置不一致时自动迁移：清空 `embedding` 列 → `ALTER COLUMN ... TYPE vector(N)` → 重建 ivfflat 索引。
+`embedding` 列维度由 `config.embedding.dimension` 决定（模型名 → 已知维度映射，见 `backend/shared/config.py`），不再硬编码 1024。启动时 `init_db()` 会检测列的实际维度；与配置不一致时自动迁移：清空 `embedding` 列 → `ALTER COLUMN ... TYPE vector(N)` → 重建 hnsw 索引。旧库的 ivfflat 索引也会在 `init_db()` 里被一次性替换为 hnsw。
 
 pgvector 的向量只能放进「维度 ≤ 自身」的列，改大改小都要求列先为空；填充/截断会产生与文本不符的垃圾向量，所以迁移选择清空。向量是派生数据，清空后需从存储文本重嵌：
 

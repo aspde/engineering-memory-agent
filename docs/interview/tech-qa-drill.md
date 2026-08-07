@@ -125,13 +125,13 @@ extract_entities(content) ─┘
 
 **答题要点**：
 1. 表结构：`embedding vector(1024)`（BGE-M3 输出 1024 维）
-2. 索引：`ivfflat` on `embedding vector_cosine_ops`
+2. 索引：`hnsw` on `embedding vector_cosine_ops`（pgvector ≥ 0.5）
 3. 相似度计算：`1 - (embedding <=> :vec ::vector)`，`<=>` 是 cosine distance，1 减一下变成相似度
-4. 加权排序：`(1 - cosine_distance) * decay_factor DESC`
+4. 加权排序：`相似度 × 实时 decay_factor DESC`（decay_factor 由 `recalled_at`/`recall_count` 在 SQL 里现算，不读存储快照）
 
 **追问预案**：
-- Q：ivfflat 和 HNSW 怎么选？→ A：ivfflat 建索引快、内存小，万级数据够用。HNSW 召回质量略高但建索引慢、内存大。10 万级以上我会切 HNSW
-- Q：ivfflat 的 lists 参数怎么设？→ A：经验值是 `sqrt(rows)`，比如 1 万条数据 lists=100。需要在建索引时调
+- Q：HNSW 还是 ivfflat？→ A：当前用 hnsw。早期用 ivfflat 时 lists 参数依赖数据量，小库（< 千条）下 lists=100 把探针散布到大量空聚类，召回差；hnsw 无聚类依赖、小库也稳，参数用默认。数据量到百万级才重新评估专用向量库。
+- Q：ivfflat 的 lists 参数怎么设？→ A：现在已经不用 ivfflat（历史教训见记忆 seed-010）。hnsw 的参数（m / ef_construction）用默认值即可，不随数据量调。
 - Q：为什么不用乘积量化（PQ）？→ A：PQ 是有损压缩，召回精度下降。当前数据量内存够用，不需要压缩
 
 ### Q3.2 向量检索的 SQL 长什么样？
@@ -322,7 +322,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 | 问题 | 答案要点 |
 |------|---------|
 | BGE-M3 维度？ | 1024 |
-| pgvector 索引？ | ivfflat + cosine_ops |
+| pgvector 索引？ | hnsw + cosine_ops |
 | 衰减公式？ | R=e^(-t/S), S=1+recall×2 |
 | 四级阈值？ | 0.92合并 / 0.75冲突 / 0.60关联 / <0.60新增 |
 | Agent 几个节点？ | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |

@@ -228,8 +228,8 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 | [metrics.py](../../tests/eval/metrics.py) | 6 个纯函数指标：Recall@K / Precision@K / HitRate@K / MRR / NDCG@K / MAP@K + `compute_all` |
 | [ground_truth.py](../../tests/eval/ground_truth.py) | 30 条标注集，5 类（技术决策/故障复盘/架构设计/代码实现/历史背景）× 6 条，含 difficulty 分级 |
 | [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 30 条种子记忆（EMA 自身工程史），每条 summary 含独特指纹 |
-| [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配（`is_relevant`/`relevance_mask`）+ retriever 适配（chunk/memory）+ 4 项一致性校验 |
-| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错 |
+| [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配（`is_relevant`/`relevance_mask`）+ 语义相关性通道（`semantic_relevance_mask`，embedding cosine≥0.80）+ retriever 适配（chunk/memory）+ 4 项一致性校验 |
+| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错；语义通道默认开启，per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
 | [report.py](../../tests/eval/report.py) | Markdown + JSON 报告，含 A/B delta 表 |
 | [run_eval.py](../../tests/eval/run_eval.py) | CLI：`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
 | [seed.py](../../tests/eval/seed.py) | CLI：`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
@@ -242,6 +242,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 3. **位置 ID 映射**：runner 把 retrieved 结果映射成 `[0,1,...,n-1]`，relevant 集为命中指纹的 index 集合，复用纯函数 metrics，零 I/O 耦合。
 4. **difficulty 分级**：easy（词重合）/medium（改写）/hard（概念问法），暴露向量质量短板。
 5. **A/B 对比内置**：`--compare` 跑 cross-encoder vs LLM rerank，输出 delta 表，量化"换 reranker 效果如何"。
+6. **语义通道默认开启**：relevance = 子串匹配 OR 目标 seed 摘要的 embedding cosine≥0.80，`--no-semantic-relevance` 回到纯词面基线。报告 overall 表暴露 `semantic_rescued`（词面 0 命中、靠语义救回的查询数），per-query 标 `✓/—/✗`，直接量化"语义检索质量"，避免 30 条查询全 recall=1.000 无法判别。每周由 `.github/workflows/eval.yml` cron 自动跑。
 
 **跑出真实数字的流程**：
 ```bash

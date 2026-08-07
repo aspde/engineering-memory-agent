@@ -103,7 +103,7 @@ WEBHOOK_CI_SECRET=...
 WEBHOOK_FEISHU_SECRET=...
 ```
 
-请求签名验证通过 HMAC-SHA256 header（标准 webhook 模式），验证失败返回 401。受理后**请求路径只做纯同步校验与转换**（validate → normalize → 写 `received` 投递日志），立即返回 `202` + `delivery_id`；耗时的完整提取管线（LLM 摘要/实体/关系 + embedding）由后台任务异步执行，结果回写到投递日志。进程内任务重启会丢失（与 checkpointer 的 InMemorySaver 同级权衡），并发上限为 4 个在飞提取，超出返回 `503`。
+请求签名验证通过 HMAC-SHA256 header（标准 webhook 模式），验证失败返回 401。生产环境（`APP_ENV=production`）下，未配置 secret 的 source 一律拒绝（fail-closed，防止未认证 payload 进入提取管线）；开发/测试环境为本地联调允许无 secret 放行。受理后**请求路径只做纯同步校验与转换**（validate → normalize → 写 `received` 投递日志），立即返回 `202` + `delivery_id`；耗时的完整提取管线（LLM 摘要/实体/关系 + embedding）由后台任务异步执行，结果回写到投递日志。进程内任务重启会丢失（与 checkpointer 的 InMemorySaver 同级权衡），并发上限为 4 个在飞提取，超出返回 `503`。
 
 ### 新增 webhook_logs 表
 
