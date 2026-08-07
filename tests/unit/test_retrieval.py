@@ -440,3 +440,90 @@ class TestWriteChunksIdempotency:
         assert insert_params["idx_0"] == 0
         assert insert_params["hash_0"] == mod._content_hash(chunks[0])
         assert "ON CONFLICT (document_id, content_hash) DO NOTHING" in str(insert_sql)
+
+
+class TestDocumentIdTraceability:
+    """Chunk retrieval carries ``document_id`` through to result metadata.
+
+    Fix for the audit finding: sources' ``document_id`` was always "" because
+    vector/sparse search never selected the column and the rerank tail dropped
+    it.  Both the rerank path and the skip_rerank fallback must attach it, and
+    rows without the key (legacy mocks / pre-migration data) must not gain a
+    ``document_id: None`` entry that serializes to the string "None".
+    """
+
+    def _patch_sources(self, monkeypatch, dense, sparse):
+        from backend.service import retrieval as mod
+
+        monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
+        monkeypatch.setattr(mod, "vector_search", AsyncMock(return_value=dense))
+        monkeypatch.setattr(mod, "sparse_search", AsyncMock(return_value=sparse))
+
+    @pytest.mark.asyncio
+    async def test_rerank_path_attaches_document_id(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "document_id": "a.py", "content": "c1",
+             "meta": {"lang": "py"}, "similarity": 0.8},
+        ]
+        self._patch_sources(monkeypatch, dense, [])
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(return_value=[(0, 0.9)]),
+        )
+
+        results = await mod.retrieve_hybrid("query", top_k=5)
+
+        assert len(results) == 1
+        assert results[0].metadata["document_id"] == "a.py"
+        # Original meta keys are preserved alongside the column value.
+        assert results[0].metadata["lang"] == "py"
+
+    @pytest.mark.asyncio
+    async def test_skip_rerank_path_attaches_document_id(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "document_id": "a.py", "content": "c1",
+             "meta": {}, "similarity": 0.8},
+        ]
+        self._patch_sources(monkeypatch, dense, [])
+
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=True)
+
+        assert len(results) == 1
+        assert results[0].metadata["document_id"] == "a.py"
+
+    @pytest.mark.asyncio
+    async def test_sparse_only_source_attaches_document_id(self, monkeypatch) -> None:
+        """A chunk found only via sparse search still carries its document."""
+        from backend.service import retrieval as mod
+
+        sparse = [
+            {"id": "c1", "document_id": "b.md", "content": "c1",
+             "meta": {}, "rank": 0.9},
+        ]
+        self._patch_sources(monkeypatch, [], sparse)
+
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=True)
+
+        assert len(results) == 1
+        assert results[0].metadata["document_id"] == "b.md"
+
+    @pytest.mark.asyncio
+    async def test_missing_document_id_keeps_metadata_clean(self, monkeypatch) -> None:
+        """Rows without a ``document_id`` key don't gain a None entry."""
+        from backend.service import retrieval as mod
+
+        dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8}]
+        self._patch_sources(monkeypatch, dense, [])
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(return_value=[(0, 0.9)]),
+        )
+
+        results = await mod.retrieve_hybrid("query", top_k=5)
+
+        assert len(results) == 1
+        assert "document_id" not in results[0].metadata

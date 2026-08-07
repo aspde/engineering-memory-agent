@@ -123,10 +123,14 @@ async def retrieve_chunks_tool(
     lines = [f"Found {len(results)} relevant chunks:"]
     sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
-        lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
         meta = r.metadata or {}
+        doc = meta.get("document_id") or ""
+        if doc:
+            lines.append(f"[{i + 1}] (relevance: {r.score:.2f}, document: {doc}) {r.content}")
+        else:
+            lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
         sources.append({
-            "document_id": str(meta.get("document_id", "")),
+            "document_id": str(doc),
             "chunk_index": meta.get("chunk_index", i),
             "type": "chunk",
             "snippet": r.content[:200],
@@ -174,10 +178,14 @@ async def query_rewrite_and_search_tool(
     lines = [f"Found {len(results)} relevant chunks (query rewritten):"]
     sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
-        lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
         meta = r.metadata or {}
+        doc = meta.get("document_id") or ""
+        if doc:
+            lines.append(f"[{i + 1}] (relevance: {r.score:.2f}, document: {doc}) {r.content}")
+        else:
+            lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
         sources.append({
-            "document_id": str(meta.get("document_id", "")),
+            "document_id": str(doc),
             "chunk_index": meta.get("chunk_index", i),
             "type": "chunk",
             "snippet": r.content[:200],

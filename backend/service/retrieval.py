@@ -199,7 +199,7 @@ async def vector_search(
         result = await session.execute(
             text(
                 f"""\
-                SELECT id, content, meta, chunk_index,
+                SELECT id, document_id, content, meta, chunk_index,
                        1 - (embedding <=> :vec ::vector) AS similarity
                 FROM chunks
                 WHERE 1 - (embedding <=> :vec ::vector) > :threshold
@@ -231,6 +231,22 @@ def assemble(results: list[RetrievalResult], max_items: int = 5) -> str:
     return "\n\n".join(lines)
 
 
+def _attach_document_id(row: dict[str, Any]) -> dict[str, Any]:
+    """Merge the chunk's ``document_id`` column into result metadata.
+
+    ``document_id`` is stored as a first-class column (not inside the
+    ``meta`` JSONB), so read paths must carry it through explicitly or
+    consumers (tools / API) see an empty source reference.  Rows without
+    the key (legacy mocks, pre-migration data) are left untouched so a
+    ``"document_id": None`` never leaks into serialized output.
+    """
+    meta = dict(row.get("meta") or {})
+    doc_id = row.get("document_id")
+    if doc_id is not None:
+        meta["document_id"] = str(doc_id)
+    return meta
+
+
 async def _rerank_and_filter(
     query: str,
     candidates: list[dict[str, Any]],
@@ -252,7 +268,7 @@ async def _rerank_and_filter(
         RetrievalResult(
             content=candidates[idx]["content"],
             score=score,
-            metadata=candidates[idx].get("meta") or {},
+            metadata=_attach_document_id(candidates[idx]),
         )
         for idx, score in ranked
         if score >= _RERANK_FLOOR
@@ -338,7 +354,7 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
         result = await session.execute(
             text(
                 """
-                SELECT id, content, meta, chunk_index
+                SELECT id, document_id, content, meta, chunk_index
                 FROM chunks
                 WHERE id = ANY(:ids)
                 """
@@ -411,7 +427,7 @@ async def retrieve_hybrid(
             RetrievalResult(
                 content=c["content"],
                 score=_fallback_score(c),
-                metadata=c.get("meta") or {},
+                metadata=_attach_document_id(c),
             )
             for c in candidates[:top_k]
         ]
