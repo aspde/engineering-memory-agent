@@ -193,6 +193,46 @@ class TestRunPatrol:
         assert len(patrol_id) == 36
         mock_agent.ainvoke.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_cancelled_patrol_is_marked_failed_and_propagates(self) -> None:
+        """A cancelled patrol persists 'failed', then re-raises the cancellation.
+
+        ``except Exception`` never sees CancelledError (BaseException), so a
+        cancelled patrol would otherwise leave its row stuck in 'running' and
+        the overlap guard would skip every future patrol of this type.
+        """
+        async def _cancel(*args, **kwargs):
+            raise asyncio.CancelledError
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = _cancel
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            with pytest.raises(asyncio.CancelledError):
+                await run_patrol(
+                    patrol_type="daily",
+                    trigger="cron",
+                    system_prompt="test prompt",
+                )
+
+        # The failed status must be persisted before the cancellation
+        # propagates — otherwise the row stays 'running'.
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls, "expected a patrol_logs UPDATE on cancellation"
+        assert update_calls[0].args[1]["status"] == "failed"
+        session.commit.assert_awaited()
+
 
 class TestMarkStalePatrols:
     """Startup sweep that re-marks 'running' rows from a previous process."""

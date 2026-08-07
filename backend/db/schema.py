@@ -19,15 +19,6 @@ from sqlalchemy import text
 from backend.db import get_engine
 from backend.shared.config import config
 
-# (table, ivfflat index) pairs whose ``embedding`` column tracks the
-# configured dimension.  Index names must match the CREATE INDEX statements
-# below — ``init_db`` drops and recreates them when the dimension changes.
-_EMBEDDING_TABLES: list[tuple[str, str]] = [
-    ("chunks", "idx_chunks_embedding"),
-    ("memories", "idx_memories_embedding"),
-    ("entities", "idx_entities_embedding"),
-]
-
 
 def _resize_statement(table: str, index: str, dimension: int) -> str:
     """ALTER *table*'s embedding column to ``vector(dimension)`` when it differs.

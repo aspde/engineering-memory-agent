@@ -249,9 +249,15 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
                 tool_calls = event.get("tool_calls")
     except Exception as exc:
         logger.exception("LLM call failed in call_llm_node")
+        # Stream the error text: it becomes this turn's final_response (the
+        # plain-chat shortcut in generate_final_node reuses it), and the SSE
+        # path only renders what the nodes stream — an unstreamed error
+        # would leave the client's assistant message empty.
+        error_text = f"LLM call failed: {exc}"
+        writer({"type": "token", "content": error_text})
         return {
             "error": str(exc),
-            "messages": [AIMessage(content=f"LLM call failed: {exc}")],
+            "messages": [AIMessage(content=error_text)],
         }
 
     content = "".join(content_parts)
@@ -285,8 +291,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     no ``tool_calls``, and no ToolMessage appeared since the latest
     HumanMessage, that output is already a complete answer and is returned
     directly — no second LLM call.  Only tool turns hit the LLM here
-    (once), so the response is persisted in the checkpointer state and the
-    API streaming layer reads it token-by-token.
+    (once), so the response is persisted in the checkpointer state and
+    streamed to the client live through the graph's ``custom`` stream
+    (``get_stream_writer``).
     """
     # ── Plain-chat shortcut ─────────────────────────────────────────
     # When call_llm_node's output is already a complete answer — the last
@@ -375,6 +382,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("Final answer LLM call failed")
         response = f"抱歉，生成回复时出现错误: {exc}"
+        # Stream it so the client isn't left with an empty assistant message —
+        # the answer's tokens normally arrive via the custom stream.
+        writer({"type": "token", "content": response})
 
     aimessage = AIMessage(content=response)
 

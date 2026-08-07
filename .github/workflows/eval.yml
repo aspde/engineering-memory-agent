@@ -48,8 +48,10 @@ jobs:
         run: |
           # requirements.txt pins the CPU torch variant (a platform wheel not
           # on PyPI) — install it from the pytorch index first so the pinned
-          # version resolves on Linux CI.
-          pip install "torch==2.13.0+cpu" --index-url https://download.pytorch.org/whl/cpu
+          # version resolves on Linux CI.  The version is read from
+          # requirements.txt (single source of truth) so a bump there can't
+          # silently diverge from this workflow.
+          pip install "$(grep -m1 '^torch==' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
       - name: Cache HuggingFace model weights

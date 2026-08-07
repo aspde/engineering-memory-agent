@@ -176,6 +176,7 @@ async def run_patrol(
     findings: dict | None = None
     status = "completed"
     error_msg: str | None = None
+    cancelled = False
 
     try:
         # Use a dedicated thread_id to isolate patrol from user conversations
@@ -224,6 +225,18 @@ async def run_patrol(
         logger.exception("Patrol %s (%s) failed", patrol_id, patrol_type)
         status = "failed"
         error_msg = str(exc)
+    except asyncio.CancelledError:
+        # Task cancelled (e.g. scheduler shutdown).  ``except Exception``
+        # doesn't catch this — CancelledError is a BaseException in 3.12 —
+        # so without this branch a cancelled patrol would leave its row
+        # stuck in 'running', and the overlap guard would skip every future
+        # patrol of this type until restart.  Persist the failed status
+        # below, then re-raise so the task ends as cancelled (not as a
+        # successful run).
+        cancelled = True
+        status = "failed"
+        error_msg = "cancelled mid-run"
+        logger.warning("Patrol %s (%s) cancelled mid-run", patrol_id, patrol_type)
 
     # ── Update log entry with results ──
     completed_at = datetime.now(timezone.utc)
@@ -247,7 +260,13 @@ async def run_patrol(
         )
         await session.commit()
 
-    if error_msg:
+    if cancelled:
+        logger.warning(
+            "Patrol %s cancelled after %.1fs — marked failed",
+            patrol_id,
+            (completed_at - started_at).total_seconds(),
+        )
+    elif error_msg:
         logger.error(
             "Patrol %s failed after %.1fs: %s",
             patrol_id,
@@ -266,6 +285,10 @@ async def run_patrol(
             (completed_at - started_at).total_seconds(),
             finding_count,
         )
+
+    if cancelled:
+        # Propagate the cancellation now that the failed status is persisted.
+        raise asyncio.CancelledError()
 
     return patrol_id
 

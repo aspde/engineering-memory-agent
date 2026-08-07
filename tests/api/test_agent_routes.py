@@ -476,3 +476,39 @@ class TestStreamFinalAnswer:
         chunks = [c async for c in _stream_final_answer(_Connected(), "hello world")]
         assert len(chunks) == 3  # "hell", "o wo", "rld"
         assert json.loads(chunks[0].split("data: ", 1)[1])["content"] == "hell"
+
+    @pytest.mark.asyncio
+    async def test_llm_error_token_reaches_sse_client(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A custom-stream token carrying an LLM error is forwarded as SSE.
+
+        The nodes emit error text through the same custom stream as real
+        tokens (see ``test_streams_error_text_on_llm_failure``); this guards
+        the route half of the chain — the regression was that errors were
+        persisted to state but never streamed, leaving the assistant message
+        empty on provider failure.
+        """
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+
+        async def _astream(*args, **kwargs):
+            yield (), "custom", {"type": "token", "content": "LLM call failed: API down"}
+            yield (), "updates", {"generate_final": {"final_response": "LLM call failed: API down"}}
+
+        mock_agent.astream = _astream
+        mock_agent.aget_state.return_value = None
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={"message": "hi"},
+        )
+        assert response.status_code == 200
+        assert '"type": "token"' in response.text
+        assert "LLM call failed: API down" in response.text

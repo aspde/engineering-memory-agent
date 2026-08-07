@@ -251,6 +251,35 @@ class TestCallLLMNode:
         assert result["error"] is not None
         assert "API down" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_streams_error_text_on_llm_failure(self, monkeypatch) -> None:
+        """A failed LLM call must reach the client through the stream writer.
+
+        Regression guard: the error text becomes this turn's final_response,
+        and the SSE path only renders what the nodes stream — so an
+        unstreamed error would leave the assistant message empty on provider
+        failure.
+        """
+        from tests._fake_llm import raise_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            raise_stream(RuntimeError("API down"))
+        )
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        emitted: list[dict[str, str]] = []
+        monkeypatch.setattr(mod, "_stream_writer", lambda: emitted.append)
+
+        await mod.call_llm_node(_make_state([HumanMessage(content="hi")]), tools=[])
+
+        assert any(
+            e.get("type") == "token" and "LLM call failed" in e.get("content", "")
+            for e in emitted
+        )
+
 
 class TestGenerateFinalNode:
     @pytest.mark.asyncio
@@ -282,6 +311,51 @@ class TestGenerateFinalNode:
         context_block = [p for p in prompts if p["role"] == "system" and "Context" in p["content"]]
         assert len(context_block) == 1
         assert "Engineering Memory Agent" in context_block[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_streams_error_text_when_final_call_fails(self, monkeypatch) -> None:
+        """Synthesis failure must stream the error text to the client.
+
+        The final answer's tokens normally arrive via the custom stream; on
+        failure the error text must be pushed the same way or the assistant
+        message renders empty.
+        """
+        from tests._fake_llm import raise_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = sequential_stream(
+            raise_stream(RuntimeError("synthesis down"))
+        )
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        emitted: list[dict[str, str]] = []
+        monkeypatch.setattr(mod, "_stream_writer", lambda: emitted.append)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="What is EMA?"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_1", "name": "search_memories_tool",
+                         "args": {"query": "EMA"}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content="Found 1 memory: EMA is an Engineering Memory Agent.",
+                    tool_call_id="call_1",
+                ),
+            ],
+        )
+        result = await mod.generate_final_node(state)
+
+        assert "生成回复时出现错误" in result["final_response"]
+        assert any(
+            e.get("type") == "token" and "生成回复时出现错误" in e.get("content", "")
+            for e in emitted
+        )
 
     @pytest.mark.asyncio
     async def test_no_tools_produces_prompt(self) -> None:

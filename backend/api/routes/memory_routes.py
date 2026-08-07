@@ -129,7 +129,10 @@ async def ingest(req: IngestRequest) -> IngestResponse:
 async def search(req: SearchRequest) -> SearchResponse:
     """Hybrid search over ingested documents.
 
-    Pipeline: dense vector + sparse BM25 union → rerank.
+    Pipeline: dense vector + sparse BM25 union, ranked by max(dense
+    similarity, sparse jaccard).  Cross-encoder rerank is skipped by default
+    (eval shows it costs ~90x latency without recall gain on the current
+    corpus); pass ``use_llm_rerank=True`` for the LLM pointwise variant.
     """
     try:
         results = await retrieve_hybrid(req.query, top_k=req.top_k, use_llm_rerank=req.use_llm_rerank)
