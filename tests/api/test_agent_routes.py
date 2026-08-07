@@ -159,7 +159,7 @@ class TestAgentChat:
 
     @pytest.mark.asyncio
     async def test_agent_chat_times_out(self, async_client: AsyncClient, monkeypatch) -> None:
-        """When the agent exceeds AGENT_TIMEOUT, return status='error' with a timeout message."""
+        """When the agent exceeds AGENT_TIMEOUT, return 504 with a timeout message."""
         import asyncio
         from unittest.mock import AsyncMock
 
@@ -182,16 +182,15 @@ class TestAgentChat:
             "/api/agent/chat",
             json={"message": "hi", "thread_id": "timeout-thread-1"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 504
         data = response.json()
-        assert data["status"] == "error"
-        assert "超时" in data["response"]
+        assert "超时" in data["detail"]
 
     @pytest.mark.asyncio
     async def test_agent_chat_error_does_not_leak_internal_exception(
         self, async_client: AsyncClient, monkeypatch
     ) -> None:
-        """A failing agent run returns a generic error, never the exception text.
+        """A failing agent run returns 502 with a generic error, never the exception text.
 
         Internal details (provider keys, DB URLs, stack traces) must stay
         server-side — the response should be a user-facing message only.
@@ -212,12 +211,11 @@ class TestAgentChat:
             "/api/agent/chat",
             json={"message": "hi", "thread_id": "leak-thread-1"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 502
         data = response.json()
-        assert data["status"] == "error"
-        assert "secret" not in data["response"]
-        assert "postgresql://" not in data["response"]
-        assert "RuntimeError" not in data["response"]
+        assert "secret" not in data["detail"]
+        assert "postgresql://" not in data["detail"]
+        assert "RuntimeError" not in data["detail"]
 
 
 class TestTokenUsageEndpoint:
@@ -389,8 +387,8 @@ class TestAgentChatHITL:
 
     @pytest.mark.asyncio
     async def test_agent_error_returns_error_status(self, async_client: AsyncClient, monkeypatch) -> None:
-        """When ainvoke raises, return status='error' (not 500) without leaking the
-        internal exception text to the client."""
+        """When ainvoke raises, return 502 (not 200) without leaking the internal
+        exception text to the client."""
         from unittest.mock import AsyncMock
 
         mock_agent = AsyncMock()
@@ -405,11 +403,10 @@ class TestAgentChatHITL:
             "/api/agent/chat",
             json={"message": "test"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 502
         data = response.json()
-        assert data["status"] == "error"
-        assert "Something went wrong" not in data["response"]
-        assert "RuntimeError" not in data["response"]
+        assert "Something went wrong" not in data["detail"]
+        assert "RuntimeError" not in data["detail"]
 
 
 class TestDeleteThread:

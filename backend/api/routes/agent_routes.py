@@ -433,10 +433,12 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
             config.agent_timeout, (t1 - t0) * 1000, req.thread_id,
         )
         await _mark_interrupted_thread(agent, req.thread_id)
-        return ChatResponse(
-            thread_id=req.thread_id,
-            status="error",
-            response=(
+        # 504 (not 200): the whole ReAct run exceeded its deadline.  The body
+        # keeps FastAPI's {"detail": ...} shape so the frontend's error handler
+        # shows the Chinese message without leaking internals.
+        raise HTTPException(
+            status_code=504,
+            detail=(
                 f"Agent 处理超时（超过 {config.agent_timeout} 秒），已停止本轮处理，"
                 "请重试或简化问题。"
             ),
@@ -453,10 +455,11 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
             req.thread_id,
             (req.message or "")[:60],
         )
-        return ChatResponse(
-            thread_id=req.thread_id,
-            status="error",
-            response="Agent 处理出错，请稍后重试或简化问题。",
+        # 502 (not 200): the agent run failed server-side; exception text stays
+        # in the log, the client gets a generic message via the error body.
+        raise HTTPException(
+            status_code=502,
+            detail="Agent 处理出错，请稍后重试或简化问题。",
         )
 
     # Check for interrupt first
