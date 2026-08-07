@@ -90,6 +90,47 @@ class TestTokenize:
 
         assert _tokenize("") == set()
 
+    def test_tokenize_chunks_batch(self) -> None:
+        """_tokenize_chunks tokenizes each chunk independently, in order."""
+        from backend.service.retrieval import _tokenize, _tokenize_chunks
+
+        batches = _tokenize_chunks(["pgvector 向量检索", "的 了 是", "variable c"])
+        assert len(batches) == 3
+        assert batches[0] == _tokenize("pgvector 向量检索")
+        assert batches[1] == set()  # all stopwords
+        assert batches[2] == _tokenize("variable c")
+
+    def test_tokenize_concurrent_threads(self) -> None:
+        """Tokenization is safe under concurrent thread-pool offloads.
+
+        The async paths run jieba in the thread pool; a module lock must keep
+        concurrent calls from racing on jieba's shared tokenizer singleton.
+        Smoke test: N threads each tokenize, all results come back correct.
+        """
+        import threading
+
+        from backend.service.retrieval import _tokenize
+
+        sample = "pgvector 向量检索 和 PostgreSQL 的 embedding 支持"
+        results: list[set[str]] = []
+        errors: list[BaseException] = []
+
+        def _run() -> None:
+            try:
+                results.append(_tokenize(sample))
+            except BaseException as exc:  # pragma: no cover
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_run) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(results) == 8
+        assert all(r == results[0] for r in results)
+
 
 class TestSparseSearch:
     @pytest.mark.asyncio
@@ -237,9 +278,10 @@ class TestRetrieveHybrid:
         assert [r.score for r in results] == [0.9, 0.8, 0.2]
 
     @pytest.mark.asyncio
-    async def test_skip_rerank_keeps_both_scores_for_overlap(self, monkeypatch) -> None:
-        """Regression: a chunk in BOTH sets must rank by max(dense, sparse),
-        not by the dense score alone — the old union dropped the sparse rank."""
+    async def test_skip_rerank_fuses_ranks_for_overlap(self, monkeypatch) -> None:
+        """A chunk in BOTH sets contributes BOTH ranks to its RRF score —
+        not the old max(dense, sparse), where the dense-only score would
+        have ignored the sparse rank entirely."""
         from backend.service import retrieval as mod
 
         dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.5}]
@@ -249,7 +291,9 @@ class TestRetrieveHybrid:
         results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=True)
 
         assert len(results) == 1
-        assert results[0].score == pytest.approx(0.9)  # max(0.5, 0.9), not 0.5
+        # dense rank 0 + sparse rank 0 → (1/60 + 1/60), normalised by the
+        # max achievable fusion (2/60) back to the 0-1 similarity scale.
+        assert results[0].score == pytest.approx(1.0)
 
     @pytest.mark.asyncio
     async def test_default_skips_rerank(self, monkeypatch) -> None:
@@ -275,12 +319,15 @@ class TestRetrieveHybrid:
 
         results = await mod.retrieve_hybrid("query", top_k=5)
 
-        # c1: max(0.7, 0)=0.7 ; c2: max(0.2, 0.6)=0.6 → c1 first, no floor drop
-        assert [r.content for r in results] == ["c1", "c2"]
-        assert results[0].score == pytest.approx(0.7)
+        # c1 is dense-only (rank 0) → 1/60, normalised to 0.5; c2 is ranked
+        # by BOTH retrievers (dense rank 1, sparse rank 0) → (1/61 + 1/60),
+        # normalised to 30/61 + 0.5 ≈ 0.99, so RRF promotes it.
+        assert [r.content for r in results] == ["c2", "c1"]
+        assert results[0].score == pytest.approx(30 / 61 + 0.5)
+        assert results[1].score == pytest.approx(0.5)
 
     @pytest.mark.asyncio
-    async def test_skip_rerank_sorts_by_max_score(self, monkeypatch) -> None:
+    async def test_skip_rerank_sorts_by_rrf(self, monkeypatch) -> None:
         from backend.service import retrieval as mod
 
         dense = [
@@ -295,10 +342,11 @@ class TestRetrieveHybrid:
 
         results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=True)
 
-        # c1: max(0.7, 0.1)=0.7 ; c2: max(0.2, 0.6)=0.6 → c1 first
+        # Both in both lists: c1 at (dense 0, sparse 0) → 2/60 → 1.0 beats
+        # c2 at (dense 1, sparse 1) → 2/61 → 60/61 (both normalised by 2/60).
         assert [r.content for r in results] == ["c1", "c2"]
-        assert results[0].score == pytest.approx(0.7)
-        assert results[1].score == pytest.approx(0.6)
+        assert results[0].score == pytest.approx(1.0)
+        assert results[1].score == pytest.approx(60 / 61)
 
     @pytest.mark.asyncio
     async def test_floor_filters_below_threshold(self, monkeypatch) -> None:
@@ -328,6 +376,103 @@ class TestRetrieveHybrid:
 
         results = await mod.retrieve_hybrid("query", top_k=5)
         assert results == []
+
+
+class TestQueryMemoriesDecayBatch:
+    """query_memories updates decay in ONE batch; a write failure can't sink the search."""
+
+    @staticmethod
+    def _candidate(mid: str, decay: float = 0.8):
+        return {
+            "id": mid,
+            "source_type": "conversation",
+            "summary": f"summary {mid}",
+            "entities": [],
+            "relations": [],
+            "decay_factor": decay,
+            "recall_count": 1,
+            "meta": {},
+            "created_at": None,
+        }
+
+    def _patch(self, monkeypatch, candidates, ranked, decay_map=None, decay_raises=False):
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        provider = MagicMock()
+        provider.embed = AsyncMock(return_value=[[0.1]])
+        monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
+        monkeypatch.setattr(mod, "search_memories", AsyncMock(return_value=candidates))
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(return_value=ranked),
+        )
+        if decay_raises:
+            monkeypatch.setattr(
+                decay_mod,
+                "update_decay_batch",
+                AsyncMock(side_effect=RuntimeError("db down")),
+            )
+        else:
+            monkeypatch.setattr(
+                decay_mod,
+                "update_decay_batch",
+                AsyncMock(return_value=decay_map or {}),
+            )
+        return mod
+
+    @pytest.mark.asyncio
+    async def test_batch_update_in_single_call(self, monkeypatch) -> None:
+        """All surviving memory ids go through ONE update_decay_batch call,
+        not N sequential update_decay commits (the N+1 fix)."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        cands = [self._candidate("m1"), self._candidate("m2", 0.5)]
+        self._patch(
+            monkeypatch,
+            cands,
+            [(0, 0.9), (1, 0.8)],
+            decay_map={"m1": 0.99, "m2": 0.77},
+        )
+
+        results = await mod.query_memories("q", top_k=5)
+
+        assert [r["id"] for r in results] == ["m1", "m2"]
+        decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
+        # New factors from the batch overwrite the candidates' stale ones.
+        assert results[0]["decay_factor"] == pytest.approx(0.99)
+        assert results[1]["decay_factor"] == pytest.approx(0.77)
+
+    @pytest.mark.asyncio
+    async def test_decay_failure_returns_stale_factors(self, monkeypatch) -> None:
+        """A decay-write failure must not fail the search — stale factors
+        are returned and the error is logged, not propagated."""
+        from backend.service import retrieval as mod
+
+        cands = [self._candidate("m1", 0.8)]
+        self._patch(monkeypatch, cands, [(0, 0.9)], decay_raises=True)
+
+        results = await mod.query_memories("q", top_k=5)
+
+        assert len(results) == 1
+        assert results[0]["id"] == "m1"
+        assert results[0]["decay_factor"] == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_floor_filters_before_decay(self, monkeypatch) -> None:
+        """Scores below the rerank floor are dropped before the decay batch,
+        so they never consume an update."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        cands = [self._candidate("m1"), self._candidate("m2")]
+        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.1)])  # m2 below floor
+
+        results = await mod.query_memories("q", top_k=5)
+
+        assert [r["id"] for r in results] == ["m1"]
+        decay_mod.update_decay_batch.assert_awaited_once_with(["m1"])
 
 
 class TestRetrieveMultiQuery:

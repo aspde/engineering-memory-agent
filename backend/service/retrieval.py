@@ -6,6 +6,7 @@ Read path:   embed_query() → vector_search() → rerank() → assemble()
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -30,6 +31,13 @@ _ALLOWED_FILTER_COLS = {"document_id", "chunk_index"}
 # Shared by every read path so the threshold stays tunable in one place.
 _RERANK_FLOOR = 0.15
 
+# Reciprocal-rank fusion constant for the skip_rerank hybrid path — the
+# standard k=60 from Cormack et al.  RRF fuses *ranks* rather than raw
+# scores, so dense cosine and sparse jaccard never have to be normalised
+# against each other (the max() fusion they replaced let whichever
+# distribution ran hotter dominate the union).
+_RRF_K = 60
+
 # CJK stopword set, in two categories:
 #   (a) grammatical function words (的/了/是/…), which never discriminate;
 #   (b) a few high-frequency tokens whose content word always co-occurs with a
@@ -49,12 +57,38 @@ _STOPWORDS: frozenset[str] = frozenset(
 )
 
 
+# jieba's tokenizer is a shared mutable singleton (lazy-initialised
+# dictionaries, prefix cache) that is not safe to call from two threads at
+# once.  The async write/query paths offload tokenization to the thread pool
+# (asyncio.to_thread), so concurrent requests can hit it in parallel —
+# serialize those calls with a module-level lock.
+_tokenize_lock = threading.Lock()
+
+
 def _tokenize(text: str) -> set[str]:
     """jieba tokenize, drop stopwords and single-char CJK tokens.
 
     ASCII single-char tokens (e.g. ``c`` in variable names) are kept —
     they carry signal in code queries.
     """
+    with _tokenize_lock:
+        return _tokenize_locked(text)
+
+
+def _tokenize_chunks(chunks: list[str]) -> list[set[str]]:
+    """Tokenize a batch of chunks with one lock acquisition.
+
+    jieba segmentation is CPU-bound, so the async write path offloads the
+    whole batch at once rather than per-chunk ``await asyncio.to_thread``
+    calls (one thread-pool hop instead of N).  The lock is held once for the
+    whole batch rather than re-acquired per chunk.
+    """
+    with _tokenize_lock:
+        return [_tokenize_locked(c) for c in chunks]
+
+
+def _tokenize_locked(text: str) -> set[str]:
+    """jieba segmentation — must be called under :data:`_tokenize_lock`."""
     tokens = jieba.lcut(text)
     return {
         t.strip().lower()
@@ -125,6 +159,11 @@ async def write_chunks(
 
     provider = get_embedding_provider()
     vectors = await provider.embed([chunk for _, chunk in new_chunks])
+    # jieba segmentation is CPU-bound; offload the whole batch to the thread
+    # pool in one call so the event loop never blocks on it.
+    token_lists = await asyncio.to_thread(
+        _tokenize_chunks, [chunk for _, chunk in new_chunks]
+    )
     meta_json = json.dumps(meta or {})
 
     async with session_factory() as session:
@@ -148,7 +187,7 @@ async def write_chunks(
             params[key_vec] = str(vec)
             params[key_meta] = meta_json
             params[key_idx] = idx
-            params[key_tokens] = list(_tokenize(chunk))
+            params[key_tokens] = list(token_lists[n])
             params[key_hash] = _content_hash(chunk)
 
         sql = (
@@ -355,7 +394,7 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
     Requires ``tokens`` to be populated (done at write time by
     ``write_chunks`` and backfilled for pre-existing rows).
     """
-    q_tokens = _tokenize(query)
+    q_tokens = await asyncio.to_thread(_tokenize, query)
     if not q_tokens:
         return []
 
@@ -428,34 +467,33 @@ async def retrieve_hybrid(
     misses due to low surface-form overlap.  Both candidate sets are
     unioned (dedup by chunk id).
 
-    By default the union is ranked directly by the max of dense similarity /
-    sparse jaccard (``skip_rerank=True``): the eval report
+    By default the union is ranked by reciprocal-rank fusion (RRF) of the
+    dense and sparse lists (``skip_rerank=True``): the eval report
     (``docs/interview/eval-report.md``) shows cross-encoder rerank costs
     ~90x latency on the current corpus while *lowering* recall@5 (0.967 vs
     1.000), so reranking is opt-in.  Pass ``skip_rerank=False`` for the
     cross-encoder rerank path, or ``use_llm_rerank=True`` for the LLM
     pointwise variant.
+
+    Returned ``score`` is the RRF fusion normalised to the 0-1 similarity
+    scale (1.0 = ranked #1 by both retrievers) — it is a *relative ordering*
+    signal, not an absolute similarity measure.
     """
     query_vec = await embed_query(query)
     dense = await vector_search(query_vec, top_k=max(top_k * 4, 20))
     sparse = await sparse_search(query, top_k=max(top_k * 4, 20))
 
-    # Union by chunk id, keeping BOTH scores so the skip_rerank fallback can
-    # take max(dense, sparse) even for chunks found by both retrievers.
+    # Rank position within each list — RRF fuses *ranks* so the two
+    # heterogeneous distributions (cosine similarity vs sparse jaccard)
+    # never have to be normalised against each other.
+    dense_rank: dict[str, int] = {str(r["id"]): i for i, r in enumerate(dense)}
+    sparse_rank: dict[str, int] = {str(r["id"]): i for i, r in enumerate(sparse)}
+
+    # Union by chunk id — first source wins the row (dense copy, matching
+    # the previous behaviour).
     merged: dict[str, dict[str, Any]] = {}
     for r in dense + sparse:
-        cid = str(r["id"])
-        if cid in merged:
-            merged[cid]["rank"] = max(
-                float(merged[cid].get("rank") or 0.0),
-                float(r.get("rank") or 0.0),
-            )
-            merged[cid]["similarity"] = max(
-                float(merged[cid].get("similarity") or 0.0),
-                float(r.get("similarity") or 0.0),
-            )
-        else:
-            merged[cid] = r
+        merged.setdefault(str(r["id"]), r)
 
     if not merged:
         return []
@@ -463,18 +501,28 @@ async def retrieve_hybrid(
     candidates = list(merged.values())
 
     if skip_rerank:
-        # Fallback ranking: max(dense similarity, sparse jaccard).
-        def _fallback_score(c: dict[str, Any]) -> float:
-            return max(
-                float(c.get("similarity") or 0.0),
-                float(c.get("rank") or 0.0),
-            )
+        # Reciprocal-rank fusion: a chunk both retrievers rank highly scores
+        # above one only a single retriever likes — cross-validation instead
+        # of taking whichever score happens to be bigger.  The returned score
+        # is normalised to the same 0-1 relevance scale as similarity (see
+        # _rrf_score) so downstream callers and the LLM read it correctly.
+        def _rrf_score(c: dict[str, Any]) -> float:
+            cid = str(c["id"])
+            fused = 0.0
+            if cid in dense_rank:
+                fused += 1.0 / (_RRF_K + dense_rank[cid])
+            if cid in sparse_rank:
+                fused += 1.0 / (_RRF_K + sparse_rank[cid])
+            # Normalise by the max achievable score (rank #1 in both lists):
+            # raw fused ranks peak at ~2/k ≈ 0.033, which SearchResult.score
+            # and the LLM's "relevance" field would read as "irrelevant".
+            return fused * _RRF_K / 2
 
-        candidates.sort(key=_fallback_score, reverse=True)
+        candidates.sort(key=_rrf_score, reverse=True)
         return [
             RetrievalResult(
                 content=c["content"],
-                score=_fallback_score(c),
+                score=_rrf_score(c),
                 metadata=_attach_document_id(c),
             )
             for c in candidates[:top_k]
@@ -537,7 +585,7 @@ async def query_memories(
     """Search memories with decay-weighted ranking.
 
     Full pipeline: embed → decay-weighted vector search → rerank →
-    update_decay → return as-ranked list of memory dicts.
+    update_decay_batch → return as-ranked list of memory dicts.
     """
     from backend.service.rerank import rerank_cross_encoder, rerank_llm
 
@@ -566,18 +614,38 @@ async def query_memories(
     )
     t_rerank = time.perf_counter()
 
-    # Re-attach full memory rows in ranked order, and update decay
+    # Re-attach full memory rows in ranked order, and update decay in a
+    # single batch (one UPDATE ... RETURNING) instead of N sequential
+    # commits.  A decay-write failure must not fail the search — stale
+    # factors are returned instead.
+    from backend.service.decay import update_decay_batch
+
     # Drop results where the reranker score is below the minimum threshold —
     # this prevents irrelevant results from appearing when no real match exists.
-    from backend.service.decay import update_decay
+    surviving: list[tuple[int, float]] = [
+        (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
+    ]
+    try:
+        decay_by_id = await update_decay_batch(
+            [candidates[idx]["id"] for idx, _ in surviving]
+        )
+    except Exception:
+        logger.warning(
+            "Batch decay update failed — returning results with stale decay factors",
+            exc_info=True,
+        )
+        decay_by_id = {}
 
     result: list[dict] = []
-    for idx, score in ranked:
-        if score < _RERANK_FLOOR:
-            continue
+    for idx, score in surviving:
         memory_id = str(candidates[idx]["id"])
-        new_decay = await update_decay(memory_id)
-        entry = {**candidates[idx], "rerank_score": score, "decay_factor": new_decay}
+        entry = {
+            **candidates[idx],
+            "rerank_score": score,
+            "decay_factor": decay_by_id.get(
+                memory_id, candidates[idx].get("decay_factor", 1.0)
+            ),
+        }
         result.append(entry)
 
     t_end = time.perf_counter()
