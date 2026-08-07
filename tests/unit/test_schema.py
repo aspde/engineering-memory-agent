@@ -71,7 +71,7 @@ class TestResizeMigration:
         assert "DROP INDEX IF EXISTS idx_memories_embedding" in sql
         assert (
             "CREATE INDEX IF NOT EXISTS idx_memories_embedding "
-            "ON memories USING ivfflat" in sql
+            "ON memories USING hnsw" in sql
         )
 
     def test_resize_only_guards_on_different_vector_dimension(self) -> None:
@@ -90,6 +90,36 @@ class TestResizeMigration:
             assert any(
                 f"WHERE a.attrelid = '{table}'::regclass" in x for x in s
             ), f"no resize block for {table}"
+
+    def test_embedding_indexes_use_hnsw(self) -> None:
+        """Embedding indexes are HNSW (pgvector >= 0.5), not ivfflat.
+
+        ivfflat's lists=100 spread probes over mostly-empty clusters on small
+        corpora (the seed-010 lesson); HNSW has no cluster dependency.
+        """
+        s = _statements(1024)
+        for table, index in (
+            ("chunks", "idx_chunks_embedding"),
+            ("memories", "idx_memories_embedding"),
+            ("entities", "idx_entities_embedding"),
+        ):
+            create = next(x for x in s if f"CREATE INDEX IF NOT EXISTS {index}" in x)
+            assert f"ON {table} USING hnsw" in create
+        # ivfflat survives only inside the migration block's LIKE predicate,
+        # never as an actual CREATE INDEX / resize-rebuild statement.
+        non_migration = [x for x in s if "indexdef LIKE '%ivfflat%'" not in x]
+        assert not any("ivfflat" in x for x in non_migration)
+
+    def test_ivfflat_to_hnsw_migration_block_present(self) -> None:
+        """Existing ivfflat indexes are swapped for HNSW once, then a no-op."""
+        s = _statements(1024)
+        migration = next(
+            x for x in s
+            if "FOREACH t IN ARRAY ARRAY['chunks', 'memories', 'entities']" in x
+        )
+        assert "indexdef LIKE '%ivfflat%'" in migration
+        assert "USING hnsw (embedding vector_cosine_ops)" in migration
+        assert "DROP INDEX" in migration
 
 
 class TestInitDbDimensionFlow:

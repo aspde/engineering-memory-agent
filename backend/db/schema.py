@@ -41,7 +41,7 @@ def _resize_statement(table: str, index: str, dimension: int) -> str:
             EXECUTE 'DROP INDEX IF EXISTS {index}';
             EXECUTE 'UPDATE {table} SET embedding = NULL';
             EXECUTE 'ALTER TABLE {table} ALTER COLUMN embedding TYPE vector({dimension})';
-            EXECUTE 'CREATE INDEX IF NOT EXISTS {index} ON {table} USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)';
+            EXECUTE 'CREATE INDEX IF NOT EXISTS {index} ON {table} USING hnsw (embedding vector_cosine_ops)';
         END IF;
     END $$;
     """
@@ -69,8 +69,7 @@ def build_schema_statements(dimension: int) -> list[str]:
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_chunks_embedding
-            ON chunks USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
+            ON chunks USING hnsw (embedding vector_cosine_ops)
         """,
         _resize_statement("chunks", "idx_chunks_embedding", dimension),
         f"""
@@ -92,8 +91,7 @@ def build_schema_statements(dimension: int) -> list[str]:
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_memories_embedding
-            ON memories USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
+            ON memories USING hnsw (embedding vector_cosine_ops)
         """,
         _resize_statement("memories", "idx_memories_embedding", dimension),
         # Migration: add updated_at to existing memories tables that lack it.
@@ -126,8 +124,7 @@ def build_schema_statements(dimension: int) -> list[str]:
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_entities_embedding
-            ON entities USING ivfflat (embedding vector_cosine_ops)
-            WITH (lists = 100)
+            ON entities USING hnsw (embedding vector_cosine_ops)
         """,
         _resize_statement("entities", "idx_entities_embedding", dimension),
         """
@@ -282,6 +279,33 @@ def build_schema_statements(dimension: int) -> list[str]:
         BEGIN
             ALTER TABLE webhook_logs ADD COLUMN conflict_id UUID;
         EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        # ── Embedding index migration: ivfflat → HNSW ─────────────────────
+        # HNSW (pgvector >= 0.5) has no cluster-centroid dependency, so it
+        # stays accurate on small corpora where ivfflat's lists=100 spread
+        # probes over mostly-empty clusters (the seed-010 lesson).  Fresh
+        # databases get HNSW via the CREATE INDEX statements above; this
+        # block converts databases created while the schema still used
+        # ivfflat — replacing each embedding index once, then a no-op.
+        """
+        DO $$
+        DECLARE
+            t text;
+            i text;
+        BEGIN
+            FOREACH t IN ARRAY ARRAY['chunks', 'memories', 'entities'] LOOP
+                i := CASE t WHEN 'chunks' THEN 'idx_chunks_embedding'
+                            WHEN 'memories' THEN 'idx_memories_embedding'
+                            ELSE 'idx_entities_embedding' END;
+                IF EXISTS (
+                    SELECT 1 FROM pg_indexes
+                    WHERE indexname = i AND indexdef LIKE '%ivfflat%'
+                ) THEN
+                    EXECUTE format('DROP INDEX %I', i);
+                    EXECUTE format('CREATE INDEX %I ON %I USING hnsw (embedding vector_cosine_ops)', i, t);
+                END IF;
+            END LOOP;
         END $$;
         """,
     ]
