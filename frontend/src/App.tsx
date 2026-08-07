@@ -2,6 +2,7 @@ import { Route, Routes } from 'react-router-dom';
 import NavBar from './components/NavBar';
 import Sidebar from './components/Sidebar';
 import ChatPage from './pages/ChatPage';
+import ConflictsPage from './pages/ConflictsPage';
 import ConnectorsPage from './pages/ConnectorsPage';
 import EntityGraphPage from './pages/EntityGraphPage';
 import MemoriesPage from './pages/MemoriesPage';
@@ -19,6 +20,7 @@ export default function App() {
           <Route path="/graph" element={<EntityGraphPage />} />
           <Route path="/connectors" element={<ConnectorsPage />} />
           <Route path="/patrol" element={<PatrolPage />} />
+          <Route path="/conflicts" element={<ConflictsPage />} />
         </Routes>
       </main>
     </div>

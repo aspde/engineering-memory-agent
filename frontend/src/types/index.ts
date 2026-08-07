@@ -226,6 +226,26 @@ export interface MemoryStatsResponse {
   entity_graph: EntityGraphStats | null;
 }
 
+// ── Pending conflict types (webhook/connector HITL) ─────────────────
+
+export interface PendingConflict {
+  id: string;
+  source: string;
+  source_type: string | null;
+  existing_id: string;
+  existing_summary: string;
+  new_summary: string;
+  status: string;
+  resolution: string | null;
+  created_at: string | null;
+}
+
+export interface ConflictResolveResponse {
+  id: string;
+  resolution: string;
+  outcome: Record<string, unknown>;
+}
+
 // ── Connector API types ──────────────────────────────────────────────
 
 export interface ConnectorInfo {

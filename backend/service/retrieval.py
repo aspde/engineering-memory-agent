@@ -6,6 +6,7 @@ Read path:   embed_query() → vector_search() → rerank() → assemble()
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -72,52 +73,98 @@ class RetrievalResult:
 # ── Write path ─────────────────────────────────────────────────
 
 
+def _content_hash(text: str) -> str:
+    """SHA-256 of raw chunk text — the exact-duplicate idempotency key."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 async def write_chunks(
     document_id: str,
     chunks: list[str],
     meta: dict[str, Any] | None = None,
 ) -> int:
-    """Embed *chunks* and insert into the chunks table. Returns count written."""
+    """Embed *chunks* and insert into the chunks table. Returns count written.
+
+    Idempotent per ``(document_id, content_hash)``: chunks already ingested
+    for this document are skipped — no re-embedding, no duplicate rows — so
+    re-ingesting the same document is a no-op.  An ``ON CONFLICT DO NOTHING``
+    clause guards against races between the pre-check and the insert.
+    """
     if not chunks:
         return 0
 
+    session_factory = get_session_factory()
+
+    # Skip chunks already ingested for this document (content-hash idempotency).
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                """\
+                SELECT content_hash FROM chunks
+                WHERE document_id = :doc AND content_hash IS NOT NULL
+                """
+            ),
+            {"doc": document_id},
+        )
+        existing_hashes = {row[0] for row in result.fetchall()}
+
+    new_chunks: list[tuple[int, str]] = [
+        (i, chunk)
+        for i, chunk in enumerate(chunks)
+        if _content_hash(chunk) not in existing_hashes
+    ]
+    if not new_chunks:
+        logger.info(
+            "All %d chunks already ingested for %s — skipped",
+            len(chunks),
+            document_id,
+        )
+        return 0
+
     provider = get_embedding_provider()
-    vectors = await provider.embed(chunks)
+    vectors = await provider.embed([chunk for _, chunk in new_chunks])
     meta_json = json.dumps(meta or {})
 
-    session_factory = get_session_factory()
     async with session_factory() as session:
-        # Batch INSERT — single round-trip for all chunks
+        # Batch INSERT — single round-trip for the new chunks only
         values_clauses: list[str] = []
         params: dict[str, Any] = {}
-        for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
-            key_doc = f"doc_id_{i}"
-            key_content = f"content_{i}"
-            key_vec = f"vec_{i}"
-            key_meta = f"meta_{i}"
-            key_idx = f"idx_{i}"
-            key_tokens = f"tokens_{i}"
+        for n, ((idx, chunk), vec) in enumerate(zip(new_chunks, vectors)):
+            key_doc = f"doc_id_{n}"
+            key_content = f"content_{n}"
+            key_vec = f"vec_{n}"
+            key_meta = f"meta_{n}"
+            key_idx = f"idx_{n}"
+            key_tokens = f"tokens_{n}"
+            key_hash = f"hash_{n}"
             values_clauses.append(
                 f"(:{key_doc}, :{key_content}, :{key_vec} ::vector, "
-                f":{key_meta} ::jsonb, :{key_idx}, :{key_tokens} ::text[])"
+                f":{key_meta} ::jsonb, :{key_idx}, :{key_tokens} ::text[], :{key_hash})"
             )
             params[key_doc] = document_id
             params[key_content] = chunk
             params[key_vec] = str(vec)
             params[key_meta] = meta_json
-            params[key_idx] = i
+            params[key_idx] = idx
             params[key_tokens] = list(_tokenize(chunk))
+            params[key_hash] = _content_hash(chunk)
 
         sql = (
             "INSERT INTO chunks (document_id, content, embedding, meta, "
-            "chunk_index, tokens) VALUES "
+            "chunk_index, tokens, content_hash) VALUES "
             + ", ".join(values_clauses)
+            + " ON CONFLICT (document_id, content_hash) DO NOTHING"
         )
         await session.execute(text(sql), params)
         await session.commit()
 
-    logger.info("Wrote %d chunks for document %s", len(chunks), document_id)
-    return len(chunks)
+    logger.info(
+        "Wrote %d/%d chunks for document %s",
+        len(new_chunks),
+        len(chunks),
+        document_id,
+    )
+    return len(new_chunks)
 
 
 # ── Read path ──────────────────────────────────────────────────

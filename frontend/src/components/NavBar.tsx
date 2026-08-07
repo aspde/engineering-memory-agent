@@ -12,6 +12,7 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/graph', icon: '🔗', label: '实体图谱' },
   { path: '/connectors', icon: '🔌', label: '连接器' },
   { path: '/patrol', icon: '🔍', label: '巡检日志' },
+  { path: '/conflicts', icon: '⚖️', label: '冲突' },
 ];
 
 /**

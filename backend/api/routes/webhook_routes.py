@@ -13,6 +13,7 @@ from pydantic import BaseModel
 
 from backend.connectors.registry import get_connector, list_connectors
 from backend.db import get_session_factory
+from backend.service.conflicts import persist_pending_conflict
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -22,8 +23,9 @@ router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 class WebhookResponse(BaseModel):
     source: str
-    status: str  # "processed" | "failed"
+    status: str  # "processed" | "failed" | "conflict_pending"
     memory_id: str | None = None
+    conflict_id: str | None = None
     error: str | None = None
 
 
@@ -81,6 +83,7 @@ async def _log_delivery(
     status: str,
     payload_summary: str,
     memory_id: str | None = None,
+    conflict_id: str | None = None,
     error: str | None = None,
 ) -> None:
     """Write a row to ``webhook_logs``."""
@@ -92,10 +95,10 @@ async def _log_delivery(
                     """\
                     INSERT INTO webhook_logs
                         (source, event_type, status, payload_summary,
-                         memory_id, error)
+                         memory_id, conflict_id, error)
                     VALUES
                         (:source, :event_type, :status, :payload_summary,
-                         :memory_id, :error)
+                         :memory_id, :conflict_id, :error)
                     """
                 ),
                 {
@@ -104,6 +107,7 @@ async def _log_delivery(
                     "status": status,
                     "payload_summary": payload_summary[:200],
                     "memory_id": memory_id,
+                    "conflict_id": conflict_id,
                     "error": error,
                 },
             )
@@ -177,6 +181,12 @@ async def receive_webhook(source: str, request: Request) -> WebhookResponse:
         content = connector.normalize(payload)
         result = await connector.process(content, metadata)
         memory_id: str | None = result.get("id") if isinstance(result, dict) else None
+        conflict_id: str | None = None
+        if isinstance(result, dict) and result.get("action") == "conflict":
+            # No interactive session on a webhook — persist for later HITL
+            # instead of silently dropping the conflicting content.
+            pending = await persist_pending_conflict(source, result)
+            conflict_id = pending["id"]
     except HTTPException:
         raise
     except Exception as exc:
@@ -184,6 +194,15 @@ async def receive_webhook(source: str, request: Request) -> WebhookResponse:
         raise HTTPException(status_code=500, detail=f"Processing error: {exc}") from exc
 
     # 9. Log success
+    if conflict_id:
+        await _log_delivery(
+            source, event_type, "conflict_pending", payload_summary,
+            conflict_id=conflict_id,
+        )
+        return WebhookResponse(
+            source=source, status="conflict_pending", conflict_id=conflict_id
+        )
+
     await _log_delivery(source, event_type, "processed", payload_summary, memory_id=memory_id)
 
     return WebhookResponse(source=source, status="processed", memory_id=memory_id)

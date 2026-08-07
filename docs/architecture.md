@@ -60,6 +60,8 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/entities/{entity_id}` | 获取实体档案：名称、类型、关联记忆数、来源分布 |
 | GET | `/api/entities/{entity_id}/relations` | 获取实体一度关系：关联实体 + 最近记忆 |
 | GET | `/api/entities/search?q=&type=` | 按名称搜索实体，支持类型过滤 |
+| GET | `/api/conflicts` | 列出待人工解决的记忆冲突（webhook/连接器 HITL 队列） |
+| POST | `/api/conflicts/{id}/resolve` | 以 keep_existing/overwrite/merge/keep_both 之一解决冲突 |
 
 ## Technology Stack
 
@@ -87,6 +89,12 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 Agent 工具调用通过新增的 `chat_raw(messages, tools, **kwargs) → dict` 方法，返回结构化响应 `{content, tool_calls}`。
 
 结构化输出（实体/关系提取、矛盾检测、实体匹配）通过 `chat_json(messages, json_schema, **kwargs) → str` 强制合法 JSON——OpenAI 兼容用 `response_format=json_object`，Anthropic 用 forced `tool_use`。`chat_structured` 统一负责解析、`jsonschema` 校验、退避重试，重试耗尽抛 `LLMStructuredError`。
+
+provider 层内置传输层韧性（`backend/shared/resilience.py`）：
+
+- `chat` / `chat_raw` / `chat_sync` / `embed` / `embed_sync` 带 tenacity 指数退避重试（只重试瞬时错误：HTTP 429 / 5xx / 超时 / 连接错误，4xx 不重试），外加按 provider 命名的 in-memory 熔断器（连续失败达阈值后打开，冷却窗口内快速失败，冷却结束自动恢复探测）。
+- `chat_json` 只挂熔断、不挂 tenacity 重试——该路径的传输重试由 `chat_structured` 的语义重试负责，避免两层重试嵌套（3×3）。
+- 配置项：`LLM_RETRY_MAX_ATTEMPTS`、`LLM_RETRY_BACKOFF_BASE`、`LLM_RETRY_BACKOFF_MAX`、`LLM_CIRCUIT_BREAKER_THRESHOLD`、`LLM_CIRCUIT_BREAKER_COOLDOWN`。
 
 ### Embedding
 

@@ -20,7 +20,8 @@ _STATEMENTS = [
         embedding   vector(1024),
         meta        JSONB DEFAULT '{}',
         created_at  TIMESTAMPTZ DEFAULT now(),
-        chunk_index INT NOT NULL
+        chunk_index INT NOT NULL,
+        content_hash TEXT
     )
     """,
     """
@@ -35,6 +36,7 @@ _STATEMENTS = [
         summary     TEXT NOT NULL,
         entities    JSONB DEFAULT '[]',
         relations   JSONB DEFAULT '[]',
+        content_hash TEXT,
         embedding   vector(1024),
         decay_factor FLOAT DEFAULT 1.0,
         recalled_at TIMESTAMPTZ DEFAULT now(),
@@ -111,6 +113,7 @@ _STATEMENTS = [
         status          TEXT NOT NULL DEFAULT 'received',
         payload_summary TEXT,
         memory_id       UUID,
+        conflict_id     UUID,
         error           TEXT,
         created_at      TIMESTAMPTZ DEFAULT now()
     )
@@ -151,6 +154,89 @@ _STATEMENTS = [
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_chunks_tokens ON chunks USING GIN(tokens)
+    """,
+    # ── Content-hash idempotency ────────────────────────────────────
+    # content_hash is the exact-duplicate key for re-ingestion: re-ingesting
+    # the same source (same commit, same doc, repeated webhook) must not
+    # create duplicate memories/chunks.  CREATE TABLE IF NOT EXISTS won't
+    # mutate existing tables, so apply ALTERs for databases created before
+    # the columns existed (pre-existing rows get NULL → exempt from the
+    # unique index).
+    """
+    DO $$
+    BEGIN
+        ALTER TABLE chunks ADD COLUMN content_hash TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """,
+    """
+    DO $$
+    BEGIN
+        ALTER TABLE memories ADD COLUMN content_hash TEXT;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """,
+    # Scoped by document_id so the same chunk text in two different
+    # documents is NOT treated as a duplicate.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_chunks_doc_content_hash
+        ON chunks (document_id, content_hash)
+    """,
+    # Unique among *live* rows only: a soft-deleted memory keeps its
+    # content_hash (tombstones are never rewritten), while the idempotency
+    # gate filters deleted_at IS NULL — so a deleted row must not block a
+    # later re-ingest from re-using the hash.  ``DROP INDEX`` clears the
+    # pre-partial version created before this refinement.
+    """
+    DROP INDEX IF EXISTS uq_memories_content_hash
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_memories_content_hash_live
+        ON memories (content_hash) WHERE deleted_at IS NULL
+    """,
+    # ── Pending-conflict queue (webhook/connector HITL) ─────────────
+    # Webhook deliveries have no interactive session, so a detected memory
+    # conflict is persisted here and resolved later by a human through the
+    # same resolve_conflict() path the agent interrupt uses.  ``deferred``
+    # holds the _deferred payload (extracted, embedding, source_type,
+    # metadata, content_hash) needed to apply the resolution.
+    """
+    CREATE TABLE IF NOT EXISTS pending_conflicts (
+        id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        source           TEXT NOT NULL,
+        source_type      TEXT,
+        existing_id      UUID NOT NULL,
+        existing_summary TEXT NOT NULL,
+        new_summary      TEXT NOT NULL,
+        deferred         JSONB NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'pending',
+        resolution       TEXT,
+        created_at       TIMESTAMPTZ DEFAULT now(),
+        resolved_at      TIMESTAMPTZ
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_pending_conflicts_open
+        ON pending_conflicts (status, created_at DESC)
+    """,
+    # A given conflict (same existing memory + same new content) is queued at
+    # most once while pending: webhooks are at-least-once, and each redelivery
+    # of an identical conflicting payload must not stack another row (it would
+    # multiply HITL work and, resolved in the wrong order, could collide on the
+    # content_hash unique index).  Resolved rows leave the partial index, so a
+    # *fresh* occurrence of the same content re-queues normally.
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_conflicts_open_dedup
+        ON pending_conflicts (existing_id, (deferred->>'content_hash'))
+        WHERE status = 'pending'
+    """,
+    # Migration: add conflict_id to existing webhook_logs tables.
+    """
+    DO $$
+    BEGIN
+        ALTER TABLE webhook_logs ADD COLUMN conflict_id UUID;
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
     """,
 ]
 

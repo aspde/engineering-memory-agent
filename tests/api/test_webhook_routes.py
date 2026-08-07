@@ -269,3 +269,85 @@ class TestWebhookLogging:
             assert row is not None
             assert row.source == "fake_ci"
             assert row.status == "failed"
+
+
+# ── Conflict handling ─────────────────────────────────────────────────
+
+
+class TestWebhookConflict:
+    @pytest.mark.asyncio
+    async def test_conflict_is_persisted_not_dropped(
+        self, async_client: AsyncClient
+    ):
+        """A webhook whose content conflicts with an existing memory is queued
+        for HITL instead of being silently discarded."""
+        body = {"job_name": "conflict-job"}
+        raw = json.dumps(body).encode("utf-8")
+        sig = _sign(raw)
+
+        conflict_result = {
+            "action": "conflict",
+            "summary": "New conflicting summary",
+            "existing_id": "11111111-1111-1111-1111-111111111111",
+            "existing_summary": "Existing summary",
+            "entities": [],
+            "relations": [],
+            "_deferred": {
+                "extracted": {
+                    "summary": "New conflicting summary",
+                    "entities": [],
+                    "relations": [],
+                },
+                "embedding": "[0.1]",
+                "source_type": "fake_ci",
+                "metadata": {"conflicts_with": "11111111-1111-1111-1111-111111111111"},
+                "content_hash": "abc123",
+            },
+        }
+        # Override the autouse "inserted" stub for this test
+        with patch(
+            "backend.service.memory.write_memory",
+            new_callable=AsyncMock,
+            return_value=conflict_result,
+        ):
+            resp = await async_client.post(
+                "/api/webhook/fake_ci",
+                content=raw,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Webhook-Signature": sig,
+                },
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "conflict_pending"
+        assert data["conflict_id"]
+        assert data["memory_id"] is None
+
+        # The conflict landed in pending_conflicts, not dropped
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT source, status, existing_summary, new_summary "
+                    "FROM pending_conflicts WHERE id = :id"
+                ),
+                {"id": data["conflict_id"]},
+            )
+            row = result.fetchone()
+            assert row is not None
+            assert row.source == "fake_ci"
+            assert row.status == "pending"
+            assert row.new_summary == "New conflicting summary"
+
+            # And a webhook_log row points at the pending conflict
+            log = await session.execute(
+                text(
+                    "SELECT status, conflict_id FROM webhook_logs "
+                    "ORDER BY created_at DESC LIMIT 1"
+                )
+            )
+            log_row = log.fetchone()
+            assert log_row.status == "conflict_pending"
+            assert str(log_row.conflict_id) == data["conflict_id"]

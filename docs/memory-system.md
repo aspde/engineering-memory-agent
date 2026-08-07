@@ -25,6 +25,8 @@ Read Path:
 
 **写入**：`write_chunks(document_id, chunks)` 将文本片段 embed 后批量写入 `chunks` 表。
 
+`write_chunks` 是幂等的：每个 chunk 计算 SHA-256（`content_hash`），按 `(document_id, content_hash)` 唯一索引去重——重复摄取同一文档会跳过已存在的 chunk（不重新嵌入、不产生重复行），`ON CONFLICT DO NOTHING` 兜底并发竞争。文档内容变更时，仅新增/变更的 chunk 会被写入。
+
 **检索**：`retrieve(query, top_k, use_llm_rerank=False)` 执行完整管道：
 - `embed_query()` → `vector_search()` → `rerank_cross_encoder()`（默认）或 `rerank_llm()`（可选）→ 返回 `RetrievalResult` 列表
 
@@ -56,6 +58,8 @@ extract_entities(content) ─┘
 
 ### 3. 智能写入与去重
 
+写入是**内容哈希幂等**的：`write_memory` 先对原始内容计算 SHA-256（`content_hash`，memories 表唯一索引）。若该内容已存在（重新摄取同一 commit、同一文档、重放的 webhook），直接返回 `action="duplicate"`，不执行任何 LLM 提取。此处的"完全重复"去重与下面的相似度去重（"近似重复"）互补，顺序为：先哈希精确去重，再相似度分级。
+
 `write_memory(content, source_type)` 在写入前查询已有记忆：
 
 | 相似度 | 行为 |
@@ -66,6 +70,8 @@ extract_entities(content) ─┘
 | < 0.60 | 作为全新记忆插入 |
 
 合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本）；矛盾检测失败则**传播失败**——写入不落库，绝不把可能矛盾的记忆静默写入。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数，写入继续。
+
+检测到矛盾时，两种路径都进入人工处理（HITL），绝不静默丢弃：**agent 路径**通过 `interrupt()` 暂停对话等待选择；**webhook/连接器路径**没有交互会话，冲突内容落入 `pending_conflicts` 队列（保存 `_deferred` 载荷），由人通过 `GET/POST /api/conflicts` 用相同的四种选项（keep_existing / overwrite / merge / keep_both）经同一个 `resolve_conflict()` 解决。队列对同一冲突（同一 `existing_id` + 同一内容哈希）只保留一条 pending 记录——webhook 至少一次投递的重放不会堆叠重复行；已解决的行离开去重范围，同类内容再次出现会正常重新入队。
 
 ### 4. 艾宾浩斯遗忘衰减
 

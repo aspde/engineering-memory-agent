@@ -45,6 +45,17 @@ def _mock_session_factory(rows: list):
     return factory
 
 
+def _mock_session_factory_with_session(mock_session: AsyncMock, results: list):
+    """Wrap a caller-provided ``mock_session`` whose execute() returns
+    successive ``results`` items (for multi-call flows like write_chunks).
+    """
+    mock_session.execute.side_effect = results
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=mock_session)
+    ctx.__aexit__ = AsyncMock(return_value=None)
+    return MagicMock(return_value=ctx)
+
+
 class TestTokenize:
     """The jieba-based tokenizer is the core of sparse_search."""
 
@@ -357,3 +368,75 @@ class TestRetrieveMultiQuery:
 
         results = await mod.retrieve_multi_query("query", top_k=5)
         assert results == []
+
+
+class TestWriteChunksIdempotency:
+    """Content-hash idempotency in write_chunks."""
+
+    @pytest.mark.asyncio
+    async def test_reingest_skips_all_existing_chunks(self) -> None:
+        """Re-ingesting an unchanged document embeds/writes nothing."""
+        from backend.service import retrieval as mod
+
+        chunks = ["chunk one", "chunk two"]
+        existing_hashes = [mod._content_hash(c) for c in chunks]
+
+        select_result = MagicMock()
+        select_result.fetchall.return_value = [(h,) for h in existing_hashes]
+        insert_result = MagicMock()
+        mock_session = AsyncMock()
+
+        mock_emb = AsyncMock()
+        with (
+            patch.object(
+                mod,
+                "get_session_factory",
+                return_value=_mock_session_factory_with_session(
+                    mock_session, [select_result, insert_result]
+                ),
+            ),
+            patch.object(mod, "get_embedding_provider", return_value=mock_emb),
+        ):
+            count = await mod.write_chunks("doc-1", chunks)
+
+        assert count == 0
+        mock_emb.embed.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_partial_reingest_writes_only_new_chunks(self) -> None:
+        """Only chunks whose hash isn't stored yet are embedded + inserted."""
+        from backend.service import retrieval as mod
+
+        chunks = ["brand new chunk", "unchanged chunk"]
+        existing_hashes = [mod._content_hash(chunks[1])]  # second already stored
+
+        select_result = MagicMock()
+        select_result.fetchall.return_value = [(h,) for h in existing_hashes]
+        insert_result = MagicMock()
+        mock_session = AsyncMock()
+
+        mock_emb = AsyncMock()
+        mock_emb.embed.return_value = [[0.1] * 1024]  # only the new chunk
+        with (
+            patch.object(
+                mod,
+                "get_session_factory",
+                return_value=_mock_session_factory_with_session(
+                    mock_session, [select_result, insert_result]
+                ),
+            ),
+            patch.object(mod, "get_embedding_provider", return_value=mock_emb),
+        ):
+            count = await mod.write_chunks("doc-1", chunks)
+
+        assert count == 1
+        # Embed called with only the brand-new chunk
+        assert mock_emb.embed.call_args[0][0] == ["brand new chunk"]
+
+        # INSERT (2nd execute) carries the new chunk's hash + original index,
+        # and an ON CONFLICT clause for race-safe idempotency.
+        insert_sql, insert_params = mock_session.execute.call_args_list[1][0]
+        assert insert_params["content_0"] == "brand new chunk"
+        assert insert_params["idx_0"] == 0
+        assert insert_params["hash_0"] == mod._content_hash(chunks[0])
+        assert "ON CONFLICT (document_id, content_hash) DO NOTHING" in str(insert_sql)

@@ -7,11 +7,13 @@ Write path:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from backend.db import get_session_factory
 from backend.service.embedding_service import get_embedding_provider
@@ -28,6 +30,15 @@ SUPPLEMENT_THRESHOLD = 0.60  # loosely related → mark as supplement
 # below 0.60 → unrelated, insert as new
 
 
+def _content_hash(content: str) -> str:
+    """SHA-256 of raw content — the exact-duplicate idempotency key.
+
+    Same raw content (same commit, same doc, retried webhook) produces the
+    same hash, so re-ingestion can be skipped before any LLM extraction runs.
+    """
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
 async def write_memory(
     content: str,
     source_type: str = "conversation",
@@ -35,11 +46,32 @@ async def write_memory(
 ) -> dict[str, Any]:
     """Extract memory from *content*, check against existing ones, merge or insert.
 
+    Idempotent per content hash: if *content* was already ingested, skips
+    extraction entirely and returns the existing memory with
+    ``action="duplicate"``.  Otherwise proceeds through the similarity
+    grading pipeline.
+
     Returns the final memory record (either the newly inserted one or the
     merged existing one).
     """
     provider = get_embedding_provider()
     session_factory = get_session_factory()
+
+    # 0. Idempotency gate — skip exact duplicates before paying for extraction.
+    content_hash = _content_hash(content)
+    existing_by_hash = await _find_by_content_hash(content_hash, session_factory)
+    if existing_by_hash:
+        logger.info(
+            "Duplicate content hash %s (source=%s) — skipping write",
+            content_hash[:12],
+            source_type,
+        )
+        return {
+            "id": str(existing_by_hash["id"]),
+            "action": "duplicate",
+            "summary": existing_by_hash["summary"],
+            "entity_ids": [],
+        }
 
     # 1. Run extraction
     extracted = await extract_memory(content)
@@ -61,20 +93,20 @@ async def write_memory(
 
     # 4. Act on the grade
     if grade >= MERGE_THRESHOLD and existing:
-        return await _merge_memory(existing, extracted, embedding, source_type, metadata)
+        return await _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash)
 
     elif grade >= CONFLICT_CHECK and existing:
         has_conflict = await _detect_conflict(existing, extracted)
         if has_conflict:
-            return await _mark_conflict(existing, extracted, embedding, source_type, metadata)
+            return await _mark_conflict(existing, extracted, embedding, source_type, metadata, content_hash)
         # Close but not contradictory — supplement
-        return await _supplement_memory(existing, extracted, embedding, source_type, metadata)
+        return await _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash)
 
     elif grade >= SUPPLEMENT_THRESHOLD and existing:
-        return await _supplement_memory(existing, extracted, embedding, source_type, metadata)
+        return await _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash)
 
     # 5. Unrelated — insert as new
-    return await _insert_memory(extracted, embedding, source_type, metadata)
+    return await _insert_memory(extracted, embedding, source_type, metadata, content_hash)
 
 
 async def _find_similar(embedding, session_factory):
@@ -99,6 +131,23 @@ async def _find_similar(embedding, session_factory):
         if row is None:
             return 0.0, None
         return row.similarity, dict(row._mapping)
+
+
+async def _find_by_content_hash(content_hash: str, session_factory) -> dict | None:
+    """Find a non-deleted memory already stored for this exact content hash."""
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                """\
+                SELECT id, summary FROM memories
+                WHERE content_hash = :hash AND deleted_at IS NULL
+                LIMIT 1
+                """
+            ),
+            {"hash": content_hash},
+        )
+        row = result.fetchone()
+        return dict(row._mapping) if row else None
 
 
 async def _detect_conflict(existing: dict, extracted: dict) -> bool:
@@ -140,7 +189,7 @@ New summary: {new_summary}
 Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}"""
 
 
-async def _merge_memory(existing, extracted, embedding, source_type, metadata):
+async def _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Merge new memory into existing one — update summary and entities.
 
     Fails safe: if the LLM merge call fails, returns the existing memory
@@ -168,50 +217,85 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata):
             seen[name] = e
     merged_entities = list(seen.values())
 
-    # Merge relations
-    existing_relations = existing.get("relations") or []
-    new_relations = extracted.get("relations") or []
-    merged_relations = existing_relations + new_relations
+    # Merge relations — deduplicate by (from, to, type).  Extraction emits
+    # these keys (see extraction.extract_relations); a subject/predicate/object
+    # key would collapse every relation to the first one.
+    rel_seen: set[tuple[str, str, str]] = set()
+    merged_relations: list[dict] = []
+    for r in (existing.get("relations") or []) + (extracted.get("relations") or []):
+        key = (r.get("from", ""), r.get("to", ""), r.get("type", ""))
+        if key not in rel_seen:
+            rel_seen.add(key)
+            merged_relations.append(r)
+
+    # Re-embed the merged summary.  The incoming ``embedding`` was computed
+    # over the *new* content's summary; storing it against the merged text
+    # would leave semantic search ranking this memory by a vector that no
+    # longer represents its stored summary.
+    vectors = await get_embedding_provider().embed([merged_summary.strip()])
+    merged_embedding = vectors[0]
 
     session_factory = get_session_factory()
-    async with session_factory() as session:
-        # Merge metadata — new keys overwrite existing, preserving old keys
-        existing_meta: dict[str, Any] = {}
-        if existing.get("meta"):
-            if isinstance(existing["meta"], str):
-                try:
-                    existing_meta = json.loads(existing["meta"])
-                except (json.JSONDecodeError, TypeError):
-                    pass
-            elif isinstance(existing["meta"], dict):
-                existing_meta = existing["meta"]
-        tid = current_thread_id.get("")
-        if tid:
-            metadata = (metadata or {}) | {"thread_id": tid}
-        merged_meta = existing_meta | (metadata or {})
+    try:
+        async with session_factory() as session:
+            # Merge metadata — new keys overwrite existing, preserving old keys
+            existing_meta: dict[str, Any] = {}
+            if existing.get("meta"):
+                if isinstance(existing["meta"], str):
+                    try:
+                        existing_meta = json.loads(existing["meta"])
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                elif isinstance(existing["meta"], dict):
+                    existing_meta = existing["meta"]
+            tid = current_thread_id.get("")
+            if tid:
+                metadata = (metadata or {}) | {"thread_id": tid}
+            merged_meta = existing_meta | (metadata or {})
 
-        await session.execute(
-            text(
-                """\
-                UPDATE memories
-                SET summary = :summary,
-                    entities = :entities,
-                    relations = :relations,
-                    embedding = :embedding,
-                    meta = :meta
-                WHERE id = :id
-                """
-            ),
-            {
-                "id": existing["id"],
-                "summary": merged_summary.strip(),
-                "entities": json.dumps(merged_entities, ensure_ascii=False),
-                "relations": json.dumps(merged_relations, ensure_ascii=False),
-                "embedding": str(embedding),
-                "meta": json.dumps(merged_meta),
-            },
+            await session.execute(
+                text(
+                    """\
+                    UPDATE memories
+                    SET summary = :summary,
+                        entities = :entities,
+                        relations = :relations,
+                        embedding = :embedding,
+                        meta = :meta,
+                        content_hash = :content_hash
+                    WHERE id = :id
+                    """
+                ),
+                {
+                    "id": existing["id"],
+                    "summary": merged_summary.strip(),
+                    "entities": json.dumps(merged_entities, ensure_ascii=False),
+                    "relations": json.dumps(merged_relations, ensure_ascii=False),
+                    "embedding": str(merged_embedding),
+                    "meta": json.dumps(merged_meta),
+                    "content_hash": content_hash,
+                },
+            )
+            await session.commit()
+    except IntegrityError:
+        # A concurrent identical write already stored this content_hash on
+        # another live memory — the merge reassigns the hash here.  Report
+        # that stored memory as the duplicate instead of 500ing on the unique
+        # index (same recovery as _insert_memory's race branch).
+        winner = await _find_by_content_hash(content_hash, session_factory)
+        if winner is None:
+            raise
+        logger.info(
+            "Merge lost content-hash race for %s — reusing existing %s",
+            content_hash[:12],
+            winner["id"],
         )
-        await session.commit()
+        return {
+            "id": str(winner["id"]),
+            "action": "duplicate",
+            "summary": winner["summary"],
+            "entity_ids": [],
+        }
 
     # Fire-and-forget entity normalisation (best-effort, non-blocking)
     _schedule_normalization(str(existing["id"]), merged_entities)
@@ -236,7 +320,7 @@ New summary: {new_summary}
 Merged summary:"""
 
 
-async def _mark_conflict(existing, extracted, embedding, source_type, metadata):
+async def _mark_conflict(existing, extracted, embedding, source_type, metadata, content_hash):
     """Return conflict data without auto-inserting — defers to HITL.
 
     The caller (agent check_conflict_node) will pause and let the human
@@ -258,6 +342,7 @@ async def _mark_conflict(existing, extracted, embedding, source_type, metadata):
                 "conflicts_with": str(existing["id"]),
                 "conflicting_summary": existing["summary"],
             },
+            "content_hash": content_hash,
         },
     }
 
@@ -283,17 +368,17 @@ def _schedule_normalization(memory_id: str, entities: list[dict]) -> None:
         logger.debug("No event loop available; skipping entity normalisation for %s", memory_id)
 
 
-async def _supplement_memory(existing, extracted, embedding, source_type, metadata):
+async def _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Insert new memory, linked to existing as a supplement."""
     enriched_meta = (metadata or {}) | {
         "supplements": str(existing["id"]),
         "parent_summary": existing["summary"],
     }
-    return await _insert_memory(extracted, embedding, source_type, enriched_meta)
+    return await _insert_memory(extracted, embedding, source_type, enriched_meta, content_hash)
 
 
-async def _insert_memory(extracted, embedding, source_type, metadata):
-    """Insert a fresh memory row."""
+async def _insert_memory(extracted, embedding, source_type, metadata, content_hash):
+    """Insert a fresh memory row (idempotent on content_hash)."""
     tid = current_thread_id.get("")
     if tid:
         metadata = (metadata or {}) | {"thread_id": tid}
@@ -303,8 +388,9 @@ async def _insert_memory(extracted, embedding, source_type, metadata):
         result = await session.execute(
             text(
                 """\
-                INSERT INTO memories (source_type, summary, entities, relations, embedding, meta)
-                VALUES (:source_type, :summary, :entities, :relations, :embedding, :meta)
+                INSERT INTO memories (source_type, summary, entities, relations, embedding, meta, content_hash)
+                VALUES (:source_type, :summary, :entities, :relations, :embedding, :meta, :content_hash)
+                ON CONFLICT (content_hash) DO NOTHING
                 RETURNING id
                 """
             ),
@@ -315,10 +401,23 @@ async def _insert_memory(extracted, embedding, source_type, metadata):
                 "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
                 "embedding": str(embedding),
                 "meta": json.dumps(metadata or {}),
+                "content_hash": content_hash,
             },
         )
         await session.commit()
-        new_id = result.fetchone()[0]
+        row = result.fetchone()
+        if row is None:
+            # Lost a race to a concurrent identical write — the unique index
+            # rejected our row.  Re-fetch and report the stored one.
+            winner = await _find_by_content_hash(content_hash, session_factory)
+            logger.info("Concurrent duplicate insert for hash %s — reusing existing", content_hash[:12])
+            return {
+                "id": str(winner["id"]),
+                "action": "duplicate",
+                "summary": winner["summary"],
+                "entity_ids": [],
+            }
+        new_id = row[0]
 
     # 6. Fire-and-forget entity normalisation (best-effort, non-blocking)
     _schedule_normalization(str(new_id), extracted.get("entities") or [])
@@ -353,6 +452,7 @@ async def resolve_conflict(
     embedding = deferred_payload["embedding"]
     source_type = deferred_payload["source_type"]
     metadata = deferred_payload["metadata"]
+    content_hash = deferred_payload.get("content_hash")
 
     session_factory = get_session_factory()
 
@@ -360,30 +460,52 @@ async def resolve_conflict(
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
 
     elif resolution == "overwrite":
-        async with session_factory() as session:
-            await session.execute(
-                text(
-                    """\
-                    UPDATE memories
-                    SET summary = :summary,
-                        entities = :entities,
-                        relations = :relations,
-                        embedding = :embedding,
-                        meta = :meta,
-                        updated_at = NOW()
-                    WHERE id = :id
-                    """
-                ),
-                {
-                    "id": existing_id,
-                    "summary": extracted["summary"],
-                    "entities": json.dumps(extracted.get("entities") or [], ensure_ascii=False),
-                    "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
-                    "embedding": str(embedding),
-                    "meta": json.dumps(metadata or {}),
-                },
+        try:
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        """\
+                        UPDATE memories
+                        SET summary = :summary,
+                            entities = :entities,
+                            relations = :relations,
+                            embedding = :embedding,
+                            meta = :meta,
+                            content_hash = :content_hash,
+                            updated_at = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "id": existing_id,
+                        "summary": extracted["summary"],
+                        "entities": json.dumps(extracted.get("entities") or [], ensure_ascii=False),
+                        "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
+                        "embedding": str(embedding),
+                        "meta": json.dumps(metadata or {}),
+                        "content_hash": content_hash,
+                    },
+                )
+                await session.commit()
+        except IntegrityError:
+            # The overwritten content's hash already lives on another live
+            # memory (it got ingested separately while this conflict sat in
+            # the queue).  The new content IS stored — report that row as the
+            # resolution rather than 500ing on the unique index.
+            winner = await _find_by_content_hash(content_hash, session_factory)
+            if winner is None:
+                raise
+            logger.info(
+                "Overwrite lost content-hash race for %s — content already stored as %s",
+                content_hash[:12],
+                winner["id"],
             )
-            await session.commit()
+            return {
+                "id": str(winner["id"]),
+                "action": "duplicate",
+                "resolution": "overwrite",
+                "summary": winner["summary"],
+            }
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "overwrite"}
 
     elif resolution == "merge":
@@ -430,43 +552,70 @@ async def resolve_conflict(
                 seen[name] = e
         merged_entities = list(seen.values())
 
-        # Merge relations — deduplicate by (subject, predicate, object)
-        rel_seen: set[tuple] = set()
+        # Merge relations — deduplicate by (from, to, type).  Extraction emits
+        # these keys; the old (subject, predicate, object) key was always
+        # ("", "", ""), so every relation after the first was dropped.
+        rel_seen: set[tuple[str, str, str]] = set()
         merged_relations: list[dict] = []
         for r in existing_relations + (extracted.get("relations") or []):
-            key = (r.get("subject", ""), r.get("predicate", ""), r.get("object", ""))
+            key = (r.get("from", ""), r.get("to", ""), r.get("type", ""))
             if key not in rel_seen:
                 rel_seen.add(key)
                 merged_relations.append(r)
 
-        async with session_factory() as session:
-            await session.execute(
-                text(
-                    """\
-                    UPDATE memories
-                    SET summary = :summary,
-                        entities = :entities,
-                        relations = :relations,
-                        embedding = :embedding,
-                        meta = :meta,
-                        updated_at = NOW()
-                    WHERE id = :id
-                    """
-                ),
-                {
-                    "id": existing_id,
-                    "summary": merged_summary.strip(),
-                    "entities": json.dumps(merged_entities, ensure_ascii=False),
-                    "relations": json.dumps(merged_relations, ensure_ascii=False),
-                    "embedding": str(embedding),
-                    "meta": json.dumps(metadata or {}),
-                },
+        # Re-embed the merged summary (same reasoning as _merge_memory): the
+        # stored vector must match the stored text.
+        vectors = await get_embedding_provider().embed([merged_summary.strip()])
+        merged_embedding = vectors[0]
+
+        try:
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        """\
+                        UPDATE memories
+                        SET summary = :summary,
+                            entities = :entities,
+                            relations = :relations,
+                            embedding = :embedding,
+                            meta = :meta,
+                            content_hash = :content_hash,
+                            updated_at = NOW()
+                        WHERE id = :id
+                        """
+                    ),
+                    {
+                        "id": existing_id,
+                        "summary": merged_summary.strip(),
+                        "entities": json.dumps(merged_entities, ensure_ascii=False),
+                        "relations": json.dumps(merged_relations, ensure_ascii=False),
+                        "embedding": str(merged_embedding),
+                        "meta": json.dumps(metadata or {}),
+                        "content_hash": content_hash,
+                    },
+                )
+                await session.commit()
+        except IntegrityError:
+            # Same guard as the overwrite branch — the new content's hash
+            # already lives on another live memory; report it as the outcome.
+            winner = await _find_by_content_hash(content_hash, session_factory)
+            if winner is None:
+                raise
+            logger.info(
+                "Merge lost content-hash race for %s — content already stored as %s",
+                content_hash[:12],
+                winner["id"],
             )
-            await session.commit()
+            return {
+                "id": str(winner["id"]),
+                "action": "duplicate",
+                "resolution": "merge",
+                "summary": winner["summary"],
+            }
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "merge"}
 
     elif resolution == "keep_both":
-        return await _insert_memory(extracted, embedding, source_type, metadata)
+        return await _insert_memory(extracted, embedding, source_type, metadata, content_hash)
 
     else:
         logger.warning("Unknown conflict resolution '%s', defaulting to keep_existing", resolution)
