@@ -9,7 +9,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -212,11 +214,53 @@ async def vector_search(
         return [dict(r._mapping) for r in result]
 
 
+# ── Query-embedding cache ─────────────────────────────────────────────
+# Repeated queries (SSE reconnects, same-question re-asks, eval re-runs)
+# re-embed identical text.  BGE-M3 on CPU costs ~30-50ms per query; the LRU
+# cache turns a repeat into a dict lookup.  Thread-locked (not asyncio.Lock)
+# so it is safe across event loops — pytest function-scoped loops and agent
+# background tasks touch the same module state.  Entries need no TTL: the
+# provider is a process singleton whose model config never changes.  The
+# cache deliberately does not deduplicate concurrent in-flight embeds — a
+# simultaneous duplicate costs one extra provider call (~50ms), cheaper than
+# the bookkeeping.
+
+_QUERY_EMBED_CACHE_MAX = 1024  # 1024 × 1024 floats ≈ 8 MB worst case
+_query_embed_cache: OrderedDict[str, tuple[float, ...]] = OrderedDict()
+_query_embed_cache_lock = threading.Lock()
+
+
+def clear_embed_query_cache() -> None:
+    """Drop cached query embeddings — tests and config changes call this."""
+    with _query_embed_cache_lock:
+        _query_embed_cache.clear()
+
+
 async def embed_query(query: str) -> list[float]:
-    """Embed a single query string, returning a flat vector."""
+    """Embed a single query string, returning a flat vector.
+
+    LRU-cached by query text: an identical query embedded earlier in this
+    process returns from cache without hitting the provider.
+
+    Returns a ``list`` (never a ``tuple``): callers serialise it via
+    ``str()`` into pgvector's ``[..]`` syntax, which a tuple's ``(..)``
+    breaks.
+    """
+    with _query_embed_cache_lock:
+        hit = _query_embed_cache.get(query)
+        if hit is not None:
+            _query_embed_cache.move_to_end(query)
+            return list(hit)
+
     provider = get_embedding_provider()
     vectors = await provider.embed([query])
-    return vectors[0]
+
+    with _query_embed_cache_lock:
+        _query_embed_cache[query] = tuple(vectors[0])
+        _query_embed_cache.move_to_end(query)
+        if len(_query_embed_cache) > _QUERY_EMBED_CACHE_MAX:
+            _query_embed_cache.popitem(last=False)
+    return list(vectors[0])
 
 
 def assemble(results: list[RetrievalResult], max_items: int = 5) -> str:

@@ -527,3 +527,102 @@ class TestDocumentIdTraceability:
 
         assert len(results) == 1
         assert "document_id" not in results[0].metadata
+
+
+class TestEmbedQueryCache:
+    """LRU caching on embed_query — repeated queries skip the provider."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_cache(self) -> None:
+        from backend.service import retrieval as mod
+
+        mod.clear_embed_query_cache()
+        yield
+        mod.clear_embed_query_cache()
+
+    def _mock_provider(self, monkeypatch):
+        from backend.service import retrieval as mod
+
+        provider = MagicMock()
+        provider.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
+        monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_identical_query_hits_cache(self, monkeypatch) -> None:
+        """Second call with the same query must not re-embed."""
+        from backend.service import retrieval as mod
+
+        provider = self._mock_provider(monkeypatch)
+        first = await mod.embed_query("pgvector 检索")
+        second = await mod.embed_query("pgvector 检索")
+        provider.embed.assert_awaited_once()
+        assert first == [0.1, 0.2, 0.3]
+        assert second == [0.1, 0.2, 0.3]
+
+    @pytest.mark.asyncio
+    async def test_different_queries_embed_separately(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        provider = self._mock_provider(monkeypatch)
+        await mod.embed_query("查询 A")
+        await mod.embed_query("查询 B")
+        assert provider.embed.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_returns_list_for_pgvector_syntax(self, monkeypatch) -> None:
+        """str(vec) must yield [..] (list), not (..) (tuple) — pgvector input."""
+        from backend.service import retrieval as mod
+
+        self._mock_provider(monkeypatch)
+        vec = await mod.embed_query("x")
+        assert isinstance(vec, list)
+        assert str(vec) == "[0.1, 0.2, 0.3]"
+
+    @pytest.mark.asyncio
+    async def test_lru_evicts_least_recently_used(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        provider = self._mock_provider(monkeypatch)
+        monkeypatch.setattr(mod, "_QUERY_EMBED_CACHE_MAX", 2)
+
+        await mod.embed_query("q1")
+        await mod.embed_query("q2")
+        await mod.embed_query("q3")  # evicts q1 (oldest)
+        assert provider.embed.await_count == 3
+
+        # q1's re-insertion evicts q2 (now oldest); q3 survives.
+        await mod.embed_query("q1")
+        assert provider.embed.await_count == 4
+        await mod.embed_query("q3")  # still cached
+        assert provider.embed.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_hit_reorders_lru_slot(self, monkeypatch) -> None:
+        """A hit makes the key newest, so it survives a later eviction."""
+        from backend.service import retrieval as mod
+
+        provider = self._mock_provider(monkeypatch)
+        monkeypatch.setattr(mod, "_QUERY_EMBED_CACHE_MAX", 2)
+
+        await mod.embed_query("q1")
+        await mod.embed_query("q2")
+        await mod.embed_query("q1")  # hit → q1 newest, q2 oldest
+        await mod.embed_query("q3")  # evicts q2
+        assert provider.embed.await_count == 3  # q1 hit was free
+
+        # q1 survived the eviction (the reorder paid off); q2 was evicted.
+        await mod.embed_query("q1")
+        assert provider.embed.await_count == 3
+        await mod.embed_query("q2")  # evicted → re-embedded
+        assert provider.embed.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_clear_embed_query_cache(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        provider = self._mock_provider(monkeypatch)
+        await mod.embed_query("q")
+        mod.clear_embed_query_cache()
+        await mod.embed_query("q")
+        assert provider.embed.await_count == 2
