@@ -37,6 +37,64 @@ def _noop_conversation_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """Reset the test database once per pytest run (hermetic tests).
+
+    Drops and recreates the ``public`` schema, then recreates every table
+    via ``init_db()``.  Without this, API tests that write to the real
+    ``ema_test`` database accumulate rows across runs — a previous run's
+    inserts leak into the next, making tests order- and history-dependent.
+
+    The ``ema_test`` database itself is created if missing (fresh CI
+    services only provision ``ema_dev``, e.g. via POSTGRES_DB), so a
+    one-liner ``pytest`` works everywhere.
+
+    Runs before collection, so a fresh DB is guaranteed for the whole
+    session regardless of which module imports what first.
+    """
+    del session  # unused
+    import asyncio
+    from urllib.parse import urlsplit, urlunsplit
+
+    from sqlalchemy import text
+
+    from backend.db import get_engine
+    from backend.db.schema import init_db
+    from backend.shared.config import config
+
+    async def _ensure_test_db() -> None:
+        """Create the test database if it does not exist."""
+        import asyncpg
+
+        parts = urlsplit(config.database_url)
+        dbname = parts.path.lstrip("/")
+        if not dbname or dbname == "postgres":
+            return  # already the maintenance DB — nothing to create
+        admin_url = urlunsplit((parts.scheme, parts.netloc, "/postgres", "", ""))
+        conn = await asyncpg.connect(admin_url)
+        try:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname = $1", dbname
+            )
+            if not exists:
+                await conn.execute(f'CREATE DATABASE "{dbname}"')
+        finally:
+            await conn.close()
+
+    async def _reset() -> None:
+        engine = get_engine()
+        async with engine.begin() as conn:
+            await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+            await conn.execute(text("CREATE SCHEMA public"))
+        await init_db()
+
+    # asyncio.run uses a fresh event loop; the NullPool in test mode closes
+    # every connection before returning, so no connection survives into the
+    # pytest-asyncio function-scoped loops below.
+    asyncio.run(_ensure_test_db())
+    asyncio.run(_reset())
+
+
 @pytest.fixture
 async def async_client() -> AsyncGenerator[AsyncClient]:
     """Create an async HTTP client for testing FastAPI endpoints.

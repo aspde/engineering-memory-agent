@@ -191,8 +191,12 @@ class TestCallLLMNode:
     @pytest.mark.asyncio
     async def test_returns_aimessage_no_tools(self, monkeypatch) -> None:
         """When LLM returns plain text, node produces an AIMessage."""
+        from tests._fake_llm import content_stream, sequential_stream
+
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {"content": "Hello, how can I help?"}
+        mock_provider.chat_raw_stream = sequential_stream(
+            content_stream("Hello, how can I help?")
+        )
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -210,8 +214,10 @@ class TestCallLLMNode:
     @pytest.mark.asyncio
     async def test_prepends_system_prompt_once(self, monkeypatch) -> None:
         """First call adds SystemMessage; second call should not duplicate."""
+        from tests._fake_llm import content_stream, sequential_stream
+
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {"content": "ok"}
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -221,14 +227,18 @@ class TestCallLLMNode:
         result = await mod.call_llm_node(
             _make_state([HumanMessage(content="hi")]), tools=ALL_TOOLS
         )
-        call_args = mock_provider.chat_raw.call_args
+        call_args = mock_provider.chat_raw_stream.call_args
         sent_messages = call_args.kwargs["messages"]
         assert sent_messages[0]["role"] == "system"
 
     @pytest.mark.asyncio
     async def test_handles_llm_error_gracefully(self, monkeypatch) -> None:
+        from tests._fake_llm import raise_stream, sequential_stream
+
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.side_effect = RuntimeError("API down")
+        mock_provider.chat_raw_stream = sequential_stream(
+            raise_stream(RuntimeError("API down"))
+        )
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -315,10 +325,12 @@ class TestGenerateFinalNode:
     async def test_tool_results_this_turn_still_synthesizes(self, monkeypatch) -> None:
         """A ToolMessage in the current turn forces the synthesis path, so the
         tool output can be folded into the final-answer context."""
+        from tests._fake_llm import text_stream
+
         import agent.nodes as mod
 
         mock_provider = AsyncMock()
-        mock_provider.chat.return_value = "Synthesized from tool output."
+        mock_provider.chat_stream = text_stream("Synthesized from tool output.")
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         state = _make_state(
@@ -404,19 +416,20 @@ class TestCheckApprovalNode:
     @pytest.mark.asyncio
     async def test_sensitive_tool_triggers_interrupt(self, monkeypatch) -> None:
         """Through compiled graph, a write tool triggers interrupt."""
+        from tests._fake_llm import sequential_stream, tool_call_stream
+
         tools = [_make_write_tool()]
 
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {
-            "content": "I'll write that.",
-            "tool_calls": [
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
                 {
                     "id": "call_1",
                     "name": "write_memory_tool",
                     "args": {"content": "test"},
                 }
-            ],
-        }
+            ])
+        )
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -435,19 +448,20 @@ class TestCheckApprovalNode:
     @pytest.mark.asyncio
     async def test_ingest_git_repo_triggers_interrupt(self, monkeypatch) -> None:
         """Through compiled graph, ingest tool also triggers interrupt."""
+        from tests._fake_llm import sequential_stream, tool_call_stream
+
         tools = [_make_ingest_tool()]
 
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {
-            "content": "Let me ingest.",
-            "tool_calls": [
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
                 {
                     "id": "call_2",
                     "name": "ingest_git_repo_tool",
                     "args": {"repo_path": "/tmp/repo", "max_commits": 10},
                 }
-            ],
-        }
+            ])
+        )
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -538,17 +552,18 @@ class TestCheckConflictNode:
 
         # Step 1: approve the write_memory_tool header
         # Step 2: write_memory_tool returns conflict → check_conflict interrupt
+        from tests._fake_llm import sequential_stream, tool_call_stream
+
         from agent.graph import build_agent_graph
         from agent.tools import write_memory_tool
 
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {
-            "content": "I'll write that.",
-            "tool_calls": [{
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([{
                 "id": "call_int", "name": "write_memory_tool",
                 "args": {"content": "EMA uses MySQL"},
-            }],
-        }
+            }])
+        )
 
         monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_provider)
         monkeypatch.setattr(

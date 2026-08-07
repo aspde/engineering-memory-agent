@@ -152,11 +152,18 @@ class TestRunEval:
         assert len(result.errors) == 1
         assert result.errors[0]["id"] == "q2"
         assert "synthetic failure" in result.errors[0]["error"]
-        # The two successful queries still produce per_query rows
-        assert len(result.per_query) == 2
-        # Aggregates computed over successful rows only
-        assert result.n_queries == 3  # total attempted
-        assert result.metric("recall@5") == 1.0  # both succeeded queries hit
+        # Failed queries still produce per_query rows (zero-recall), so they
+        # count toward the aggregate denominator instead of inflating it.
+        assert len(result.per_query) == 3
+        q2_row = next(q for q in result.per_query if q["id"] == "q2")
+        assert q2_row["error"] == "synthetic failure for 'beta query'"
+        assert q2_row["recall@5"] == 0.0
+        # Aggregates include the failed query: q1=1.0, q2=0.0, q3=1.0 → 2/3.
+        # (Previously the failure was dropped, so recall read 1.0 while a
+        # rising error rate made the numbers look *better*, not worse.)
+        assert result.n_queries == 3
+        assert result.metric("recall@5") == pytest.approx(2 / 3)
+        assert result.metric("mrr") == pytest.approx(2 / 3)
 
     @pytest.mark.asyncio
     async def test_reraise_propagates(
@@ -191,6 +198,81 @@ class TestRunEval:
         ids = [r["id"] for r in result.per_query]
         assert set(ids) == {"q1", "q2"}
         assert result.n_queries == 2
+
+    @pytest.mark.asyncio
+    async def test_semantic_relevance_supplements_substring(
+        self, monkeypatch, fake_items
+    ) -> None:
+        """With semantic_relevance=True, a result that misses the fingerprint
+        but is semantically close still counts as relevant (OR combination)."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import tests.eval.runner as runner_mod
+
+        # q1's retrieved item paraphrases the target — no substring match.
+        results_per_query = {
+            "alpha query": [{"content": "a paraphrase that omits the keyword"}],
+            "beta query": [{"content": "beta"}],
+            "gamma query": [{"content": "gamma"}],
+        }
+        adapter = _make_fake_adapter("content", results_per_query)
+        _patch_adapter(monkeypatch, adapter)
+
+        # The fake labeled set's seed_ids (s1) are not in the real seed file,
+        # so supply a matching seed summary for the semantic pass to target.
+        monkeypatch.setattr(
+            runner_mod,
+            "load_seed_memories",
+            lambda: [SimpleNamespace(id="s1", summary="alpha summary")],
+        )
+        # The semantic channel marks q1's single result relevant.
+        monkeypatch.setattr(
+            runner_mod,
+            "semantic_relevance_mask",
+            AsyncMock(return_value=[True]),
+        )
+
+        cfg = EvalConfig(name="semantic", retriever="chunk", top_k=5)
+        result = await run_eval(cfg, fake_items, semantic_relevance=True)
+
+        # q1 now counts as a hit even though the fingerprint missed.
+        assert result.metric("recall@5") == 1.0
+        assert result.metric("mrr") == 1.0
+        q1 = next(q for q in result.per_query if q["id"] == "q1")
+        assert q1["semantic_relevance"] is True
+
+    @pytest.mark.asyncio
+    async def test_semantic_relevance_off_by_default(
+        self, monkeypatch, fake_items
+    ) -> None:
+        """Without the flag, a fingerprint miss stays a miss — baseline
+        behaviour and the deterministic default are unchanged."""
+        from unittest.mock import AsyncMock
+
+        import tests.eval.runner as runner_mod
+
+        results_per_query = {
+            "alpha query": [{"content": "a paraphrase that omits the keyword"}],
+            "beta query": [{"content": "beta"}],
+            "gamma query": [{"content": "gamma"}],
+        }
+        adapter = _make_fake_adapter("content", results_per_query)
+        _patch_adapter(monkeypatch, adapter)
+
+        monkeypatch.setattr(
+            runner_mod,
+            "semantic_relevance_mask",
+            AsyncMock(return_value=[True]),
+        )
+
+        cfg = EvalConfig(name="baseline", retriever="chunk", top_k=5)
+        result = await run_eval(cfg, fake_items)
+
+        # q1 missed (fingerprint absent) and the semantic channel was not
+        # consulted — recall is 2/3, matching the substring-only baseline.
+        assert result.metric("recall@5") == pytest.approx(2 / 3)
+        runner_mod.semantic_relevance_mask.assert_not_awaited()
 
 
 # ── Aggregation ───────────────────────────────────────────────

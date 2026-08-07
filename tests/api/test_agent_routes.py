@@ -430,16 +430,15 @@ class TestDeleteThread:
     async def test_delete_nonexistent_thread_returns_404(
         self, async_client: AsyncClient
     ) -> None:
-        """Deleting a thread that doesn't exist returns 404."""
-        import platform
+        """Deleting a thread that doesn't exist returns 404.
 
-        if platform.system() == "Windows":
-            pytest.skip(
-                "ASGI transport + ProactorEventLoop + SQLAlchemy cleanup "
-                "ordering causes spurious 'Event loop is closed' on Windows. "
-                "The logic is verified by test_delete_existing_thread."
-            )
-
+        Previously skipped on Windows: the HTTPException raised inside the
+        verify session's ``__aexit__`` triggered a spurious "Event loop is
+        closed".  That path was fixed by 4e2a708 (rollback of the aborted
+        checkpoint-table sub-transaction) plus the delete_thread refactor
+        that checks existence in a separate read-only session, so the test
+        runs everywhere now.
+        """
         response = await async_client.delete(
             "/api/agent/thread/00000000-0000-0000-0000-000000000000"
         )

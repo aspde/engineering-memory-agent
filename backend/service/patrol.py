@@ -6,6 +6,7 @@ with a patrol-specific System Prompt.  Results are persisted to patrol_logs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -19,7 +20,7 @@ from backend.service.patrol_prompts import (
     JIRA_RESOLVED_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )
-from backend.shared.config import current_thread_id
+from backend.shared.config import config, current_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -125,8 +126,35 @@ async def run_patrol(
 
     user_message = "\n".join(user_message_parts)
 
-    # ── Write initial "running" log entry ──
+    # ── Overlap guard: skip if a patrol of this type is already running ──
+    # The scheduler has one loop per type, but manual triggers and
+    # event-driven runs can overlap a cron run.  Two concurrent patrols of
+    # the same type would double provider spend and fight over the same
+    # findings.  (Application-level check — a tiny race window between the
+    # check and the insert is acceptable: the scheduler is single-loop per
+    # type, so the realistic case is one contender already holding the row.)
     session_factory = get_session_factory()
+    async with session_factory() as session:
+        from sqlalchemy import text
+
+        running = await session.execute(
+            text(
+                """SELECT id FROM patrol_logs
+                   WHERE patrol_type = :type AND status = 'running'
+                   LIMIT 1"""
+            ),
+            {"type": patrol_type},
+        )
+        running_row = running.fetchone()
+    if running_row is not None:
+        logger.warning(
+            "Patrol %s already running as %s — skipping overlapping run",
+            patrol_type,
+            running_row[0],
+        )
+        return ""
+
+    # ── Write initial "running" log entry ──
     async with session_factory() as session:
         from sqlalchemy import text
 
@@ -156,24 +184,27 @@ async def run_patrol(
 
         try:
             agent = get_agent()
-            result = await agent.ainvoke(
-                input={
-                    "messages": [
-                        {
-                            "role": "system",
-                            "content": system_prompt,
-                        },
-                        {
-                            "role": "user",
-                            "content": user_message,
-                        },
-                    ]
-                },
-                config={
-                    "configurable": {"thread_id": patrol_thread_id},
-                    "recursion_limit": 50,  # higher limit for patrol scans
-                },
-            )
+            # Bounded by PATROL_TIMEOUT (default 600s) — a hung provider or a
+            # runaway ReAct loop must not leave the patrol in 'running' forever.
+            async with asyncio.timeout(config.patrol_timeout):
+                result = await agent.ainvoke(
+                    input={
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": system_prompt,
+                            },
+                            {
+                                "role": "user",
+                                "content": user_message,
+                            },
+                        ]
+                    },
+                    config={
+                        "configurable": {"thread_id": patrol_thread_id},
+                        "recursion_limit": 50,  # higher limit for patrol scans
+                    },
+                )
 
             # Extract findings from the agent's final response
             final_response = result.get("final_response", "")
@@ -247,3 +278,28 @@ def get_patrol_prompt(patrol_type: str) -> str:
 def get_event_prompt(event_source: str) -> str:
     """Return the event-driven System Prompt for a given event source."""
     return _EVENT_PROMPTS.get(event_source, CI_FAILURE_PATROL_PROMPT)
+
+
+async def mark_stale_patrols_failed() -> int:
+    """Mark patrol_logs stuck in ``running`` as failed.
+
+    Called at startup before the scheduler starts: a ``running`` row left by
+    a previous process was killed mid-run and never completed, so showing it
+    as in-flight would be a lie.  Returns the number of rows marked.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        from sqlalchemy import text
+
+        result = await session.execute(
+            text(
+                """UPDATE patrol_logs
+                   SET status = 'failed', completed_at = COALESCE(completed_at, now())
+                   WHERE status = 'running'"""
+            ),
+        )
+        await session.commit()
+    count = result.rowcount or 0
+    if count:
+        logger.info("Marked %d stale patrol(s) as failed", count)
+    return count

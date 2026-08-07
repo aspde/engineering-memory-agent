@@ -51,7 +51,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/agent/threads` | 获取对话历史列表 |
 | GET | `/api/agent/thread/{thread_id}` | 获取指定对话消息历史 |
 | POST | `/api/memory/ingest` | 文档分块 → 嵌入 → 存入 chunks 表 |
-| POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索 → rerank |
+| POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索（+稀疏）→ 可选 rerank（hybrid 默认跳过） |
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
 | POST | `/api/memory/memories/search` | 记忆搜索：衰减加权 → rerank → 更新 decay |
 | GET | `/api/memory/memories/{memory_id}` | 通过 ID 获取单条记忆 |
@@ -62,6 +62,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/entities/search?q=&type=` | 按名称搜索实体，支持类型过滤 |
 | GET | `/api/conflicts` | 列出待人工解决的记忆冲突（webhook/连接器 HITL 队列） |
 | POST | `/api/conflicts/{id}/resolve` | 以 keep_existing/overwrite/merge/keep_both 之一解决冲突 |
+| GET | `/health` | 存活探活：含数据库连通性检查（DB 不可达返回 503 degraded） |
 
 ## Technology Stack
 

@@ -18,6 +18,7 @@ for _k, _v in {
     os.environ[_k] = _v
 
 import asyncio
+import logging
 import sys
 from contextlib import asynccontextmanager
 
@@ -33,12 +34,13 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from sqlalchemy import text
 
 from backend.api.router import api_router
-from backend.db import close_db
+from backend.db import close_db, get_session_factory
 from backend.db.schema import init_db
-from backend.shared.config import config
+from backend.shared.config import config, validate_config
 
 # Paths relative to backend/main.py
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -47,7 +49,24 @@ _FRONTEND_STATIC = Path(__file__).resolve().parent.parent / "frontend" / "static
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB tables and PostgresSaver checkpoint table."""
+    """Startup: configure logging, validate config, init DB, start patrol."""
+
+    # ── Logging level from LOG_LEVEL (documented in .env.example, was ignored).
+    _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+    if not logging.getLogger().handlers:
+        logging.basicConfig(
+            level=_log_level,
+            format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        )
+    for _name in ("backend", "agent"):
+        logging.getLogger(_name).setLevel(_log_level)
+
+    # ── Fail fast on invalid configuration instead of mid-request errors or
+    #    silently invalid schedules (e.g. PATROL_DAILY_HOUR=25).
+    _problems = validate_config()
+    if _problems:
+        raise RuntimeError("Invalid configuration:\n- " + "\n- ".join(_problems))
+
     await init_db()
 
     # Register connectors at startup.  Connectors missing required
@@ -122,8 +141,16 @@ async def lifespan(app: FastAPI):
     _scheduler = None
     if config.patrol_enabled:
         try:
-            from backend.service.patrol import get_patrol_prompt, run_patrol
+            from backend.service.patrol import (
+                get_patrol_prompt,
+                mark_stale_patrols_failed,
+                run_patrol,
+            )
             from backend.service.scheduler import PatrolScheduler
+
+            # A previous process may have left patrols mid-run; re-mark them
+            # failed before scheduling so the logs don't lie about in-flight.
+            await mark_stale_patrols_failed()
 
             _scheduler = PatrolScheduler()
 
@@ -224,6 +251,27 @@ app = FastAPI(
 )
 
 app.include_router(api_router, prefix="/api")
+
+
+@app.get("/health", include_in_schema=False)
+async def health_check() -> JSONResponse:
+    """Liveness probe with a database connectivity check.
+
+    Returns 200 ``{"status": "ok", "database": "ok"}`` when the API is up
+    and PostgreSQL is reachable; 503 ``{"status": "degraded",
+    "database": "unreachable"}`` otherwise (e.g. DB down, network partition).
+    Registered before the SPA catch-all so the route is actually reachable.
+    """
+    try:
+        async with get_session_factory()() as session:
+            await session.execute(text("SELECT 1"))
+    except Exception:
+        logging.getLogger(__name__).warning("Health check: database unreachable")
+        return JSONResponse(
+            status_code=503,
+            content={"status": "degraded", "database": "unreachable"},
+        )
+    return JSONResponse(status_code=200, content={"status": "ok", "database": "ok"})
 
 # ── SPA static files & fallback ──
 # Mount asset directories so the browser can load JS/CSS/images.

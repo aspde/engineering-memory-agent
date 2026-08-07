@@ -12,6 +12,7 @@ import logging
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from agent.state import AgentState
@@ -68,6 +69,20 @@ requests another language."""
 
 
 # ── Helper: message conversion ───────────────────────────────────────
+
+
+def _stream_writer():
+    """Return the LangGraph custom-stream writer, or a no-op outside a run.
+
+    ``get_stream_writer()`` raises outside a graph execution context (e.g.
+    when a node is invoked directly in a unit test).  Inside a run it
+    forwards token deltas to ``stream_mode="custom"`` consumers; outside,
+    streaming is simply disabled.
+    """
+    try:
+        return get_stream_writer()
+    except RuntimeError:
+        return lambda _payload: None
 
 
 def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
@@ -201,6 +216,12 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     The *tools* parameter is injected at graph-construction time via
     ``functools.partial`` so the node has access to tool schemas without
     global state.
+
+    Streaming: the LLM call is streamed, and text deltas are forwarded to
+    the SSE client live through the LangGraph custom stream (``stream_mode=
+    "custom"``).  Tool calls are accumulated and emitted at the end of the
+    turn.  Under a non-streaming invocation (``ainvoke``, resume) the stream
+    writer is a no-op and behaviour is unchanged.
     """
     provider = get_llm_provider()
 
@@ -213,8 +234,19 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     tool_schemas = _to_openai_tools(tools)
     dicts = _messages_to_dicts(messages)
 
+    writer = _stream_writer()
+    content_parts: list[str] = []
+    tool_calls: list[dict[str, Any]] | None = None
     try:
-        raw = await provider.chat_raw(messages=dicts, tools=tool_schemas, scenario="agent_chat")
+        async for event in provider.chat_raw_stream(
+            messages=dicts, tools=tool_schemas, scenario="agent_chat"
+        ):
+            if event.get("type") == "content":
+                text = str(event.get("text", ""))
+                content_parts.append(text)
+                writer({"type": "token", "content": text})
+            elif event.get("type") == "tool_calls":
+                tool_calls = event.get("tool_calls")
     except Exception as exc:
         logger.exception("LLM call failed in call_llm_node")
         return {
@@ -222,8 +254,7 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
             "messages": [AIMessage(content=f"LLM call failed: {exc}")],
         }
 
-    content = str(raw.get("content", ""))
-    tool_calls = raw.get("tool_calls")
+    content = "".join(content_parts)
 
     if tool_calls:
         # Build AIMessage with tool_calls — LangChain will handle parsing
@@ -330,9 +361,17 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         messages.append({"role": role, "content": content})
 
     # ── Call LLM here (once) so the response is persisted ──
+    # Streamed: text deltas are forwarded to the SSE client live via the
+    # LangGraph custom stream.  The full text is aggregated so the persisted
+    # final_response matches what the client saw.
     provider = get_llm_provider()
+    writer = _stream_writer()
+    response_parts: list[str] = []
     try:
-        response = await provider.chat(messages, scenario="agent_final")
+        async for token in provider.chat_stream(messages, scenario="agent_final"):
+            response_parts.append(token)
+            writer({"type": "token", "content": token})
+        response = "".join(response_parts)
     except Exception as exc:
         logger.exception("Final answer LLM call failed")
         response = f"抱歉，生成回复时出现错误: {exc}"

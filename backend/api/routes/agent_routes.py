@@ -68,11 +68,12 @@ async def _is_disconnected(request: Request) -> bool:
 async def _stream_final_answer(
     request: Request, final_response: str
 ):
-    """Stream *final_response* character-by-character via SSE.
+    """Replay *final_response* as SSE tokens — used on the resume path only.
 
-    The LLM call happens in ``generate_final_node`` (once).  This function
-    just yields the already-generated text as SSE tokens — no second LLM
-    call, so the persisted state and the streamed output are identical.
+    New-message runs stream the final answer live (LLM tokens pushed through
+    the graph's ``custom`` stream).  A resumed run uses ``ainvoke``, which
+    has no custom stream, so the already-generated answer is replayed here
+    as small chunks so the frontend still shows the token animation.
     Checks per-chunk that the client is still connected and stops early if
     they closed the tab (avoids pushing tokens to a dead socket).
     """
@@ -554,11 +555,18 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     return
 
-                # New message: stream through the graph
-                async for _, event_data in agent.astream(
+                # New message: stream through the graph.
+                # Two modes:
+                #   updates — node-completion events, interrupts
+                #   custom  — live LLM tokens pushed from inside the nodes
+                #             via get_stream_writer() (real streaming; the
+                #             final answer is generated, not replayed).
+                # With subgraphs=True + a mode list, events arrive as
+                # (namespace, mode, data) tuples.
+                async for _, mode, event_data in agent.astream(
                     {"messages": [HumanMessage(content=req.message)]},
                     config=run_config,
-                    stream_mode="updates",
+                    stream_mode=["updates", "custom"],
                     subgraphs=True,
                 ):
                     # Client disconnected — abort so later tool/LLM steps
@@ -567,6 +575,14 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                         logger.info("SSE client disconnected mid-run — aborting agent stream")
                         return
 
+                    if mode == "custom":
+                        # Token delta emitted by call_llm_node /
+                        # generate_final_node while the LLM generates.
+                        if isinstance(event_data, dict) and event_data.get("type") == "token":
+                            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                        continue
+
+                    # mode == "updates": node completions + interrupts.
                     # Check for interrupts
                     if event_data and "__interrupt__" in event_data:
                         interrupts = event_data["__interrupt__"]
@@ -574,15 +590,11 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                         yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
                         return
 
-                    # Node completion events
+                    # Node completion events.  The final answer's tokens
+                    # already arrived via the custom stream while the LLM
+                    # was generating — nothing to replay here.
                     for node_name, node_state in (event_data or {}).items():
                         yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
-
-                        if node_name == "generate_final":
-                            final_response = node_state.get("final_response")
-                            if final_response:
-                                async for sse_line in _stream_final_answer(request, final_response):
-                                    yield sse_line
 
                 # Send tool traces fetched from the final graph state
                 try:

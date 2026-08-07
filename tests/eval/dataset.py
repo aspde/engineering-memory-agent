@@ -14,6 +14,7 @@ works identically for both tables.
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -191,6 +192,64 @@ def relevance_mask(
     """Map each retrieved result to a binary relevance label."""
     fps = list(fingerprints)
     return [is_relevant(r, fps, match_field) for r in results]
+
+
+# ── Semantic relevance (supplementary) ──────────────────────────
+# Substring fingerprints are lexical anchors; a retriever that returns a
+# *paraphrase* of the ground truth (no surface overlap) scores a miss even
+# when it is semantically on target.  ``semantic_relevance_mask`` is the
+# counterweight: it marks a result relevant when its embedding is within
+# ``SEMANTIC_THRESHOLD`` of any target seed summary.  It only *adds* hits
+# that substring matching would have missed — the OR combination cannot
+# demote an already-relevant result — so it measures the semantic dimension
+# of retrieval quality without weakening the lexical guarantees.
+
+SEMANTIC_THRESHOLD = 0.80  # conservative cosine floor for "same meaning"
+
+
+def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    if not na or not nb:
+        return 0.0
+    return dot / (na * nb)
+
+
+async def semantic_relevance_mask(
+    results: Sequence[dict[str, Any]],
+    seed_summaries: Sequence[str],
+    match_field: str,
+    threshold: float = SEMANTIC_THRESHOLD,
+) -> list[bool]:
+    """Mark each result relevant if it embeds close to any target summary.
+
+    Args:
+        results: Retrieved rows (dicts with ``match_field`` text).
+        seed_summaries: The ground-truth summaries this query targets
+            (i.e. the summaries of ``item.seed_ids``).
+        match_field: Key holding the text to compare (``content`` /
+            ``summary``).
+        threshold: Cosine floor for "semantically same".
+
+    The embedding provider is the same one under evaluation; this is
+    acceptable because the gate is conservative and purely additive.
+    """
+    if not results or not seed_summaries:
+        return [False] * len(results)
+
+    from backend.service.embedding_service import get_embedding_provider
+
+    provider = get_embedding_provider()
+    target_vecs = await provider.embed(list(seed_summaries))
+    texts = [str(r.get(match_field, "") or "") for r in results]
+    result_vecs = await provider.embed(texts)
+
+    mask: list[bool] = []
+    for rv in result_vecs:
+        best = max(_cosine(rv, tv) for tv in target_vecs)
+        mask.append(best >= threshold)
+    return mask
 
 
 # ── Retriever adapters ────────────────────────────────────────

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.service.patrol import _parse_findings, run_patrol
+from backend.service.patrol import _parse_findings, mark_stale_patrols_failed, run_patrol
 
 
 class TestParseFindings:
@@ -40,10 +41,25 @@ class TestParseFindings:
         assert result == {}
 
 
-def _make_mock_session() -> MagicMock:
-    """Create a mock that supports ``async with session_factory() as session``."""
+def _make_mock_session(*, running_row=None) -> MagicMock:
+    """Create a mock session factory supporting ``async with``.
+
+    ``execute`` is routed by SQL: the overlap-guard ``SELECT ... WHERE
+    patrol_type = ...`` returns *running_row* (None = no overlap); all other
+    statements return a generic AsyncMock.
+    """
     mock_session = AsyncMock()
-    # async_sessionmaker() returns a new session context
+
+    def _execute(stmt, *args, **kwargs):
+        sql = getattr(stmt, "text", None) or str(stmt)
+        if "WHERE patrol_type" in sql:
+            result = MagicMock()
+            result.fetchone.return_value = running_row
+            return result
+        return AsyncMock()
+
+    mock_session.execute.side_effect = _execute
+
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=mock_session)
     ctx.__aexit__ = AsyncMock(return_value=None)
@@ -124,3 +140,96 @@ class TestRunPatrol:
         # Should still complete (not raise) and return a patrol_id
         assert len(patrol_id) == 36
 
+    @pytest.mark.asyncio
+    async def test_overlap_guard_skips_when_already_running(self) -> None:
+        """A second patrol of the same type is skipped, not run concurrently."""
+        mock_agent = AsyncMock()
+        mock_factory = _make_mock_session(running_row=("existing-log-id",))
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert patrol_id == ""  # skipped
+        mock_agent.ainvoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_times_out(self, monkeypatch) -> None:
+        """A hung agent run is cut off by PATROL_TIMEOUT and marked failed."""
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config, "patrol_timeout", 0.05)
+
+        async def _hang():
+            await asyncio.sleep(60)
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = _hang
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        # Returns the log id (status was set to 'failed'), does not raise.
+        assert len(patrol_id) == 36
+        mock_agent.ainvoke.assert_awaited_once()
+
+
+class TestMarkStalePatrols:
+    """Startup sweep that re-marks 'running' rows from a previous process."""
+
+    @pytest.mark.asyncio
+    async def test_marks_running_rows_failed(self) -> None:
+        mock_session = AsyncMock()
+        result = MagicMock()
+        result.rowcount = 2
+        mock_session.execute.return_value = result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+
+        with patch("backend.service.patrol.get_session_factory", return_value=factory):
+            count = await mark_stale_patrols_failed()
+
+        assert count == 2
+        # The sweep must only touch rows stuck in 'running'.
+        sql = getattr(mock_session.execute.call_args[0][0], "text", "")
+        assert "status = 'running'" in sql
+
+    @pytest.mark.asyncio
+    async def test_no_running_rows_returns_zero(self) -> None:
+        mock_session = AsyncMock()
+        result = MagicMock()
+        result.rowcount = 0
+        mock_session.execute.return_value = result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+
+        with patch("backend.service.patrol.get_session_factory", return_value=factory):
+            count = await mark_stale_patrols_failed()
+
+        assert count == 0

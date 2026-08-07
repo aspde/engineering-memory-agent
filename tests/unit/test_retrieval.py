@@ -231,7 +231,7 @@ class TestRetrieveHybrid:
             AsyncMock(return_value=[(0, 0.9), (1, 0.8), (2, 0.2)]),
         )
 
-        results = await mod.retrieve_hybrid("query", top_k=5)
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=False)
 
         assert [r.content for r in results] == ["c1 dense", "c2 dense", "c3 sparse"]
         assert [r.score for r in results] == [0.9, 0.8, 0.2]
@@ -250,6 +250,34 @@ class TestRetrieveHybrid:
 
         assert len(results) == 1
         assert results[0].score == pytest.approx(0.9)  # max(0.5, 0.9), not 0.5
+
+    @pytest.mark.asyncio
+    async def test_default_skips_rerank(self, monkeypatch) -> None:
+        """Default behavior is the fast path: no cross-encoder call.
+
+        The eval report shows rerank costs ~90x latency while lowering
+        recall@5, so ``skip_rerank`` defaults to True.  Regression guard:
+        if the default flips back, ``rerank_cross_encoder`` (mocked to
+        raise) would be invoked and this test would error.
+        """
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.7},
+            {"id": "c2", "content": "c2", "meta": {}, "similarity": 0.2},
+        ]
+        sparse = [{"id": "c2", "content": "c2", "meta": {}, "rank": 0.6}]
+        self._patch_sources(monkeypatch, dense, sparse)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(side_effect=AssertionError("rerank must not run by default")),
+        )
+
+        results = await mod.retrieve_hybrid("query", top_k=5)
+
+        # c1: max(0.7, 0)=0.7 ; c2: max(0.2, 0.6)=0.6 → c1 first, no floor drop
+        assert [r.content for r in results] == ["c1", "c2"]
+        assert results[0].score == pytest.approx(0.7)
 
     @pytest.mark.asyncio
     async def test_skip_rerank_sorts_by_max_score(self, monkeypatch) -> None:
@@ -286,7 +314,7 @@ class TestRetrieveHybrid:
             AsyncMock(return_value=[(0, 0.9), (1, 0.1)]),
         )
 
-        results = await mod.retrieve_hybrid("query", top_k=5)
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=False)
 
         # index 1 scored 0.1 < _RERANK_FLOOR 0.15 → dropped
         assert len(results) == 1
@@ -473,7 +501,7 @@ class TestDocumentIdTraceability:
             AsyncMock(return_value=[(0, 0.9)]),
         )
 
-        results = await mod.retrieve_hybrid("query", top_k=5)
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=False)
 
         assert len(results) == 1
         assert results[0].metadata["document_id"] == "a.py"
@@ -523,7 +551,7 @@ class TestDocumentIdTraceability:
             AsyncMock(return_value=[(0, 0.9)]),
         )
 
-        results = await mod.retrieve_hybrid("query", top_k=5)
+        results = await mod.retrieve_hybrid("query", top_k=5, skip_rerank=False)
 
         assert len(results) == 1
         assert "document_id" not in results[0].metadata

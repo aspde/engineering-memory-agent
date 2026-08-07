@@ -90,6 +90,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Only validate the labeled set ↔ seed corpus; skip retrieval.",
     )
     p.add_argument(
+        "--semantic-relevance",
+        action="store_true",
+        help="Add an embedding-similarity relevance channel (substring match "
+        "OR cosine ≥ 0.80 vs target seed summaries). Measures semantic "
+        "retrieval quality; requires the embedding provider.",
+    )
+    p.add_argument(
         "--name",
         default=None,
         help="Override the run name in reports. Default: auto-generated label.",
@@ -149,7 +156,10 @@ async def _run(args: argparse.Namespace) -> int:
             threshold=args.threshold,
             categories=categories,
         )
-        results = await compare_eval([cfg_a, cfg_b])
+        results = await compare_eval(
+            [cfg_a, cfg_b],
+            semantic_relevance=args.semantic_relevance,
+        )
     else:
         cfg = _make_config(
             name=args.name,
@@ -159,7 +169,7 @@ async def _run(args: argparse.Namespace) -> int:
             threshold=args.threshold,
             categories=categories,
         )
-        results = [await run_eval(cfg)]
+        results = [await run_eval(cfg, semantic_relevance=args.semantic_relevance)]
 
     for r in results:
         print(summarize(r))

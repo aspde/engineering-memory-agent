@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Any
 
 
@@ -43,6 +44,43 @@ class LLMProvider(ABC):
             tool_call is ``{"id": str, "name": str, "args": dict}``.
         """
         ...
+
+    async def chat_raw_stream(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream a raw response with optional tool definitions.
+
+        Yields ``{"type": "content", "text": str}`` deltas as the model
+        produces them, then a single trailing ``{"type": "tool_calls",
+        "tool_calls": [...]}`` event when the turn ends with tool calls.
+
+        Default implementation defers to one non-streaming
+        :meth:`chat_raw` call and emits its result in one shot — real
+        providers (OpenAI-compatible, Anthropic) override with true token
+        streaming; lightweight fakes in tests rely on the default.
+        """
+        raw = await self.chat_raw(messages, tools=tools, **kwargs)
+        if raw.get("content"):
+            yield {"type": "content", "text": raw["content"]}
+        if raw.get("tool_calls"):
+            yield {"type": "tool_calls", "tool_calls": raw["tool_calls"]}
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        """Stream the response text token-by-token.
+
+        Default implementation defers to one non-streaming :meth:`chat`
+        call and yields the full text once; real providers override with
+        true token streaming.
+        """
+        text = await self.chat(messages, **kwargs)
+        yield text
 
     async def chat_json(
         self,

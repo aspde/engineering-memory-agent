@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.model.llm import LLMProvider
@@ -149,6 +150,87 @@ class OpenAICompatibleProvider(LLMProvider):
             response = await _op()
         record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
+
+    async def chat_raw_stream(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        **kwargs,
+    ) -> AsyncIterator[dict[str, object]]:
+        """True token streaming for ``chat_raw``.
+
+        Yields ``{"type": "content", "text": <delta>}`` as the model
+        generates, then a single ``{"type": "tool_calls", "tool_calls":
+        [...]}`` event when the turn ends with tool calls.  ``tool_calls``
+        use the same shape as :meth:`chat_raw` (``{"id", "name", "args"}``).
+
+        The circuit breaker guards connection establishment; token
+        iteration is not retried (an established stream is consumed once).
+        Token usage is not recorded on this path (streamed ``usage`` is
+        provider-inconsistent) — the non-streaming calls still report it.
+        """
+        scenario = pop_scenario(kwargs)
+        kwargs.setdefault("temperature", self._temperature)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        create_kwargs: dict[str, object] = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            **kwargs,
+        }
+        if tools:
+            create_kwargs["tools"] = tools
+
+        async def _op() -> Any:
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+
+        async with circuit_breaker_guard("llm:openai"):
+            response = await _op()
+
+        tool_calls_map: dict[int, dict[str, str]] = {}
+        tool_call_order: list[int] = []
+        async for chunk in response:
+            choices = getattr(chunk, "choices", None)
+            if not choices:
+                continue
+            delta = choices[0].delta
+            if delta is None:
+                continue
+            if delta.content:
+                yield {"type": "content", "text": delta.content}
+            for tc in delta.tool_calls or []:
+                idx = tc.index
+                if idx not in tool_calls_map:
+                    tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                    tool_call_order.append(idx)
+                if tc.id:
+                    tool_calls_map[idx]["id"] = tc.id
+                if tc.function:
+                    if tc.function.name:
+                        tool_calls_map[idx]["name"] = tc.function.name
+                    if tc.function.arguments:
+                        tool_calls_map[idx]["arguments"] += tc.function.arguments
+
+        if tool_calls_map:
+            tool_calls: list[dict[str, object]] = []
+            for idx in tool_call_order:
+                info = tool_calls_map[idx]
+                try:
+                    args: object = json.loads(info["arguments"]) if info["arguments"] else {}
+                except json.JSONDecodeError:
+                    args = {"raw": info["arguments"]}
+                tool_calls.append({"id": info["id"], "name": info["name"], "args": args})
+            yield {"type": "tool_calls", "tool_calls": tool_calls}
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        """Stream response text token-by-token (no tools)."""
+        async for event in self.chat_raw_stream(messages, **kwargs):
+            if event.get("type") == "content":
+                yield str(event.get("text", ""))
 
     @property
     def model(self) -> str:
@@ -317,6 +399,81 @@ class AnthropicProvider(LLMProvider):
                     block.input.get("result", block.input), ensure_ascii=False
                 )
         return ""
+
+    async def chat_raw_stream(
+        self,
+        messages: list[dict[str, str]],
+        tools: list[dict[str, object]] | None = None,
+        **kwargs,
+    ) -> AsyncIterator[dict[str, object]]:
+        """True token streaming for ``chat_raw`` (Anthropic SDK streams).
+
+        Yields ``{"type": "content", "text": <delta>}`` as the model
+        generates, then a single ``{"type": "tool_calls", "tool_calls":
+        [...]}`` event when the turn ends with tool calls.  The circuit
+        breaker guards the whole stream lifecycle — Anthropic's
+        ``messages.stream()`` is lazy, so the HTTP connection opens during
+        iteration, not at call time.
+
+        Token usage is not recorded on this path (streamed ``usage`` is
+        provider-inconsistent) — the non-streaming calls still report it.
+        """
+        scenario = pop_scenario(kwargs)
+        system, user_messages = self._split_messages(messages)
+        kwargs.setdefault("max_tokens", self._max_tokens)
+        create_kwargs: dict[str, object] = {
+            "model": self._model,
+            "system": system,
+            "messages": self._to_anthropic_messages(user_messages),
+            **kwargs,
+        }
+        if tools:
+            create_kwargs["tools"] = self._to_anthropic_tools(tools)
+
+        tool_buf: dict[int, dict[str, object]] = {}
+        async with circuit_breaker_guard("llm:anthropic"):
+            async with self._async_client.messages.stream(**create_kwargs) as stream:  # type: ignore[arg-type]
+                async for event in stream:
+                    if event.type == "content_block_start":
+                        block = event.content_block
+                        if getattr(block, "type", "") == "tool_use":
+                            tool_buf[event.index] = {
+                                "id": block.id,
+                                "name": block.name,
+                                "input_parts": [],
+                            }
+                    elif event.type == "content_block_delta":
+                        delta = event.delta
+                        if delta.type == "text_delta":
+                            yield {"type": "content", "text": delta.text}
+                        elif delta.type == "input_json_delta" and event.index in tool_buf:
+                            parts = tool_buf[event.index]["input_parts"]
+                            assert isinstance(parts, list)
+                            parts.append(delta.partial_json)
+                    elif event.type == "message_stop":
+                        break
+
+        if tool_buf:
+            tool_calls: list[dict[str, object]] = []
+            for index in sorted(tool_buf):
+                info = tool_buf[index]
+                raw = "".join(info["input_parts"])  # type: ignore[arg-type]
+                try:
+                    args: object = json.loads(raw) if raw else {}
+                except json.JSONDecodeError:
+                    args = {"raw": raw}
+                tool_calls.append({"id": info["id"], "name": info["name"], "args": args})
+            yield {"type": "tool_calls", "tool_calls": tool_calls}
+
+    async def chat_stream(
+        self,
+        messages: list[dict[str, str]],
+        **kwargs,
+    ) -> AsyncIterator[str]:
+        """Stream response text token-by-token (no tools)."""
+        async for event in self.chat_raw_stream(messages, **kwargs):
+            if event.get("type") == "content":
+                yield str(event.get("text", ""))
 
     @staticmethod
     def _to_anthropic_tools(tools: list[dict[str, object]]) -> list[dict[str, object]]:

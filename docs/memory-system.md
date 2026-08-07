@@ -38,6 +38,8 @@ Read Path:
 | `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | 默认 |
 | `rerank_llm()` | 现有 LLMProvider | API 调用费用 | 需精细语义判断时 |
 
+**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 `max(dense similarity, sparse jaccard)` 直接排序。eval 报告（`docs/interview/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
+
 ### 2. 三阶段记忆提取
 
 `extract_memory(content)` 将原始内容转化为结构化记忆，三个阶段两个并行：
@@ -112,7 +114,7 @@ S = 1 + recall_count × 2
 | id | UUID PK | gen_random_uuid() |
 | document_id | TEXT | 来源文档标识 |
 | content | TEXT | chunk 文本 |
-| embedding | vector(1024) | BGE-M3 向量 |
+| embedding | vector(N) | 向量，维度由 EMBEDDING_MODEL 决定（默认 BGE-M3 = 1024） |
 | meta | JSONB | 来源、行号、语言等 |
 | chunk_index | INT | 在原文档中的顺序 |
 | created_at | TIMESTAMPTZ | now() |
@@ -128,12 +130,25 @@ S = 1 + recall_count × 2
 | summary | TEXT | LLM 摘要 |
 | entities | JSONB | `[{name, type}]` |
 | relations | JSONB | `[{from, to, type}]` |
-| embedding | vector(1024) | 摘要的 BGE-M3 向量 |
+| embedding | vector(N) | 摘要向量，维度同 embedding 配置 |
 | decay_factor | FLOAT | 艾宾浩斯衰减因子，默认 1.0 |
 | recalled_at | TIMESTAMPTZ | 最后一次被检索的时间 |
 | recall_count | INT | 累计检索次数，默认 0 |
 | meta | JSONB | 冲突标记、补充关联等 |
 | created_at | TIMESTAMPTZ | now() |
+
+### 维度迁移（切换 embedding 模型）
+
+`embedding` 列维度由 `config.embedding.dimension` 决定（模型名 → 已知维度映射，见 `backend/shared/config.py`），不再硬编码 1024。启动时 `init_db()` 会检测列的实际维度；与配置不一致时自动迁移：清空 `embedding` 列 → `ALTER COLUMN ... TYPE vector(N)` → 重建 ivfflat 索引。
+
+pgvector 的向量只能放进「维度 ≤ 自身」的列，改大改小都要求列先为空；填充/截断会产生与文本不符的垃圾向量，所以迁移选择清空。向量是派生数据，清空后需从存储文本重嵌：
+
+```bash
+python reembed_embeddings.py --dry-run   # 先查看有多少行待重嵌
+python reembed_embeddings.py             # chunks + memories 分批重嵌（可重复执行）
+```
+
+脚本只处理 `embedding IS NULL` 的行，幂等且安全。
 
 ---
 

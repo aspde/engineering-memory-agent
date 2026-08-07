@@ -283,6 +283,74 @@ class TestFingerprintMatching:
         assert mask == [True, False, True, False]
 
 
+# ── Semantic relevance (supplementary) ─────────────────────────
+
+
+class TestSemanticMatching:
+    """semantic_relevance_mask — embedding-similarity relevance channel.
+
+    The provider is mocked so no model is loaded; vectors are hand-built so
+    cosine behaviour is exact.
+    """
+
+    @pytest.mark.asyncio
+    async def test_semantic_hit_and_miss(self, monkeypatch) -> None:
+        from unittest.mock import AsyncMock
+
+        import backend.service.embedding_service as emb_mod
+
+        from tests.eval.dataset import semantic_relevance_mask
+
+        provider = AsyncMock()
+        # embed() is called twice: once for target summaries, once for results.
+        provider.embed.side_effect = [
+            [[1.0, 0.0]],  # the target summary vector
+            [[0.99, 0.1], [0.0, 1.0]],  # result 1 close, result 2 orthogonal
+        ]
+        monkeypatch.setattr(emb_mod, "get_embedding_provider", lambda: provider)
+
+        results = [
+            {"content": "paraphrase of the target meaning"},
+            {"content": "unrelated text"},
+        ]
+        mask = await semantic_relevance_mask(
+            results, ["the target summary"], "content"
+        )
+        assert mask == [True, False]
+        # Two embed calls: targets, then the result texts.
+        assert provider.embed.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_threshold_respected(self, monkeypatch) -> None:
+        from unittest.mock import AsyncMock
+
+        import backend.service.embedding_service as emb_mod
+
+        from tests.eval.dataset import semantic_relevance_mask
+
+        provider = AsyncMock()
+        # cosine(target, result) = 0.75 — below the 0.80 floor.
+        provider.embed.side_effect = [
+            [[1.0, 0.0]],
+            [[0.6, 0.8]],  # dot = 0.6 < 0.80
+        ]
+        monkeypatch.setattr(emb_mod, "get_embedding_provider", lambda: provider)
+
+        mask = await semantic_relevance_mask(
+            [{"content": "marginal text"}], ["target"], "content"
+        )
+        assert mask == [False]
+
+    @pytest.mark.asyncio
+    async def test_empty_inputs_all_false(self) -> None:
+        from tests.eval.dataset import semantic_relevance_mask
+
+        assert await semantic_relevance_mask([], ["t"], "content") == []
+        assert await semantic_relevance_mask(
+            [{"content": "x"}], [], "content"
+        ) == [False]
+
+
 # ── Retriever adapter wiring ──────────────────────────────────
 
 

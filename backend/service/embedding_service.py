@@ -18,7 +18,7 @@ for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
     os.environ[_k] = _v  # force-override — setdefault may leave stale values
 
 from backend.model.embedding import EmbeddingProvider  # noqa: E402
-from backend.shared.config import config  # noqa: E402
+from backend.shared.config import EMBEDDING_DIMENSIONS, config  # noqa: E402
 from backend.shared.resilience import (  # noqa: E402
     call_with_resilience,
     call_with_resilience_sync,
@@ -26,14 +26,12 @@ from backend.shared.resilience import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# ── Known dimensions for common embedding models ──────────────────────
-# Used to resolve dimension without making an API call.
-_KNOWN_DIMENSIONS: dict[str, int] = {
-    "BAAI/bge-m3": 1024,
-    "text-embedding-3-small": 1536,
-    "text-embedding-3-large": 3072,
-    "text-embedding-ada-002": 1536,
-}
+# ── Dimension resolution ───────────────────────────────────────────────
+# The model→dimension map lives in ``config.EmbeddingConfig`` (single source
+# of truth); the schema and every provider read it from there.  OpenAI has no
+# API to introspect its dimension; the local BGE provider reports the real
+# dimension of the loaded model, and ``get_embedding_provider()`` warns when
+# the two disagree (a wrong guess would otherwise fail every embedding write).
 
 
 class BGEEmbeddingProvider(EmbeddingProvider):
@@ -112,16 +110,18 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         self._model = model
         self._batch_size = batch_size
 
-        # Resolve dimension from known models; warn + default for unknowns.
-        self._dimension = _KNOWN_DIMENSIONS.get(model)
-        if self._dimension is None:
+        # Dimension follows this provider's own model, from the shared config
+        # map (OpenAI has no API to introspect it).  Unknown models warn +
+        # default to 1536.
+        self._dimension = EMBEDDING_DIMENSIONS.get(model, 1536)
+        if model not in EMBEDDING_DIMENSIONS:
             logger.warning(
-                "Unknown dimension for model %r — defaulting to 1536. "
-                "Add the model to _KNOWN_DIMENSIONS in %s.",
+                "Unknown dimension for model %r — defaulting to %d. "
+                "Add the model to EMBEDDING_DIMENSIONS in %s.",
                 model,
-                __file__,
+                self._dimension,
+                config.__module__,
             )
-            self._dimension = 1536
 
         logger.info(
             "OpenAI embedding provider ready: model=%r dimension=%d batch_size=%d",
@@ -216,5 +216,19 @@ def get_embedding_provider() -> EmbeddingProvider:
             )
         else:
             raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
+
+        if _provider.dimension != config.embedding.dimension:
+            logger.warning(
+                "Embedding provider reports dimension %d but config/schema "
+                "assumes %d (model=%r) — the pgvector columns were built as "
+                "vector(%d), so embedding writes will fail. Align "
+                "EMBEDDING_MODEL with the schema, or switch models and let "
+                "init_db resize the columns, then re-embed with "
+                "`python reembed_embeddings.py`.",
+                _provider.dimension,
+                config.embedding.dimension,
+                config.embedding.model,
+                config.embedding.dimension,
+            )
 
         return _provider

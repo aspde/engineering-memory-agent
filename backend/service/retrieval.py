@@ -419,18 +419,22 @@ async def retrieve_hybrid(
     top_k: int = 5,
     *,
     use_llm_rerank: bool = False,
-    skip_rerank: bool = False,
+    skip_rerank: bool = True,
 ) -> list[RetrievalResult]:
-    """Hybrid retrieval: dense vector + sparse BM25 union → rerank.
+    """Hybrid retrieval: dense vector + sparse BM25 union → rank.
 
     Combines semantic recall (``vector_search``) with keyword recall
     (``sparse_search``) to rescue conceptual queries where dense embedding
     misses due to low surface-form overlap.  Both candidate sets are
-    unioned (dedup by chunk id), then reranked.
+    unioned (dedup by chunk id).
 
-    When ``skip_rerank`` is True, candidates are ranked by the max of
-    dense similarity / sparse jaccard — used for A/B comparison to measure
-    rerank's contribution.
+    By default the union is ranked directly by the max of dense similarity /
+    sparse jaccard (``skip_rerank=True``): the eval report
+    (``docs/interview/eval-report.md``) shows cross-encoder rerank costs
+    ~90x latency on the current corpus while *lowering* recall@5 (0.967 vs
+    1.000), so reranking is opt-in.  Pass ``skip_rerank=False`` for the
+    cross-encoder rerank path, or ``use_llm_rerank=True`` for the LLM
+    pointwise variant.
     """
     query_vec = await embed_query(query)
     dense = await vector_search(query_vec, top_k=max(top_k * 4, 20))

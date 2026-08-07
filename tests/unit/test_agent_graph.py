@@ -67,9 +67,12 @@ class TestGraphRouting:
         NOT make a second LLM call (previously every plain chat turn paid
         two LLM calls and discarded the first response).
         """
+        from tests._fake_llm import content_stream, sequential_stream
+
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.return_value = {"content": "I can answer that directly."}
-        mock_provider.chat.return_value = "Final synthesized answer."
+        mock_provider.chat_raw_stream = sequential_stream(
+            content_stream("I can answer that directly.")
+        )
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -81,31 +84,31 @@ class TestGraphRouting:
             {"configurable": {"thread_id": "test-1"}},
         )
 
-        # The chat_raw text becomes the final answer; chat is never called.
+        # The streamed text becomes the final answer; no second LLM call.
         assert "final_response" in result
         assert result["final_response"] == "I can answer that directly."
         mock_provider.chat.assert_not_awaited()
+        mock_provider.chat_stream.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_tool_calling_path(self, monkeypatch) -> None:
         """When LLM returns tool_calls, execute tools and loop back."""
+        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
+
         tools = [_make_fake_tool()]
 
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.side_effect = [
-            {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "name": "fake_search",
-                        "args": {"query": "Python info"},
-                    }
-                ],
-            },
-            {"content": "Based on search results, Python is a programming language."},
-        ]
-        mock_provider.chat.return_value = "Final synthesized answer."
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
+                {
+                    "id": "call_1",
+                    "name": "fake_search",
+                    "args": {"query": "Python info"},
+                }
+            ]),
+            content_stream("Based on search results, Python is a programming language."),
+        )
+        mock_provider.chat_stream = text_stream("Final synthesized answer.")
 
         import agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
@@ -127,26 +130,25 @@ class TestGraphHITLRouting:
     @pytest.mark.asyncio
     async def test_safe_tool_passes_through_check_approval(self, monkeypatch) -> None:
         """Safe tools route through check_approval → tools without interrupt."""
+        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
+
         from agent.nodes import check_approval_node
 
         tools = [_make_fake_tool()]
 
         # LLM calls a safe tool (fake_search), then returns final text
         mock_provider = AsyncMock()
-        mock_provider.chat_raw.side_effect = [
-            {
-                "content": "",
-                "tool_calls": [
-                    {
-                        "id": "call_1",
-                        "name": "fake_search",
-                        "args": {"query": "test"},
-                    }
-                ],
-            },
-            {"content": "Got it."},
-        ]
-        mock_provider.chat.return_value = "Final answer."
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
+                {
+                    "id": "call_1",
+                    "name": "fake_search",
+                    "args": {"query": "test"},
+                }
+            ]),
+            content_stream("Got it."),
+        )
+        mock_provider.chat_stream = text_stream("Final answer.")
 
         monkeypatch.setattr(
             "agent.nodes.get_llm_provider",
@@ -177,19 +179,20 @@ class TestGraphHITLRouting:
         """
         import json as _json
 
+        from tests._fake_llm import sequential_stream, tool_call_stream
+
         from agent.graph import build_agent_graph
         from agent.tools import write_memory_tool
 
         mock_provider = AsyncMock()
         # First call_llm: approve the tool call
-        mock_provider.chat_raw.return_value = {
-            "content": "I'll write that.",
-            "tool_calls": [{
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([{
                 "id": "call_cf2",
                 "name": "write_memory_tool",
                 "args": {"content": "EMA uses SQLite"},
-            }],
-        }
+            }])
+        )
 
         monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_provider)
 

@@ -30,8 +30,11 @@ class AgentState(TypedDict):
 
     final_prompt: list[dict[str, str]] | None
     """Prompt messages built by generate_final_node for the final answer.
-    The API streaming layer reads this and calls ``chat_stream()``
-    token-by-token, then writes the full text back to ``final_response``."""
+
+    Kept for audit / replay (e.g. the resume path replays a completed
+    answer).  Live streaming no longer reads this field: the nodes stream
+    LLM tokens directly through the graph's ``custom`` stream
+    (``get_stream_writer``)."""
 
     error: str | None
     """Error state for graceful degradation.  Set by any node that catches

@@ -24,7 +24,9 @@ from tests.eval.dataset import (
     RetrieverAdapter,
     build_adapter,
     load_ground_truth,
+    load_seed_memories,
     relevance_mask,
+    semantic_relevance_mask,
 )
 from tests.eval.ground_truth import CATEGORIES, DIFFICULTIES, GroundTruthItem
 from tests.eval.metrics import compute_all
@@ -115,6 +117,7 @@ async def run_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
+    semantic_relevance: bool = False,
 ) -> EvalResult:
     """Execute one config over the labeled set.
 
@@ -124,6 +127,12 @@ async def run_eval(
         reraise: if True, propagate the first retrieval error instead of
             recording it. Useful in unit tests; False in production runs so
             one bad query doesn't kill the whole eval.
+        semantic_relevance: if True, relevance is a substring match OR an
+            embedding-similarity match against the query's target seed
+            summaries (see ``dataset.semantic_relevance_mask``).  Measures
+            the semantic dimension of retrieval; needs the embedding
+            provider.  Off by default so the pure, deterministic
+            fingerprint matching stays the baseline.
 
     Returns:
         ``EvalResult`` with per-query rows + aggregates.
@@ -131,6 +140,13 @@ async def run_eval(
     items = list(items) if items is not None else load_ground_truth()
     items = _filter_items(items, config.categories)
     adapter = config.adapter()
+
+    # seed_id → summary, for the semantic relevance pass (only if enabled).
+    seed_summary_by_id: dict[str, str] = {}
+    if semantic_relevance:
+        seed_summary_by_id = {
+            s.id: s.summary for s in load_seed_memories()
+        }
 
     result = EvalResult(config=config, n_queries=len(items))
     logger.info("Starting eval: config=%s queries=%d", config.label, len(items))
@@ -144,11 +160,41 @@ async def run_eval(
             result.errors.append({"id": it.id, "error": str(e)})
             if reraise:
                 raise
+            # Failed queries still count toward the denominator: aggregate
+            # them as zero-recall rows.  Dropping them (the old behaviour)
+            # made the overall numbers inflate as errors rose — recall@5
+            # looked *better* the more queries blew up.
+            result.per_query.append(
+                {
+                    "id": it.id,
+                    "query": it.query,
+                    "category": it.category,
+                    "difficulty": it.difficulty,
+                    "n_retrieved": 0,
+                    "n_relevant": 0,
+                    "latency_ms": 0.0,
+                    "error": str(e),
+                    **compute_all([], set(), k=config.top_k),
+                }
+            )
             continue
         latency_ms = (time.perf_counter() - t0) * 1000
         result.total_latency_ms += latency_ms
 
         mask = relevance_mask(retrieved, it.relevant_fingerprints, adapter.match_field)
+        # Semantic supplement: only consulted when substring matching left
+        # some results unmatched, and only ever flips False → True.
+        if semantic_relevance and any(not h for h in mask) and retrieved:
+            targets = [
+                seed_summary_by_id[sid]
+                for sid in it.seed_ids
+                if sid in seed_summary_by_id
+            ]
+            if targets:
+                sem_mask = await semantic_relevance_mask(
+                    retrieved, targets, adapter.match_field
+                )
+                mask = [a or b for a, b in zip(mask, sem_mask)]
         # Positional IDs: retrieved = [0, 1, ..., n-1]; relevant = matched indices.
         retrieved_ids = list(range(len(retrieved)))
         relevant_ids = {i for i, hit in enumerate(mask) if hit}
@@ -163,6 +209,7 @@ async def run_eval(
                 "n_retrieved": len(retrieved),
                 "n_relevant": len(relevant_ids),
                 "latency_ms": latency_ms,
+                "semantic_relevance": semantic_relevance,
                 **metrics,
             }
         )
@@ -201,6 +248,7 @@ async def compare_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
+    semantic_relevance: bool = False,
 ) -> list[EvalResult]:
     """Run multiple configs over the same labeled set, in order.
 
@@ -208,11 +256,14 @@ async def compare_eval(
     this to produce A/B delta tables. ``reraise`` is forwarded to each
     :func:`run_eval` call (useful in tests; defaults to False for production
     A/B runs where one bad query shouldn't kill the whole comparison).
+    ``semantic_relevance`` is likewise forwarded.
     """
     items = list(items) if items is not None else load_ground_truth()
     results: list[EvalResult] = []
     for cfg in configs:
-        results.append(await run_eval(cfg, items, reraise=reraise))
+        results.append(
+            await run_eval(cfg, items, reraise=reraise, semantic_relevance=semantic_relevance)
+        )
     return results
 
 

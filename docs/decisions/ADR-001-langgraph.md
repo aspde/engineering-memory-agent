@@ -69,7 +69,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 | `messages` | `Annotated[list[BaseMessage], add_messages]` | 对话历史，ID 去重 |
 | `step_count` | `int \| None` | ReAct 循环步数，配合 MAX_AGENT_STEPS 限流 |
 | `final_response` | `str \| None` | 最终答案，generate_final_node 写入 |
-| `final_prompt` | `list[dict] \| None` | 最终 LLM 调用的 prompt，SSE 流式层读取 |
+| `final_prompt` | `list[dict] \| None` | 最终 LLM 调用的 prompt，审计/回放用（resume 路径回放已完成答案） |
 | `error` | `str \| None` | 错误状态，任一节点捕获异常时写入 |
 | `pending_approval` | `dict \| None` | HITL 暂停载荷 |
 
