@@ -103,7 +103,7 @@ WEBHOOK_CI_SECRET=...
 WEBHOOK_FEISHU_SECRET=...
 ```
 
-请求签名验证通过 HMAC-SHA256 header（标准 webhook 模式），验证失败返回 401，成功后将 payload 交给对应 connector 处理。
+请求签名验证通过 HMAC-SHA256 header（标准 webhook 模式），验证失败返回 401。受理后**请求路径只做纯同步校验与转换**（validate → normalize → 写 `received` 投递日志），立即返回 `202` + `delivery_id`；耗时的完整提取管线（LLM 摘要/实体/关系 + embedding）由后台任务异步执行，结果回写到投递日志。进程内任务重启会丢失（与 checkpointer 的 InMemorySaver 同级权衡），并发上限为 4 个在飞提取，超出返回 `503`。
 
 ### 新增 webhook_logs 表
 
@@ -138,7 +138,7 @@ CREATE TABLE webhook_logs (
 
 ### API 新端点
 
-- `POST /api/webhook/{source}` — 接收外部 webhook。验证签名 → 交给 connector → 返回处理结果
+- `POST /api/webhook/{source}` — 接收外部 webhook。验证签名 → 校验 → normalize（同步快路径），返回 `202` + `delivery_id`；提取管线后台异步执行，结果落到 `webhook_logs`（`received` → `processed` / `conflict_pending` / `failed`）
 - `GET /api/connectors` — 列出所有注册的连接器及其状态（active/pending/error）
 - `GET /api/connectors/{source}/logs` — 返回该 source 最近的 webhook 投递日志（分页，最近 50 条）
 
@@ -185,7 +185,7 @@ CREATE TABLE webhook_logs (
 - `test_feishu_detects_remember_keywords` — 自动摄入触发词检测
 - `test_process_calls_write_memory_with_correct_params` — 管线调用正确
 - `test_webhook_invalid_signature_returns_401` — 签名校验
-- `test_webhook_valid_payload_returns_200_with_memory_id` — 正常流程
+- `test_webhook_valid_signature_accepted_with_delivery_id` — 正常流程（202 + delivery_id → 后台 `processed`）
 - `test_webhook_unknown_source_returns_404` — 未注册 source
 - `test_registry_get_connector_returns_correct_instance` — registry 正确性
 
@@ -193,7 +193,6 @@ CREATE TABLE webhook_logs (
 
 - 双向同步（EMA → PingCode/飞书）——连接器只做摄入，不反向写回
 - 连接器热加载/插件系统——新增连接器需要改代码 + 重新部署
-- 消息队列 / 异步处理——webhook 同步处理 + 写数据库，负载上来后再说
 - Webhook URL 自动配置——用户在外部系统中手动设置 webhook URL，EMA 不主动注册
 - OAuth 集成——用 shared secret（HMAC-SHA256），不做 OAuth flow
 - Confluence / Notion / TAPD 连接器——首批只做 PingCode + CI + 飞书，其他按需添加
