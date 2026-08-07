@@ -9,12 +9,12 @@
 3. **LLM**：通过 LLMProvider 抽象接口调用，业务代码禁止直接依赖具体 SDK
 4. **异步**：所有 IO 操作（API 调用、数据库访问、文件 IO）优先使用 async/await
 
-## 模型策略（成本优化）
+## 开发环境
 
-- **当前模型 (pro)**：负责架构设计、方案讨论、代码审查 — 需要深度思考的任务
-- **flash 子智能体**：负责写代码、修 bug、运行测试 — 执行类任务
-- **核心原则**：pro 负责"想"，flash 负责"做"；pro 会话不切模型以保护缓存，flash 不在意缓存重建成本
-- **委派方式**：用 Agent 工具指定 `model: "haiku"` 将执行任务委派给 flash 子智能体
+- **操作系统**：Windows 10 Pro，终端为 PowerShell。需要用户手动执行的命令（如交互式登录、启动本地服务）按 PowerShell 语法书写，不要假定 POSIX 命令（`mv` / `cat` / `grep` 等）可用
+- **数据库**：本地 PostgreSQL（`postgresql://ema:ema123@localhost:5432/ema_dev`），含 pgvector 扩展
+- **测试**：`python -m pytest`；测试环境用 NullPool，规避 Windows ProactorEventLoop + asyncpg 的连接池跨事件循环复用问题（见 `backend/db/__init__.py`）
+- **Windows 已知兼容性问题**：psycopg3 异步驱动（AsyncPostgresSaver）在 Windows 下不可用，checkpointer 降级为 InMemorySaver，开发期可接受（见 `backend/main.py`）；生产部署目标为 Linux
 
 ## 规则
 
