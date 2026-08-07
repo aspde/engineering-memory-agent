@@ -217,6 +217,54 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 
 **话术**：「生成质量我用 LLM-as-judge，让 LLM 从准确性、完整性、相关性打 1-5 分。LLM 评估有偏差，只能做粗筛，所以我会人工抽检 20%。」
 
+### 2.4 实施完成记录（阶段 B 已交付）
+
+> 状态：✅ 已完成（101 单测全过，CLI 可跑）。下方为实际交付物，替代 §2.2 的最小草案。
+
+**交付目录**：`tests/eval/`
+
+| 文件 | 职责 |
+|------|------|
+| [metrics.py](../../tests/eval/metrics.py) | 6 个纯函数指标：Recall@K / Precision@K / HitRate@K / MRR / NDCG@K / MAP@K + `compute_all` |
+| [ground_truth.py](../../tests/eval/ground_truth.py) | 30 条标注集，5 类（技术决策/故障复盘/架构设计/代码实现/历史背景）× 6 条，含 difficulty 分级 |
+| [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 30 条种子记忆（EMA 自身工程史），每条 summary 含独特指纹 |
+| [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配（`is_relevant`/`relevance_mask`）+ retriever 适配（chunk/memory）+ 4 项一致性校验 |
+| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错 |
+| [report.py](../../tests/eval/report.py) | Markdown + JSON 报告，含 A/B delta 表 |
+| [run_eval.py](../../tests/eval/run_eval.py) | CLI：`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
+| [seed.py](../../tests/eval/seed.py) | CLI：`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
+
+**单元测试**（101 passed）：[test_eval_metrics.py](../../tests/unit/test_eval_metrics.py)（指标手算 case）+ [test_eval_dataset.py](../../tests/unit/test_eval_dataset.py)（数据集一致性 + 合成坏语料校验器）+ [test_eval_runner.py](../../tests/unit/test_eval_runner.py)（synthetic retriever 端到端）+ [test_eval_report.py](../../tests/unit/test_eval_report.py)
+
+**关键设计决策**（面试可讲）：
+1. **指纹而非 UUID**：标注集用 `relevant_fingerprints`（summary 中的独特子串）匹配相关结果，不依赖 memory_id。可移植、可重现、CI 友好。`validate_dataset` 强校验每个指纹唯一且可解析。
+2. **retriever 无关**：runner 接收 `RetrieverAdapter(fn, match_field)`，同一套指标同时评估 chunks 表（`retrieve`）和 memories 表（`query_memories`）。
+3. **位置 ID 映射**：runner 把 retrieved 结果映射成 `[0,1,...,n-1]`，relevant 集为命中指纹的 index 集合，复用纯函数 metrics，零 I/O 耦合。
+4. **difficulty 分级**：easy（词重合）/medium（改写）/hard（概念问法），暴露向量质量短板。
+5. **A/B 对比内置**：`--compare` 跑 cross-encoder vs LLM rerank，输出 delta 表，量化"换 reranker 效果如何"。
+
+**跑出真实数字的流程**：
+```bash
+# 1. 灌种子（chunks 表，零 LLM 成本）
+python -m tests.eval.seed
+# 2. 跑 chunks 路径评估
+python -m tests.eval.run_eval --retriever chunk --report-md report.md
+# 3. A/B 对比 rerank 策略
+python -m tests.eval.run_eval --retriever chunk --compare --report-json ab.json
+# 4.（可选）memories 路径：先灌结构化记忆
+python -m tests.eval.seed --memories --clear
+python -m tests.eval.run_eval --retriever memory
+```
+
+**待回填数字**（跑完后填入 self-introduction.md / ema-deep-dive.md）：
+- chunks 路径（vector_search，无 rerank）：Recall@5=**0.833** / MRR=**0.817** / NDCG@5=**0.819** / MAP@5=0.811（30 query，稳态延迟 ~200ms/query）
+- memory 路径：[待跑，需先 `python -m tests.eval.seed --memories` 灌结构化记忆]
+- LLM rerank vs CE Δ recall@5：[待跑，cross-encoder rerank 单 query 50s（CPU 瓶颈），30 query 需 25min，建议 GPU 环境或降候选数后跑]
+- easy/medium/hard recall@5：**0.714 / 0.929 / 0.778**（medium 最高，easy 反而最低——部分 easy query 词重合但向量区分度不足；hard 概念查询 0.778 优于预期）
+- 按 category：技术决策 1.000 / 代码实现 1.000 / 架构设计 0.833 / 故障复盘 0.667 / 历史背景 0.667（故障复盘+历史背景是短板，概念查询多）
+
+**性能瓶颈实测**（面试可讲）：cross-encoder rerank（BGE-reranker-v2-m3，568M 参数）在 CPU 上单 query rerank 20 候选耗时 20s，加 embed+search 单 query 总 50s。这是 EMA 单机 CPU 部署的已知瓶颈，优化方向：① embed/rerank 服务化接 GPU；② 降过采样倍数（top_k×4→top_k×2）；③ 高频 query 缓存 rerank 结果。当前评估默认走 vector_search 路径绕过此瓶颈。
+
 ---
 
 ## 三、关键数字实测清单
@@ -225,16 +273,19 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 
 ### 3.1 必测数字
 
-| 指标 | 测量方法 | 目标值（参考） | 面试话术 |
-|------|---------|--------------|---------|
-| 记忆库总条数 | `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL` | [填实测] | "当前记忆库 [X] 条" |
-| chunks 总条数 | `SELECT COUNT(*) FROM chunks` | [填实测] | "文档分块 [X] 条" |
-| 向量召回 P95 延迟 | 在 `/api/memory/search` 加计时日志 | ~10-50ms | "向量召回 P95 [X]ms" |
-| 完整检索 P95（含 rerank） | 同上，覆盖 rerank | ~100-500ms | "检索 P95 [X]ms" |
-| Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | ~3-8s | "对话 P95 [X]s" |
-| 单次对话平均 token 数 | LLMProvider 加计数（见 §4） | [填实测] | "平均 [X] token/轮" |
-| 单次对话平均 tool 调用数 | 在 Agent 加计数 | ~2-3 | "平均调 [X] 个 tool" |
-| BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | ~20-50ms | "embed [X]ms/条" |
+| 指标 | 测量方法 | 实测值 | 面试话术 |
+|------|---------|--------|---------|
+| 记忆库总条数 | `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL` | 0（生产空）/ 30 条评估种子 | "评估集 30 条标注 query，生产待部署" |
+| chunks 总条数 | `SELECT COUNT(*) FROM chunks` | 30（评估种子） | "种子语料 30 条，覆盖 5 类记忆" |
+| 向量召回 P95 延迟 | 在 `/api/memory/search` 加计时日志 | ~230ms（embed 150-230ms + search） | "向量召回稳态 200ms，含 BGE-M3 embed" |
+| 完整检索 P95（含 rerank） | 同上，覆盖 rerank | 50s/query（CPU 瓶颈） | "cross-encoder rerank CPU 上 50s/query，是已知瓶颈，待 GPU 优化" |
+| Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | [待测] | "对话 P95 [X]s" |
+| 单次对话平均 token 数 | LLMProvider 加计数（见 §4） | [待测] | "平均 [X] token/轮" |
+| 单次对话平均 tool 调用数 | 在 Agent 加计数 | [待测] | "平均调 [X] 个 tool" |
+| BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms（CPU） | "embed 150-230ms/条，CPU 推理" |
+| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever hybrid_norerank` | 1.000 | "hybrid+jieba 无 rerank Recall@5 1.00（向量 baseline 0.83），评估集 30 query" |
+| 检索 MRR | 同上 | 0.983 | "MRR 0.98" |
+| 检索 NDCG@5 | 同上 | 0.988 | "NDCG@5 0.99" |
 
 ### 3.2 计时日志埋点示例
 
@@ -429,7 +480,7 @@ locust -f tests/perf/locustfile.py
 | 三阶段提取 | 🟡 薄 | 1 层 | [extraction.py:153-156](../../backend/service/extraction.py) gather 并行 + zero-shot | 见 §10 优化 |
 | rerank | 🟡 薄 | 1-2 层 | [rerank.py:57](../../backend/service/rerank.py) SDK 调用 + [rerank.py:95](../../backend/service/rerank.py) pointwise gather | cross-encoder 原理必须会 |
 | vector_search | 🟡 薄 | 1 层 | [retrieval.py:99-104](../../backend/service/retrieval.py) 白名单 filter | 讲 SQL 可见 |
-| RAG 高级技巧 | ❌ 无 | 0 层 | 无 query rewriting / HyDE / multi-query / parent-child | 不主动提 |
+| RAG 高级技巧 | 🟢 有 | 2 层 | jieba 中文分词 hybrid + query_rewrite_and_search tool（[retrieval.py](../../backend/service/retrieval.py) sparse_search / [tools.py](../../agent/tools.py)） | 主动讲，三次假设迭代是亮点 |
 | Prompt 高级技巧 | ❌ 无 | 0 层 | 全 zero-shot，无 few-shot / CoT | 不主动提 |
 | 模型微调 | ❌ 无 | 0 层 | 直接用预训练 BGE-M3 | 不主动提 |
 
@@ -635,3 +686,298 @@ async def eval_extraction():
 | 「prompt 怎么迭代？」 | 靠 git | 「有标注集，每次改动跑评估对比」 |
 
 **核心收益**：把"三阶段提取"从 🟡 薄 升到 🟢 中深，多一个能扛 2 层追问的深度点。
+
+---
+
+## 十一、检索召回优化方案（补 RAG 高级技巧短板）
+
+> **2026-08-06 更新**：jieba 中文分词 + 跳过 rerank 已落地，Recall@5 0.833→1.000（5/5 miss 全救回），MRR 0.983，延迟 235ms。详见 §11.5 实测结果表。本节 §11.1-11.4 保留为历史诊断过程，体现"做了、测了、错了、再测、纠正归因、连默认假设都敢质疑"的迭代。
+>
+> 实测发现：vector_search Recall@5=0.833，5 个概念查询 miss；cross-encoder rerank 对 Recall 影响 **0**（相关结果不在 top-20 候选池），对 MRR 影响 **+0.017**。**瓶颈在召回不在排序**。本方案给出 2 个可落地的召回优化，补 §9.2 表里的 "RAG 高级技巧 ❌ 无"。
+
+### 11.1 现状问题（实测数据支撑）
+
+**评估数据**（[eval-report.json](eval-report.json)，30 query）：
+- Recall@5=0.833（25 命中 / 5 miss）
+- 5 个 miss query 的相关结果**均不在 top-20 候选池** → rerank 无法救回
+- miss 全是概念查询，query 和相关记忆词重合度低：
+
+| query | 相关记忆（应召回） | miss 原因 |
+|-------|------------------|----------|
+| q007 "koa-connect 之前出过什么问题" | "koa-connect wrapper 导致 ctx 泄漏" | "出过什么问题" 与 "ctx 泄漏" 词面无重合 |
+| q012 "Agent 会不会陷入死循环" | "max_steps 防循环" | "会不会" 与 "max_steps" 无重合 |
+| q018 "同名实体怎么归一化" | "向量粗筛 + LLM 精判" | "归一化" 与 "粗筛/精判" 无重合 |
+| q026 "项目分了几个阶段" | "Phase 1-4 实现" | "几个阶段" 与 "Phase" 中英文不匹配 |
+| q029 "连接器支持哪些平台" | "connector.py 支持 Git/PingCode/CI/飞书" | "平台" 与具体平台名无重合 |
+
+**根本原因**：BGE-M3 dense embedding 对"词面不重合但语义相关"的 query 召回力不足。
+
+**会被追问到露馅的点**：
+- 「Recall 0.833，剩下 16.7% 怎么救？」→ 答不上
+- 「为什么不用 query rewriting？」→ 只能说"考虑过"
+- 「dense vector 召回不了概念查询怎么办？」→ 没方案
+
+### 11.2 方案 A：Query 改写（LLM 扩展概念词，2-3h，高 ROI）
+
+**目标**：retrieve 前加一步 LLM 改写，把概念查询扩展成多个语义相近的表述，多路召回取并集。
+
+**实现**（新建 `backend/service/query_rewrite.py`）：
+
+```python
+"""LLM-based query rewriting for retrieval recall improvement."""
+
+from backend.service.llm_service import get_llm_provider
+
+_REWRITE_PROMPT = """\
+Rewrite the following query into 3 semantically equivalent variations that
+might appear in a technical knowledge base. Focus on concrete terms and
+entities that the original query implies but does not state.
+
+Query: {query}
+
+Output one variation per line, no numbering:
+"""
+
+
+async def rewrite_query(query: str, n_variations: int = 3) -> list[str]:
+    """Return [original] + n variations for multi-query retrieval."""
+    try:
+        llm = get_llm_provider()
+        resp = await llm.chat_raw(
+            messages=[{"role": "user", "content": _REWRITE_PROMPT.format(query=query)}],
+        )
+        text = resp.get("content", "")
+        variations = [line.strip() for line in text.strip().split("\n") if line.strip()][:n_variations]
+        return [query] + variations
+    except Exception:
+        return [query]  # fails safe: original query only
+```
+
+**集成到 retrieve**（修改 [retrieval.py](../../backend/service/retrieval.py)）：
+
+```python
+async def retrieve_multi_query(
+    query: str,
+    top_k: int = 5,
+    *,
+    use_llm_rerank: bool = False,
+) -> list[Chunk]:
+    """Multi-query retrieval: rewrite + union + dedup + rerank."""
+    from backend.service.query_rewrite import rewrite_query
+
+    queries = await rewrite_query(query)
+    all_chunks: dict[str, Chunk] = {}  # dedup by chunk id
+    for q in queries:
+        vec = await embed_query(q)
+        results = await vector_search(vec, top_k=top_k * 2)
+        for r in results:
+            cid = r["id"]
+            if cid not in all_chunks:
+                all_chunks[cid] = _row_to_chunk(r)
+
+    candidates = list(all_chunks.values())[:top_k * 4]
+    return await _rerank_and_trim(candidates, query, top_k, use_llm_rerank)
+```
+
+**关键设计**：
+- fails safe：改写失败时只用原 query，不阻塞检索
+- 多路召回取并集，dedup by chunk id，避免重复
+- 改写只增加 1 次 LLM 调用（~500ms），成本可控
+- q007 "koa-connect 之前出过什么问题" 预期被改写成 "koa-connect ctx 泄漏 / 中间件 wrapper 问题"，词重合度提升
+
+**面试话术**：
+> 「我评估发现 5 个 miss query 全是概念查询，dense vector 词面不重合就召回不了。所以加了 query rewriting——做成 Agent 的显式 tool（query_rewrite_and_search），让 Agent 自主判断概念查询时调用，retrieve 默认走 hybrid 不自动改写，延迟决策权交给 Agent。改写单独测 0/5 救回（simple 分词器瓶颈），配合 jieba hybrid 后多路召回才生效。fails safe 设计，改写失败退回原 query。」
+
+### 11.3 方案 B：Hybrid Search（dense + sparse BM25，4-6h）
+
+**目标**：dense vector 召回不了的概念查询，用 sparse（BM25 关键词）补位。两者并集后 rerank。
+
+**实现**（加 SQL migration + [retrieval.py](../../backend/service/retrieval.py) 加 sparse_search）：
+
+```sql
+-- 给 chunks 表加全文搜索索引（migration）
+ALTER TABLE chunks ADD COLUMN tsv tsvector
+  GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED;
+CREATE INDEX idx_chunks_tsv ON chunks USING GIN(tsv);
+```
+
+```python
+async def sparse_search(query: str, top_k: int = 20) -> list[dict]:
+    """BM25-style keyword search via Postgres ts_vector."""
+    sql = text("""
+        SELECT id, content,
+               ts_rank(tsv, plainto_tsquery('simple', :q)) AS rank
+        FROM chunks
+        WHERE tsv @@ plainto_tsquery('simple', :q)
+        ORDER BY rank DESC
+        LIMIT :top_k
+    """)
+    async with get_session() as session:
+        result = await session.execute(sql, {"q": query, "top_k": top_k})
+        return [dict(row) for row in result.mappings()]
+
+
+async def retrieve_hybrid(query: str, top_k: int = 5) -> list[Chunk]:
+    """Hybrid: dense + sparse union → rerank."""
+    vec = await embed_query(query)
+    dense = await vector_search(vec, top_k=top_k * 4)
+    sparse = await sparse_search(query, top_k=top_k * 4)
+    merged: dict[str, dict] = {}
+    for r in dense + sparse:
+        cid = r["id"]
+        if cid not in merged:
+            merged[cid] = r
+    candidates = list(merged.values())[:top_k * 4]
+    return await _rerank_and_trim(candidates, query, top_k, False)
+```
+
+**关键设计**：
+- 复用 Postgres 自带 ts_vector，**不需要额外引 ES**（保持架构简单）
+- `simple` 分词器对中英文混合够用（按词切，不依赖中文分词库）
+- dense + sparse 并集，互补：dense 救语义相关，sparse 救关键词命中
+- q029 "连接器支持哪些平台" → sparse 命中含 "Git/PingCode/CI/飞书" 的记忆
+
+**面试话术**：
+> 「dense vector 对概念查询召回弱，我加了 hybrid search——先用 Postgres ts_vector 做 BM25，发现 simple 分词器分不了中文（0/5 救回）；换成 Python 侧 jieba 分词 + Jaccard 重写 sparse_search，Recall@5 从 0.833 升到 0.97。再 A/B 跳过 rerank 到 1.00/235ms——30 条语料下 rerank 有害。选 Postgres/Python 不选 ES 是为了不引新组件。」
+
+### 11.4 方案对比与选型
+
+| 维度 | 方案 A（query 改写） | 方案 B（hybrid search） |
+|------|---------------------|----------------------|
+| 实现复杂度 | 低（+1 模块，改 retrieve） | 中（加 SQL migration + sparse 函数） |
+| 延迟开销 | +500ms（1 次 LLM 调用） | +10ms（1 次 SQL 查询） |
+| 对 5 个 miss 的预期救回 | 3-4 个（扩展概念词后词重合度提升） | 2-3 个（关键词命中补位） |
+| 架构依赖 | 无新依赖 | 无新依赖（复用 Postgres） |
+| 可解释性 | 高（能看到改写后的 query） | 中（BM25 排序透明） |
+| **是否全量触发** | **否**（90% query 不需要，白付 500ms） | **是**（+10ms 无感，默认开） |
+
+**关键实测发现（score 阈值触发不可行）**：跑了 30 query 的 vector_search top-1 score，hit 均值 0.685 [0.543-0.777]，miss 均值 0.645 [0.600-0.689]，**两者完全重叠**——miss query 的 score 看起来"自信"但召回了错的结果，17 个 hit 的 score 低于 miss 最高分。无法用 score 阈值按需触发改写。
+
+**真正的按需触发信号**：5 个 miss query 全是概念性问句（含"什么/怎么/哪些/会不会/几个"），25 个 hit 大多是具体技术词查询。按 query 语言学特征（疑问代词）触发，而非 score。
+
+**修正后的推荐路径**：
+1. **hybrid 默认开**（+10ms 无感，救 2-3 个 miss，不需要按需判断）
+2. **query 改写按概念词触发**（query 含疑问代词时才改写，90% query 走 210ms fast path，10% 走 700ms slow path）
+3. 或更干净：**改写作为 Agent 的显式 tool**（`query_rewrite_and_search`），让 Agent 自主判断概念查询时调用，retrieve 默认走 hybrid
+
+**端到端延迟视角**：Agent 对话 LLM 调用本身 2-5 秒，+500ms 改写占 10-25%，但只有 10% query 需要付这个代价。全量改写 = 让 90% query 白付，不合理。
+
+### 11.5 评估验证（用 tests/eval A/B）
+
+```bash
+# baseline（当前）
+python -m tests.eval.run_eval --retriever vector --report-json baseline.json
+
+# 方案 A：query 改写（实现后加 --retriever rewrite）
+python -m tests.eval.run_eval --retriever rewrite --report-json rewrite.json
+
+# 方案 B：hybrid（实现后加 --retriever hybrid）
+python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
+```
+
+**实测结果**（30 query 全量评估）：
+
+| 方案 | Recall@5 | MRR | 救回 miss | 延迟/query | 实测结论 |
+|------|----------|-----|----------|-----------|---------|
+| baseline (vector) | 0.833 | 0.817 | — | ~200ms | 5 miss 全是概念查询 |
+| + hybrid (simple 分词器) | 0.833 | — | **0/5** | ~210ms | sparse 对中文返回 0 行，`simple` 分词器不支持中文 |
+| + query rewrite (LLM) | 0.833 | — | **0/5** | ~700ms | 改写质量高但 simple 分词器仍是瓶颈 |
+| + hybrid (jieba 分词) + rerank | 0.967 | 0.917 | **4/5** | ~20906ms | jieba 救回 4/5；q015 被 0.15 floor 滤掉 |
+| **+ hybrid (jieba 分词) 无 rerank** | **1.000** | **0.983** | **5/5** | **~235ms** | rerank 在小语料下有害：floor 误伤 + 打分噪声干扰排序 |
+
+**根因分析**（四步迭代，第四步 A/B 推翻"rerank 必要"的默认假设）：
+1. **simple hybrid 失效**：Postgres `simple` 分词器把中文当整体 token，匹配不到任何行。前两次失败的真正根因——不是数据太短，是分词器不支持中文。
+2. **rewrite 单独失效**：改写扩宽了 query 语义，但 simple 分词器仍是瓶颈，hybrid 通道返回 0 行。
+3. **jieba 成功**：换 jieba 分词后，sparse 通道对中文 query 有效，4/5 miss 救回，Recall@5 0.83→0.97。
+4. **A/B 跳过 rerank → 1.00**：剩下 q015 miss 查了是 cross-encoder 打了 0.142 < 0.15 floor 被滤掉。做了 A/B 跳过 rerank，Recall@5 直接到 1.00、MRR 0.98、延迟 20s→235ms。**rerank 在 30 条语料下是有害的**：候选池覆盖 73% 语料，dense similarity 本身已接近完美排序，cross-encoder 打分噪声反而干扰排序，0.15 floor 还误伤 1 条。
+5. **归因教训**：①第二次失败时差点归因到"数据太短"——错了，根因是分词器；②第四步推翻了"rerank 一定提升质量"的默认假设——rerank 收益是 scale-dependent 的，小语料下噪声盖过收益，大语料下才会反过来。
+
+**修正后的优化方向**（jieba + skip-rerank 已落地，当前 scale 最优）：
+
+| 方向 | 预期收益 | 代价 | 优先级 |
+|------|---------|------|--------|
+| ✅ jieba 中文分词（已落地） | Recall@5 0.83→0.97 | Python 侧分词 +900ms | 已完成 |
+| ✅ 跳过 rerank（已落地） | 0.97→1.00，延迟 20s→235ms | 大语料需重新评估 | 已完成 |
+| ✅ 1000 条 LLM 干扰语料实测（已落地） | 验证临界点：Recall 1.00→0.933 | 24min 跑一轮 | 已完成 |
+| 万级语料重新评估 rerank | rerank 预期转正（候选池 0.4%） | 重新跑 eval + 重调 floor | P2（生产部署前） |
+| ✅ sparse_search 迁移 DB 侧（jieba 存列 + GIN）（已落地） | 稳态延迟 O(N)→O(log N)，1000 条 641ms→198ms（-69%） | 加列 + 重建索引 + 改 SQL | 已完成 |
+| 丰富种子数据 | 边际收益（当前已 1.00） | 数据工程 | P3 |
+| rerank 加速（GPU 或换轻量 model） | 延迟 20s→<1s | GPU 部署/换模型 | P2（仅大语料需要时） |
+
+#### 11.5.1 Scale-dependent 决策：rerank 什么时候从有害变有益
+
+**核心变量：候选池覆盖率**（candidate pool / corpus size）。这是决定 rerank 正负收益的关键因子。
+
+| 语料规模 | 候选池 | 覆盖率 | dense sim 区分度 | rerank 作用 | 决策 |
+|---------|--------|--------|-----------------|-----------|------|
+| 30 条（当前） | ~22 | **73%** | 高（分数分散） | **有害**（噪声 > 信号） | 跳过 |
+| 1000 条（已验证） | ~40 | **4%** | 中（分数开始压缩） | **边界区**（Recall 开始掉 0.933） | **临界点，需评估** |
+| 万级 | ~40 | **0.4%** | 低（分数高度压缩） | **有益**（区分压缩分数） | 开启 |
+
+**为什么 30 条时 rerank 有害**：
+1. 候选池覆盖 73%，相关 chunk 几乎必然在候选池里——rerank 不提升 Recall
+2. 候选少（22 个），dense sim 分数分散（0.3-0.8），排名已经接近完美——rerank 不提升 MRR
+3. cross-encoder 打分有噪声（0.142 给了 q015 的正确答案低于 floor）——rerank 反而降 MRR + 掉 Recall
+
+**为什么万级时 rerank 有益**：
+1. 候选池覆盖率 0.4%，相关 chunk 不一定进 top-40——但这是**召回问题**，rerank 解决不了
+2. 40 个候选都"有点像"，dense sim 分数集中在 0.5-0.7，区分不开——rerank 的 pairwise 打分能拉开差距
+3. 0.15 floor 在高密度候选下能有效滤掉不相关噪声
+
+**关键认知**：rerank 解决的是**排序精度**问题（MRR），不是**召回**问题（Recall）。小语料下 dense sim 排序已足够好，rerank 的边际收益为负；大语料下 dense sim 区分度下降，rerank 的边际收益才转正。
+
+**1000 条延迟预测**：rerank 候选数不随语料增长（恒为 top_k×4=20 per retriever，union ~40），所以 rerank 延迟基本不变（~20-25s）。无 rerank 路径也基本不变（hnsw + GIN 索引 sublinear 扫描，~250-300ms）。**延迟不是决策因子，收益翻转才是**。
+
+#### 11.5.2 1000 条实测验证（LLM 干扰语料）
+
+用 DeepSeek 生成 837 条 + 模板补 133 条 = 970 条干扰 chunks（覆盖 pgvector/HNSW/HITL/RAG/Agent 等 33 个相邻主题），插入 DB 后跑 hybrid_norerank eval：
+
+| 指标 | 30 条 | 1000 条 | 变化 |
+|------|-------|---------|------|
+| Recall@5 | 1.000 | **0.933** | **-0.067** |
+| MRR | 0.983 | 0.917 | -0.066 |
+| NDCG@5 | 0.988 | 0.921 | -0.067 |
+| 延迟 | 235ms | 1498ms | **+6x** |
+
+**Recall 掉了——2 个 query miss**，且 miss 的主题正好是干扰语料覆盖的相邻领域：
+
+| miss query | 类别/难度 | 原因 |
+|-----------|----------|------|
+| q010「向量索引召回不准怎么调」 | 故障复盘/hard | 干扰语料含 pgvector HNSW/IVF/PQ 调优条目，把目标种子挤出 top-5 |
+| q015「人工介入 HITL 是怎么实现的」 | 架构设计/medium | 干扰语料含 HITL/审批流/状态机条目，把目标种子挤出 top-5 |
+
+**按类别 Recall@5**：技术决策 1.00 / 代码实现 1.00 / 历史背景 1.00 / 故障复盘 0.83 / 架构设计 0.83——只掉在干扰语料强覆盖的主题上。
+
+**关键结论**：1000 条是 rerank 收益的**临界点**。30 条时 rerank 有害（噪声 > 信号），万级时有益（区分压缩分数），1000 条正好在边界——Recall 开始掉但只掉 2 条，是否开启 rerank 需要看 miss 的代价是否可接受。这验证了 scale-dependent 决策框架：rerank 不是"有用/没用"的二元判断，而是随语料规模变化的连续函数。
+
+**真正的发现：sparse_search O(N) 瓶颈**。延迟从 235ms 暴增到 1498ms（6x），全来自 Python 侧 jieba 分词 + Jaccard 要加载全部 1000 条 chunks 逐条计算。30 条时 ~900ms 可接受，1000 条时 ~1300ms 已经吃掉总延迟的 87%。
+
+**✅ 已优化：sparse_search 迁移 DB 侧（jieba tokens 存列 + GIN 索引）**。将 jieba 分词结果存入 `chunks.tokens TEXT[]` 列，建 GIN 索引，sparse_search 改用 `WHERE tokens && :q_tokens`（GIN 索引 O(log N) 筛选）+ Python 侧 Jaccard 精排。迁移后 1000 条稳态延迟从 641ms 降到 198ms（-69%），接近 30 条基线（194ms）——O(N) 瓶颈已消除，延迟不再随语料规模增长。
+
+| 指标 | 迁移前（Python O(N)） | 迁移后（DB GIN） | 改善 |
+|------|----------------------|-----------------|------|
+| 30 条稳态延迟 | 235ms | 194ms | -17% |
+| 1000 条稳态延迟 | 641ms | 198ms | **-69%** |
+| Recall@5（30 条） | 1.000 | 1.000 | 一致 |
+| Recall@5（1000 条模板） | 1.000 | 1.000 | 一致 |
+
+**生产优化方向（新增）**：
+
+| 方向 | 预期收益 | 代价 | 优先级 |
+|------|---------|------|--------|
+| sparse_search 迁移到 DB 侧（jieba 分词结果存列 + GIN 索引） | 延迟 O(N)→O(log N)，1000 条 1300ms→<50ms | 加列 + 重建索引 + 改 SQL | P2（万级语料前必须做） |
+| 用真实语料重测 1000 条 eval | 验证 Recall 是否真的不掉 | 数据工程 | P3 |
+
+### 11.6 面试应答对比
+
+| 问题 | 优化前 | 优化后 |
+|------|--------|--------|
+| 「Recall 0.833 怎么提升？」 | "考虑过 query rewriting" | 「四步迭代：score 阈值不可行 → simple hybrid 0/5 → jieba 分词 4/5 救回 0.97 → A/B 跳过 rerank 到 1.00/235ms」 |
+| 「改写效果如何？」 | 只能说"考虑过" | 「LLM 改写质量很高，但 simple 分词器分不了中文，hybrid 通道返回 0 行。换 jieba 后才生效」 |
+| 「hybrid 为什么不用 ES？」 | — | 「用 Postgres tsv 做 BM25，但 simple 分词器对中文无效。最终在 Python 侧用 jieba + Jaccard 重写 sparse_search，不引新组件」 |
+| 「怎么验证效果？」 | 没测 | 「30 query 全量 A/B：simple hybrid 0/5，jieba hybrid 4/5，跳过 rerank 5/5，每步都有数据」 |
+| 「rerank 为什么不用？」 | — | 「A/B 实测：30 条语料下候选池覆盖 73%，dense similarity 已接近完美排序，cross-encoder 打分噪声反而掉 MRR，0.15 floor 还误伤 1 条。跳过后 Recall 1.00、延迟 235ms。但 docs 标注了万级语料需重新评估——rerank 收益是 scale-dependent 的」 |
+| 「万级语料怎么办？rerank 还是不用？」 | — | 「核心变量是候选池覆盖率：30 条时 73%→rerank 有害；万级时 0.4%→40 个候选都'有点像'，dense sim 分数压缩到 0.5-0.7 区分不开，rerank 的 pairwise 打分才有用武之地。所以小语料关、大语料开，这不是'rerank 没用'而是 scale-dependent 的取舍。延迟不是决策因子——候选数恒为 40，rerank 延迟 ~20s 不随语料增长」 |
+| 「1000 条测了吗？」 | — | 「测了：用 LLM 生成 970 条相邻主题干扰语料（pgvector/HITL/RAG 等 33 主题），Recall@5 从 1.00 掉到 0.933——2 个 query miss，且 miss 的正是干扰语料覆盖的主题（向量索引调优、HITL 实现）。这验证了 1000 条是 rerank 收益的临界点：30 条有害、万级有益、1000 条在边界。另一个发现是 sparse_search O(N) 瓶颈：延迟 235ms→1498ms（6x），Python 侧 jieba 全表扫描吃掉 87% 延迟。**已优化**：把 jieba 分词结果存到 `tokens TEXT[]` 列 + GIN 索引，sparse_search 改用 `tokens && q_tokens` DB 侧筛选，1000 条稳态延迟从 641ms 降到 198ms（-69%），O(N) 瓶颈消除」 |
+
+**核心收益**：把 §9.2 表里 "RAG 高级技巧 ❌ 无" 升到 🟢 **有实操 + 四步迭代 + 两次纠正归因**。第二次失败时纠正了"数据太短"的错误归因（根因是分词器），第四步 A/B 推翻了"rerank 必要"的默认假设（小语料下有害）——体现的是"做了、测了、错了、再测、连默认假设都敢质疑"的工程判断力，比"我加了改写 Recall 升到 0.93"更有深度。
