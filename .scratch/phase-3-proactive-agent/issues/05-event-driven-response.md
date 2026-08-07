@@ -9,10 +9,10 @@
 - [ ] `CI_FAILURE_PATROL_PROMPT` 模板：Instructions 包括搜索与当前 CI job name / error message 相似的历史故障记忆、判断是否匹配已知问题模式、如匹配则调用 notify_slack 推送（含历史解决方案链接）
 - [ ] `JIRA_RESOLVED_PATROL_PROMPT` 模板：Instructions 包括搜索与当前 issue title/description 相似的历史 issue 记忆、判断同根因重复修复（"this looks like issue #X which was also caused by Y"）
 - [ ] `backend/service/patrol.py`：`run_event_patrol(trigger_source, event_payload, system_prompt)` 函数，封装 `patrol_type="event_driven"` + `trigger="webhook"` 的巡检调用
-- [ ] `backend/service/rate_limiter.py`：`RateLimiter` 类，`is_allowed(key: str, window_seconds: int = 3600) -> bool`，基于内存 dict（`dict[str, float]` 存上次触发时间戳）+ `asyncio.Lock`，定期清理过期条目（可选，避免内存泄漏）
+- [x] `backend/service/rate_limiter.py`：已删除 —— 防重复触发职能由 content-hash 幂等去重（commit `89a267c`）承担；Webhook 提取另由并发上限（超出返回 503）保护，不再需要独立速率限制器
 - [ ] 现有 webhook 路由集成：CI PingCode/connector 的 failure 事件处理中，检查 rate limiter（key=job_name）→ 调用 `run_event_patrol`；Jira connector 的 issue status change 事件处理中，status=resolved 时检查 rate limiter（key=issue_key）→ 调用 `run_event_patrol`
 - [ ] 速率限制被触发时返回 200 正常响应，可选 response header `X-Rate-Limited: true`，不报错不抛异常
 - [ ] 事件巡检结果写入 `patrol_logs`（patrol_type=event_driven, trigger=webhook）
-- [ ] 单元测试：`tests/unit/test_rate_limiter.py` — `test_allows_first_call`、`test_blocks_within_window`、`test_allows_after_window_expires`、`test_different_keys_independent`（不同 job_name 独立计数）
+- [x] 单元测试：`tests/unit/test_rate_limiter.py` —— 随 `rate_limiter.py` 一并删除；幂等/背压行为由 `tests/api/test_webhook_routes.py`（`test_concurrency_cap_returns_503` 等）覆盖
 - [ ] 单元测试：`tests/unit/test_patrol_prompts.py` — `test_ci_failure_prompt_includes_search_instructions`、`test_jira_resolved_prompt_includes_root_cause_check`
 - [ ] 集成测试：`tests/api/test_webhook_routes.py` — 扩展已有测试，验证 CI failure webhook 触发 patrol（Mock agent.ainvoke，验证 patrol_log 写入）和速率限制行为（连续两次相同 webhook，第二次不触发 patrol）

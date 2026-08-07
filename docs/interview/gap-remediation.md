@@ -18,7 +18,7 @@
 | 巡检内嵌主进程 | [main.py:122-194](../../backend/main.py) 调度器在 FastAPI 主进程 | 🟡 有意取舍 |
 | Windows 降级 | [main.py:24-30](../../backend/main.py) PostgresSaver 降级 InMemorySaver | 🟢 已知平台差异 |
 | 无评估体系 | 未发现 Recall@K / MRR / LLM-as-judge 实现 | 🔴 对口岗位核心短板 |
-| 无成本监控 | [rate_limiter.py](../../backend/service/rate_limiter.py) 只限速不计费 | 🔴 AI 工程化短板 |
+| 无成本监控 | [metrics.py](../../backend/shared/metrics.py) 进程内计数器——重启清零、`/usage/reset` 无鉴权、无持久化、无告警 | 🔴 AI 工程化短板 |
 | Prompt 散落代码 | [extraction.py](../../backend/service/extraction.py) / [memory.py](../../backend/service/memory.py) 内嵌字符串 | 🟡 中等 |
 | 连接池写死 | [db/__init__.py](../../backend/db/__init__.py) 5+10 | 🟢 低 |
 

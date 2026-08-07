@@ -265,7 +265,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 2. **双 reranker**：默认 cross-encoder 本地（零 API 成本），需要时才走 LLM rerank
 3. **Provider 切换**：DeepSeek 便宜，Claude 贵但质量高，按场景配
 4. **max_steps 限制**：防止 Agent 无限调 tool 烧 token
-5. **rate_limiter**：API 调用限速
+5. **传输韧性**：LLM/Embedding 调用统一走 tenacity 指数退避重试 + 熔断器（[resilience.py](../../backend/shared/resilience.py)），429/5xx 自动重试、连续失败熔断快速失败；重复投递靠 content-hash 幂等去重，不重复入库
 
 **追问预案**：
 - Q：怎么知道哪次调用贵？→ A：目前没有精细的成本监控。改进项是加 token 计数日志，按 tool 和场景统计

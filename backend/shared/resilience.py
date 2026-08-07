@@ -13,7 +13,7 @@ breaker:
   failures and then fails fast for the cooldown window instead of burning
   retries and tokens against a down provider.  In-memory and keyed by
   provider name; a process restart resets it (acceptable for dev /
-  single-instance, same tradeoff as ``rate_limiter.py``).
+  single-instance).
 
 Layer split: this module owns *transport* retry.  ``structured.py`` owns
 *semantic* retry (JSON parse / schema validation) for ``chat_json``, so
