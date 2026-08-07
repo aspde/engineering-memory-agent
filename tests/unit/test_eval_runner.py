@@ -243,11 +243,55 @@ class TestRunEval:
         assert q1["semantic_relevance"] is True
 
     @pytest.mark.asyncio
-    async def test_semantic_relevance_off_by_default(
+    async def test_semantic_relevance_on_by_default(
         self, monkeypatch, fake_items
     ) -> None:
-        """Without the flag, a fingerprint miss stays a miss — baseline
-        behaviour and the deterministic default are unchanged."""
+        """The semantic channel is on by default: a fingerprint miss that the
+        embedding channel rescues still counts as a hit without any flag."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import tests.eval.runner as runner_mod
+
+        # q1's retrieved item paraphrases the target — no substring match.
+        results_per_query = {
+            "alpha query": [{"content": "a paraphrase that omits the keyword"}],
+            "beta query": [{"content": "beta"}],
+            "gamma query": [{"content": "gamma"}],
+        }
+        adapter = _make_fake_adapter("content", results_per_query)
+        _patch_adapter(monkeypatch, adapter)
+
+        # Supply a seed summary for the semantic pass to target (the fake
+        # labeled set's seed_ids are not in the real seed file).
+        monkeypatch.setattr(
+            runner_mod,
+            "load_seed_memories",
+            lambda: [SimpleNamespace(id="s1", summary="alpha summary")],
+        )
+        monkeypatch.setattr(
+            runner_mod,
+            "semantic_relevance_mask",
+            AsyncMock(return_value=[True]),
+        )
+
+        # No explicit flag — default behaviour must invoke the semantic channel.
+        cfg = EvalConfig(name="default-on", retriever="chunk", top_k=5)
+        result = await run_eval(cfg, fake_items)
+
+        assert result.metric("recall@5") == 1.0
+        q1 = next(q for q in result.per_query if q["id"] == "q1")
+        assert q1["semantic_relevance"] is True
+        runner_mod.semantic_relevance_mask.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_semantic_relevance_can_be_disabled(
+        self, monkeypatch, fake_items
+    ) -> None:
+        """Explicitly disabling the channel keeps the lexical baseline: a
+        fingerprint miss stays a miss even when the embedding channel would
+        have rescued it."""
+        from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
         import tests.eval.runner as runner_mod
@@ -262,17 +306,68 @@ class TestRunEval:
 
         monkeypatch.setattr(
             runner_mod,
+            "load_seed_memories",
+            lambda: [SimpleNamespace(id="s1", summary="alpha summary")],
+        )
+        monkeypatch.setattr(
+            runner_mod,
             "semantic_relevance_mask",
             AsyncMock(return_value=[True]),
         )
 
         cfg = EvalConfig(name="baseline", retriever="chunk", top_k=5)
-        result = await run_eval(cfg, fake_items)
+        result = await run_eval(cfg, fake_items, semantic_relevance=False)
 
         # q1 missed (fingerprint absent) and the semantic channel was not
         # consulted — recall is 2/3, matching the substring-only baseline.
         assert result.metric("recall@5") == pytest.approx(2 / 3)
         runner_mod.semantic_relevance_mask.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_substring_vs_semantic_hits_split(
+        self, monkeypatch, fake_items
+    ) -> None:
+        """per-query rows distinguish lexical hits from semantic-only hits."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import tests.eval.runner as runner_mod
+
+        # q1: paraphrase — substring miss, semantic channel rescues it.
+        # q2: exact term — substring hit, no semantic contribution needed.
+        # q3: unrelated — substring miss and nothing semantically close.
+        results_per_query = {
+            "alpha query": [{"content": "paraphrase without the keyword"}],
+            "beta query": [{"content": "beta"}],
+            "gamma query": [{"content": "unrelated noise"}],
+        }
+        adapter = _make_fake_adapter("content", results_per_query)
+        _patch_adapter(monkeypatch, adapter)
+
+        monkeypatch.setattr(
+            runner_mod,
+            "load_seed_memories",
+            lambda: [SimpleNamespace(id="s1", summary="alpha summary")],
+        )
+        # Semantic mask marks only the q1 result relevant.
+        monkeypatch.setattr(
+            runner_mod,
+            "semantic_relevance_mask",
+            AsyncMock(return_value=[True]),
+        )
+
+        cfg = EvalConfig(name="split", retriever="chunk", top_k=5)
+        result = await run_eval(cfg, fake_items)
+
+        q1 = next(q for q in result.per_query if q["id"] == "q1")
+        assert q1["substring_hits"] == 0
+        assert q1["semantic_only_hits"] == 1
+        q2 = next(q for q in result.per_query if q["id"] == "q2")
+        assert q2["substring_hits"] == 1
+        assert q2["semantic_only_hits"] == 0
+        q3 = next(q for q in result.per_query if q["id"] == "q3")
+        assert q3["substring_hits"] == 0
+        assert q3["semantic_only_hits"] == 0
 
 
 # ── Aggregation ───────────────────────────────────────────────

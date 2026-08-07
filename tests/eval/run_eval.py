@@ -87,14 +87,22 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--validate-only",
         action="store_true",
-        help="Only validate the labeled set ↔ seed corpus; skip retrieval.",
+        help="Only validate the labeled set vs seed corpus; skip retrieval.",
     )
     p.add_argument(
         "--semantic-relevance",
+        dest="semantic_relevance",
         action="store_true",
-        help="Add an embedding-similarity relevance channel (substring match "
-        "OR cosine ≥ 0.80 vs target seed summaries). Measures semantic "
-        "retrieval quality; requires the embedding provider.",
+        default=True,
+        help="Relevance = substring match OR embedding similarity vs target "
+        "seed summaries (default). Pass --no-semantic-relevance for the pure "
+        "lexical baseline. Requires the embedding provider.",
+    )
+    p.add_argument(
+        "--no-semantic-relevance",
+        dest="semantic_relevance",
+        action="store_false",
+        help="Disable the semantic channel; score on substring fingerprints only.",
     )
     p.add_argument(
         "--name",

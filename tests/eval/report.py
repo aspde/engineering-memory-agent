@@ -43,13 +43,28 @@ def to_json(results: Sequence[EvalResult]) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _semantic_rescued(r: EvalResult) -> int:
+    """Count queries the lexical baseline missed but the semantic channel saved.
+
+    A query is "rescued" when substring matching found nothing
+    (``substring_hits == 0``) yet the semantic channel contributed at least
+    one hit.  This is the concrete measure of semantic retrieval quality:
+    retrieval that only works via surface-form overlap scores 0 here.
+    """
+    return sum(
+        1 for q in r.per_query
+        if q.get("substring_hits", 0) == 0 and q.get("semantic_only_hits", 0) > 0
+    )
+
+
 def _overall_table(results: Sequence[EvalResult]) -> str:
-    cols = list(METRIC_KEYS) + ["latency_ms", "n_queries"]
+    cols = list(METRIC_KEYS) + ["semantic_rescued", "latency_ms", "n_queries"]
     header = "| config | " + " | ".join(cols) + " |"
     sep = "|---" * (len(cols) + 1) + "|"
     lines = [header, sep]
     for r in results:
         cells = [_fmt(r.overall.get(k, 0.0)) for k in METRIC_KEYS]
+        cells.append(str(_semantic_rescued(r)))
         cells.append(_fmt(r.overall.get("latency_ms", 0.0), 0))
         cells.append(str(r.n_queries))
         lines.append(f"| {r.config.name} | " + " | ".join(cells) + " |")
@@ -121,13 +136,21 @@ def _per_query_detail(results: Sequence[EvalResult]) -> str:
     lines = [
         f"<details><summary>Per-query detail ({r.config.name})</summary>",
         "",
-        "| id | category | difficulty | n_ret | n_rel | recall@5 | mrr | ndcg@5 | latency_ms |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| id | category | difficulty | n_ret | n_rel | sem | recall@5 | mrr | ndcg@5 | latency_ms |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for q in r.per_query:
+        # sem marker: ✓ = rescued by the semantic channel alone (lexical
+        # baseline missed it); — = lexical hit; ✗ = nothing relevant found.
+        if q.get("substring_hits", 0) == 0 and q.get("semantic_only_hits", 0) > 0:
+            sem_marker = "✓"
+        elif q.get("substring_hits", 0) > 0:
+            sem_marker = "—"
+        else:
+            sem_marker = "✗"
         lines.append(
             f"| {q['id']} | {q['category']} | {q['difficulty']} | "
-            f"{q['n_retrieved']} | {q['n_relevant']} | "
+            f"{q['n_retrieved']} | {q['n_relevant']} | {sem_marker} | "
             f"{_fmt(q.get('recall@5', 0.0))} | {_fmt(q.get('mrr', 0.0))} | "
             f"{_fmt(q.get('ndcg@5', 0.0))} | {_fmt(q.get('latency_ms', 0.0), 0)} |"
         )
@@ -143,6 +166,18 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
     # shares n_queries. Take the first; fall back to 0 for an empty result list.
     total_queries = results[0].n_queries if results else 0
 
+    # Semantic channel state — inferred from the first result's per-query rows
+    # (all configs in one report share the same flag via compare_eval).
+    if results and results[0].per_query:
+        semantic_on = bool(results[0].per_query[0].get("semantic_relevance", True))
+        semantic_line = (
+            "enabled (substring OR embedding-similarity)"
+            if semantic_on
+            else "disabled (substring fingerprints only)"
+        )
+    else:
+        semantic_line = "n/a"
+
     sections: list[str] = [
         f"# EMA Retrieval Evaluation Report",
         "",
@@ -150,6 +185,7 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
         f"- Queries: {total_queries}",
         f"- Configs: {len(results)}",
         f"- Errors: {total_errors}",
+        f"- Semantic relevance: {semantic_line}",
         "",
         "## Overall",
         "",

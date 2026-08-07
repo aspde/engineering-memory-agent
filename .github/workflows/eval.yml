@@ -9,11 +9,18 @@ on:
         default: 'memory'
         type: choice
         options: [memory, chunk, vector, hybrid, hybrid_norerank, rewrite]
+  schedule:
+    # Weekly semantic eval — the semantic channel is on by default in
+    # run_eval, so this is the recurring discriminant-quality gate.
+    - cron: '47 6 * * 1'
 
 # Full retrieval evaluation — needs the real BGE-M3 embedding model, the
 # cross-encoder reranker, and a seeded corpus.  These are heavy (≈4 GB of
-# model weights), so this runs only on manual dispatch (or a cron), not on
-# every push.  The cheap `--validate-only` gate lives in ci.yml instead.
+# model weights), so this runs on a weekly schedule (or manual dispatch),
+# not on every push.  The cheap `--validate-only` gate lives in ci.yml
+# instead — that guards dataset consistency at zero model cost; this
+# workflow is where retrieval quality is actually measured (semantic
+# channel enabled by default).
 #
 # Model weights are cached on the runner so repeat runs skip the download.
 
@@ -70,8 +77,8 @@ jobs:
 
       - name: Run retrieval eval
         run: |
-          python -m tests.eval.run_eval --retriever ${{ inputs.retriever }} \
-            --semantic-relevance \
+          # `|| 'memory'` covers the cron path where `inputs` is empty.
+          python -m tests.eval.run_eval --retriever ${{ inputs.retriever || 'memory' }} \
             --report-md docs/interview/eval-report.md \
             --report-json eval-report.json
 

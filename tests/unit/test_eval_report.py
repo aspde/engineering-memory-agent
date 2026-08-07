@@ -33,6 +33,8 @@ def _make_result(name: str, recall: float = 0.7, mrr: float = 0.6) -> EvalResult
     r.per_query = [{
         "id": "q1", "query": "test", "category": "技术决策", "difficulty": "easy",
         "n_retrieved": 5, "n_relevant": 1, "latency_ms": 100.0,
+        "semantic_relevance": True,
+        "substring_hits": 1, "semantic_only_hits": 0,
         **{k: 0.5 for k in METRIC_KEYS},
     }]
     return r
@@ -67,6 +69,35 @@ class TestMarkdownReport:
     def test_empty_results_does_not_crash(self) -> None:
         md = to_markdown([])
         assert "EMA Retrieval Evaluation Report" in md
+
+    def test_report_semantic_channel_state_in_header(self) -> None:
+        md = to_markdown([_make_result("sem")])
+        assert "Semantic relevance: enabled" in md
+
+    def test_report_semantic_rescued_column(self) -> None:
+        r = _make_result("rescued")
+        r.per_query = [
+            # lexical miss, semantic hit → rescued (counts toward the column)
+            {"id": "q1", "query": "t1", "category": "技术决策", "difficulty": "hard",
+             "n_retrieved": 3, "n_relevant": 1, "latency_ms": 10.0,
+             "semantic_relevance": True,
+             "substring_hits": 0, "semantic_only_hits": 1,
+             **{k: 0.0 for k in METRIC_KEYS}},
+            # lexical hit → not rescued
+            {"id": "q2", "query": "t2", "category": "技术决策", "difficulty": "easy",
+             "n_retrieved": 3, "n_relevant": 1, "latency_ms": 10.0,
+             "semantic_relevance": True,
+             "substring_hits": 1, "semantic_only_hits": 0,
+             **{k: 1.0 for k in METRIC_KEYS}},
+        ]
+        md = to_markdown([r])
+        # overall table exposes the rescued-query count
+        assert "semantic_rescued" in md
+        row = next(line for line in md.splitlines() if line.startswith("| rescued |"))
+        assert "| 1 |" in row
+        # per-query markers: ✓ (rescued), — (lexical hit)
+        assert "| ✓ |" in md
+        assert "| — |" in md
 
 
 class TestJsonReport:

@@ -117,7 +117,7 @@ async def run_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
-    semantic_relevance: bool = False,
+    semantic_relevance: bool = True,
 ) -> EvalResult:
     """Execute one config over the labeled set.
 
@@ -127,12 +127,15 @@ async def run_eval(
         reraise: if True, propagate the first retrieval error instead of
             recording it. Useful in unit tests; False in production runs so
             one bad query doesn't kill the whole eval.
-        semantic_relevance: if True, relevance is a substring match OR an
-            embedding-similarity match against the query's target seed
-            summaries (see ``dataset.semantic_relevance_mask``).  Measures
-            the semantic dimension of retrieval; needs the embedding
-            provider.  Off by default so the pure, deterministic
-            fingerprint matching stays the baseline.
+        semantic_relevance: if True (default), relevance is a substring
+            match OR an embedding-similarity match against the query's
+            target seed summaries (see ``dataset.semantic_relevance_mask``).
+            Measures the semantic dimension of retrieval; needs the
+            embedding provider.  Pass ``False`` to fall back to the pure,
+            deterministic fingerprint matching as a lexical baseline.
+            Per-query rows record both channels (``substring_hits`` /
+            ``semantic_only_hits``) so the semantic contribution is
+            observable either way.
 
     Returns:
         ``EvalResult`` with per-query rows + aggregates.
@@ -174,6 +177,9 @@ async def run_eval(
                     "n_relevant": 0,
                     "latency_ms": 0.0,
                     "error": str(e),
+                    "semantic_relevance": semantic_relevance,
+                    "substring_hits": 0,
+                    "semantic_only_hits": 0,
                     **compute_all([], set(), k=config.top_k),
                 }
             )
@@ -181,10 +187,14 @@ async def run_eval(
         latency_ms = (time.perf_counter() - t0) * 1000
         result.total_latency_ms += latency_ms
 
-        mask = relevance_mask(retrieved, it.relevant_fingerprints, adapter.match_field)
+        sub_mask = relevance_mask(retrieved, it.relevant_fingerprints, adapter.match_field)
+        sub_hits = {i for i, hit in enumerate(sub_mask) if hit}
         # Semantic supplement: only consulted when substring matching left
-        # some results unmatched, and only ever flips False → True.
-        if semantic_relevance and any(not h for h in mask) and retrieved:
+        # some results unmatched, and only ever flips False → True.  Hits
+        # contributed solely by the semantic channel are tracked separately
+        # so the report can show what the lexical baseline missed.
+        sem_only: set[int] = set()
+        if semantic_relevance and any(not h for h in sub_mask) and retrieved:
             targets = [
                 seed_summary_by_id[sid]
                 for sid in it.seed_ids
@@ -194,10 +204,13 @@ async def run_eval(
                 sem_mask = await semantic_relevance_mask(
                     retrieved, targets, adapter.match_field
                 )
-                mask = [a or b for a, b in zip(mask, sem_mask)]
+                sem_only = {
+                    i for i, hit in enumerate(sem_mask)
+                    if hit and not sub_mask[i]
+                }
         # Positional IDs: retrieved = [0, 1, ..., n-1]; relevant = matched indices.
         retrieved_ids = list(range(len(retrieved)))
-        relevant_ids = {i for i, hit in enumerate(mask) if hit}
+        relevant_ids = sub_hits | sem_only
         metrics = compute_all(retrieved_ids, relevant_ids, k=config.top_k)
 
         result.per_query.append(
@@ -210,6 +223,8 @@ async def run_eval(
                 "n_relevant": len(relevant_ids),
                 "latency_ms": latency_ms,
                 "semantic_relevance": semantic_relevance,
+                "substring_hits": len(sub_hits),
+                "semantic_only_hits": len(sem_only),
                 **metrics,
             }
         )
@@ -248,7 +263,7 @@ async def compare_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
-    semantic_relevance: bool = False,
+    semantic_relevance: bool = True,
 ) -> list[EvalResult]:
     """Run multiple configs over the same labeled set, in order.
 
@@ -256,7 +271,8 @@ async def compare_eval(
     this to produce A/B delta tables. ``reraise`` is forwarded to each
     :func:`run_eval` call (useful in tests; defaults to False for production
     A/B runs where one bad query shouldn't kill the whole comparison).
-    ``semantic_relevance`` is likewise forwarded.
+    ``semantic_relevance`` is likewise forwarded (defaults to True — the
+    semantic channel is on unless explicitly disabled).
     """
     items = list(items) if items is not None else load_ground_truth()
     results: list[EvalResult] = []
