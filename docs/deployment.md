@@ -27,6 +27,7 @@ services:
 - `EMBEDDING_*` — Embedding 模型配置
 - `DATABASE_URL` — PostgreSQL 连接
 - `MAX_AGENT_STEPS` — Agent 最大工具调用次数
+- `AGENT_TIMEOUT` — Agent 单回合总超时（秒）
 - `APP_ENV` — 运行环境 (development / test / production)
 
 ## Runtime Architecture

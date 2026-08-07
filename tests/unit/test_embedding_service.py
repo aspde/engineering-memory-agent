@@ -190,3 +190,27 @@ class TestOpenAIEmbeddingProvider:
             model="text-embedding-3-small",
         )
         assert str(p._async_client.base_url).rstrip("/") == "https://api.openai.com/v1"
+
+    def test_constructor_passes_timeout_to_sdk(self, monkeypatch) -> None:
+        """Both SDK clients inherit the configured request timeout.
+
+        Without this the openai SDK defaults to a 600s timeout, so a hung
+        embedding API call would pin the request for ten minutes.
+        """
+        import openai
+
+        from backend.service.embedding_service import OpenAIEmbeddingProvider
+
+        mock_async = MagicMock()
+        mock_sync = MagicMock()
+        monkeypatch.setattr(openai, "AsyncOpenAI", mock_async)
+        monkeypatch.setattr(openai, "OpenAI", mock_sync)
+
+        OpenAIEmbeddingProvider(
+            api_key="sk-test",
+            base_url="",
+            model="text-embedding-3-small",
+            timeout=42,
+        )
+        assert mock_async.call_args.kwargs["timeout"] == 42
+        assert mock_sync.call_args.kwargs["timeout"] == 42

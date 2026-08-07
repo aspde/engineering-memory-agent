@@ -29,6 +29,9 @@ class EmbeddingConfig:
     batch_size: int = field(
         default_factory=lambda: int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
     )
+    timeout: int = field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_TIMEOUT", "60"))
+    )
     normalize: bool = field(
         default_factory=lambda: os.getenv("EMBEDDING_NORMALIZE", "true").lower() == "true"
     )
@@ -109,6 +112,12 @@ class AppConfig:
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "development"))
     max_agent_steps: int = field(
         default_factory=lambda: int(os.getenv("MAX_AGENT_STEPS", "5"))
+    )
+    # Per-turn total deadline (seconds) for the whole ReAct run — one request
+    # through to the final answer.  Guards against a slow provider / many
+    # tool steps hanging the request far beyond max_agent_steps × LLM_TIMEOUT.
+    agent_timeout: int = field(
+        default_factory=lambda: int(os.getenv("AGENT_TIMEOUT", "180"))
     )
     memory_enabled: bool = field(
         default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() == "true"

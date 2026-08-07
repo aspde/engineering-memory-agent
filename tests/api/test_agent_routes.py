@@ -157,6 +157,36 @@ class TestAgentChat:
         data = response.json()
         assert data["status"] == "completed"
 
+    @pytest.mark.asyncio
+    async def test_agent_chat_times_out(self, async_client: AsyncClient, monkeypatch) -> None:
+        """When the agent exceeds AGENT_TIMEOUT, return status='error' with a timeout message."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from backend.api.routes.agent_routes import config as agent_config
+
+        async def _hang(*args, **kwargs) -> dict:
+            await asyncio.sleep(5)
+            return {"final_response": "late", "messages": []}
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = _hang
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda: mock_agent,
+        )
+        monkeypatch.setattr(agent_config, "agent_timeout", 0.1)
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={"message": "hi", "thread_id": "timeout-thread-1"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "error"
+        assert "超时" in data["response"]
+
 
 class TestTokenUsageEndpoint:
     """Tests for the /api/agent/usage cost-monitoring endpoint."""
@@ -416,3 +446,34 @@ class TestDeleteThread:
         assert response.status_code == 404
         data = response.json()
         assert "not found" in data["detail"].lower()
+
+
+class TestStreamFinalAnswer:
+    """Tests for the SSE final-answer replay helper."""
+
+    @pytest.mark.asyncio
+    async def test_stops_when_client_disconnected(self) -> None:
+        """A disconnected SSE client aborts token replay immediately."""
+        from backend.api.routes.agent_routes import _stream_final_answer
+
+        class _Disconnected:
+            async def is_disconnected(self) -> bool:
+                return True
+
+        chunks = [c async for c in _stream_final_answer(_Disconnected(), "hello world")]
+        assert chunks == []
+
+    @pytest.mark.asyncio
+    async def test_yields_all_chunks_when_connected(self) -> None:
+        """While connected, every 4-char chunk is streamed."""
+        import json
+
+        from backend.api.routes.agent_routes import _stream_final_answer
+
+        class _Connected:
+            async def is_disconnected(self) -> bool:
+                return False
+
+        chunks = [c async for c in _stream_final_answer(_Connected(), "hello world")]
+        assert len(chunks) == 3  # "hell", "o wo", "rld"
+        assert json.loads(chunks[0].split("data: ", 1)[1])["content"] == "hell"

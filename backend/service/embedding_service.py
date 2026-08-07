@@ -102,12 +102,13 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         base_url: str,
         model: str = "text-embedding-3-small",
         batch_size: int = 100,
+        timeout: int = 60,
     ) -> None:
         from openai import AsyncOpenAI, OpenAI
 
         base = base_url.rstrip("/") if base_url else "https://api.openai.com/v1"
-        self._async_client = AsyncOpenAI(api_key=api_key, base_url=base)
-        self._client = OpenAI(api_key=api_key, base_url=base)
+        self._async_client = AsyncOpenAI(api_key=api_key, base_url=base, timeout=timeout)
+        self._client = OpenAI(api_key=api_key, base_url=base, timeout=timeout)
         self._model = model
         self._batch_size = batch_size
 
@@ -211,6 +212,7 @@ def get_embedding_provider() -> EmbeddingProvider:
                 base_url=config.embedding.base_url,
                 model=config.embedding.model,
                 batch_size=config.embedding.batch_size,
+                timeout=config.embedding.timeout,
             )
         else:
             raise ValueError(f"Unsupported embedding provider: {provider_name!r}")

@@ -3,13 +3,14 @@ and conversation history persistence."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.types import Command
@@ -18,7 +19,7 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from backend.service.agent_service import get_agent_for_thread
-from backend.shared.config import current_thread_id
+from backend.shared.config import config, current_thread_id
 from backend.service.llm_service import get_llm_provider
 
 logger = logging.getLogger(__name__)
@@ -51,21 +52,73 @@ async def _upsert_conversation(thread_id: str, title: str = "") -> None:
 # ── Helpers ────────────────────────────────────────────────────────────
 
 
+async def _is_disconnected(request: Request) -> bool:
+    """True if the SSE client has gone away — stop streaming to save tokens.
+
+    ``Request.is_disconnected`` is the FastAPI/Starlette way to detect a
+    closed client connection mid-stream; it may raise on some ASGI servers,
+    so a failure is treated as "still connected" rather than aborting.
+    """
+    try:
+        return await request.is_disconnected()
+    except Exception:
+        return False
+
+
 async def _stream_final_answer(
-    agent, config: dict, final_response: str
+    request: Request, final_response: str
 ):
     """Stream *final_response* character-by-character via SSE.
 
     The LLM call happens in ``generate_final_node`` (once).  This function
     just yields the already-generated text as SSE tokens — no second LLM
     call, so the persisted state and the streamed output are identical.
+    Checks per-chunk that the client is still connected and stops early if
+    they closed the tab (avoids pushing tokens to a dead socket).
     """
     # Stream the response in small chunks so the frontend sees a
     # token-by-token animation (same UX as before, but deterministic).
     chunk_size = 4
     for i in range(0, len(final_response), chunk_size):
+        if await _is_disconnected(request):
+            logger.info("SSE client disconnected during final-answer stream — aborting")
+            return
         chunk = final_response[i:i + chunk_size]
         yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
+
+
+async def _mark_interrupted_thread(agent, thread_id: str) -> None:
+    """Note a timeout on the thread so a retry reads as a continuation.
+
+    ``asyncio.timeout`` cancels the run mid-flight; LangGraph checkpoints
+    per node, so the thread keeps the user's message plus whatever tool
+    chatter completed before cancellation.  Without a marker, a retry of
+    the same question appends a *second* identical user turn the model
+    sees as an independent ask.  Appending a SystemMessage lets the model
+    treat the retry as the interrupted turn continuing.  Best-effort: a
+    state update failure must not break the timeout response itself.
+    """
+    try:
+        run_config = {"configurable": {"thread_id": thread_id}}
+        state = await agent.aget_state(run_config)
+        if state and state.values:
+            await agent.aupdate_state(
+                run_config,
+                {
+                    "messages": [
+                        SystemMessage(
+                            content=(
+                                "The previous agent run was interrupted by a timeout "
+                                "before producing a final answer. The user may retry the "
+                                "same question — treat it as a continuation of the "
+                                "interrupted turn."
+                            )
+                        )
+                    ]
+                },
+            )
+    except Exception:
+        logger.warning("Failed to mark interrupted thread %s", thread_id, exc_info=True)
 
 
 # Read-only tools whose results belong in the sources panel, not the
@@ -349,7 +402,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     to resume.
     """
     agent = get_agent_for_thread()
-    config = {"configurable": {"thread_id": req.thread_id}}
+    run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
     current_thread_id.set(req.thread_id)
@@ -361,16 +414,32 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
 
     t0 = time.perf_counter()
     try:
-        if req.resume_data is not None:
-            result = await agent.ainvoke(
-                Command(resume=req.resume_data),
-                config=config,
-            )
-        else:
-            result = await agent.ainvoke(
-                {"messages": [HumanMessage(content=req.message)]},
-                config=config,
-            )
+        async with asyncio.timeout(config.agent_timeout):
+            if req.resume_data is not None:
+                result = await agent.ainvoke(
+                    Command(resume=req.resume_data),
+                    config=run_config,
+                )
+            else:
+                result = await agent.ainvoke(
+                    {"messages": [HumanMessage(content=req.message)]},
+                    config=run_config,
+                )
+    except TimeoutError:
+        t1 = time.perf_counter()
+        logger.warning(
+            "agent_chat timed out after %ds (%.0fms) thread_id=%s",
+            config.agent_timeout, (t1 - t0) * 1000, req.thread_id,
+        )
+        await _mark_interrupted_thread(agent, req.thread_id)
+        return ChatResponse(
+            thread_id=req.thread_id,
+            status="error",
+            response=(
+                f"Agent 处理超时（超过 {config.agent_timeout} 秒），已停止本轮处理，"
+                "请重试或简化问题。"
+            ),
+        )
     except Exception as exc:
         t1 = time.perf_counter()
         logger.warning("agent_chat failed in %.0fms: %s", (t1 - t0) * 1000, exc)
@@ -433,7 +502,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
 
 
 @router.post("/chat/stream")
-async def agent_chat_stream(req: ChatRequest):
+async def agent_chat_stream(req: ChatRequest, request: Request):
     """Send a message and stream the response via Server-Sent Events.
 
     Yields ``data: {"type":"node","node":"..."}`` for each graph node
@@ -442,9 +511,11 @@ async def agent_chat_stream(req: ChatRequest):
     when the agent pauses for human approval.
 
     The client can use ``event:`` lines to route different event types.
+    The whole run is bounded by ``AGENT_TIMEOUT``; a disconnected SSE
+    client aborts the stream so later tool/LLM steps don't burn tokens.
     """
     agent = get_agent_for_thread()
-    config = {"configurable": {"thread_id": req.thread_id}}
+    run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
     current_thread_id.set(req.thread_id)
@@ -456,66 +527,84 @@ async def agent_chat_stream(req: ChatRequest):
 
     async def _stream():
         try:
-            if req.resume_data is not None:
-                # Resume: use ainvoke (interrupt/resume doesn't stream nodes cleanly)
-                result = await agent.ainvoke(
-                    Command(resume=req.resume_data),
-                    config=config,
-                )
-                # Check interrupt after resume
-                interrupts = result.get("__interrupt__")
-                if interrupts:
-                    payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
-                    yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
+            async with asyncio.timeout(config.agent_timeout):
+                if req.resume_data is not None:
+                    # Resume: use ainvoke (interrupt/resume doesn't stream nodes cleanly)
+                    result = await agent.ainvoke(
+                        Command(resume=req.resume_data),
+                        config=run_config,
+                    )
+                    # Check interrupt after resume
+                    interrupts = result.get("__interrupt__")
+                    if interrupts:
+                        payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                        yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
+                        return
+
+                    # Client gone while the resume run was in flight — don't push to a dead socket.
+                    if await _is_disconnected(request):
+                        return
+
+                    # Stream the final answer from the state
+                    final_response = result.get("final_response")
+                    if final_response:
+                        async for sse_line in _stream_final_answer(request, final_response):
+                            yield sse_line
+
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     return
 
-                # Stream the final answer from the state
-                final_response = result.get("final_response")
-                if final_response:
-                    async for sse_line in _stream_final_answer(agent, config, final_response):
-                        yield sse_line
+                # New message: stream through the graph
+                async for _, event_data in agent.astream(
+                    {"messages": [HumanMessage(content=req.message)]},
+                    config=run_config,
+                    stream_mode="updates",
+                    subgraphs=True,
+                ):
+                    # Client disconnected — abort so later tool/LLM steps
+                    # don't burn tokens for nobody.
+                    if await _is_disconnected(request):
+                        logger.info("SSE client disconnected mid-run — aborting agent stream")
+                        return
+
+                    # Check for interrupts
+                    if event_data and "__interrupt__" in event_data:
+                        interrupts = event_data["__interrupt__"]
+                        payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                        yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
+                        return
+
+                    # Node completion events
+                    for node_name, node_state in (event_data or {}).items():
+                        yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
+
+                        if node_name == "generate_final":
+                            final_response = node_state.get("final_response")
+                            if final_response:
+                                async for sse_line in _stream_final_answer(request, final_response):
+                                    yield sse_line
+
+                # Send tool traces fetched from the final graph state
+                try:
+                    final_state = await agent.aget_state(run_config)
+                    if final_state and final_state.values:
+                        tool_traces, sources = _extract_tool_traces(
+                            final_state.values.get("messages", [])
+                        )
+                        if tool_traces or sources:
+                            yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources}, ensure_ascii=False)}\n\n"
+                except Exception:
+                    pass
 
                 yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                return
 
-            # New message: stream through the graph
-            async for _, event_data in agent.astream(
-                {"messages": [HumanMessage(content=req.message)]},
-                config=config,
-                stream_mode="updates",
-                subgraphs=True,
-            ):
-                # Check for interrupts
-                if event_data and "__interrupt__" in event_data:
-                    interrupts = event_data["__interrupt__"]
-                    payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
-                    yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
-                    return
-
-                # Node completion events
-                for node_name, node_state in (event_data or {}).items():
-                    yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
-
-                    if node_name == "generate_final":
-                        final_response = node_state.get("final_response")
-                        if final_response:
-                            async for sse_line in _stream_final_answer(agent, config, final_response):
-                                yield sse_line
-
-            # Send tool traces fetched from the final graph state
-            try:
-                final_state = await agent.aget_state(config)
-                if final_state and final_state.values:
-                    tool_traces, sources = _extract_tool_traces(
-                        final_state.values.get("messages", [])
-                    )
-                    if tool_traces or sources:
-                        yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources}, ensure_ascii=False)}\n\n"
-            except Exception:
-                pass
-
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-
+        except TimeoutError:
+            logger.warning(
+                "agent_chat_stream timed out after %ds thread_id=%s",
+                config.agent_timeout, req.thread_id,
+            )
+            await _mark_interrupted_thread(agent, req.thread_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent 处理超时（超过 {config.agent_timeout} 秒），已停止本轮处理，请重试或简化问题。'}, ensure_ascii=False)}\n\n"
         except Exception as exc:
             logger.exception("Streaming error")
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
