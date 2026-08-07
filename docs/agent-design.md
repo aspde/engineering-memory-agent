@@ -22,7 +22,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 | `check_approval` | `agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批 |
 | `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage` |
 | `check_conflict` | `agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
-| `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答 |
+| `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；本轮无工具结果（纯聊天）时直接复用 `call_llm` 输出，不重复调用 LLM |
 
 路由：`tools_condition`（LangGraph 内置）—— AIMessage 有 `tool_calls` 则进入 `check_approval`（HITL 审批），无则去 `generate_final`（终止）。
 

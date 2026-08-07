@@ -175,6 +175,23 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
     return dicts
 
 
+def _has_tool_results_this_turn(messages: list[BaseMessage]) -> bool:
+    """True if a ToolMessage appeared since the most recent HumanMessage.
+
+    A tool result in the current turn means the final-answer synthesis must
+    account for it (the synthesis prompt folds tool output into the system
+    context); a plain-chat turn has none, so the last ``call_llm`` output is
+    already a complete answer.  Only the *current* turn counts — tool
+    results from earlier turns in the same thread don't force synthesis.
+    """
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return False
+        if isinstance(m, ToolMessage):
+            return True
+    return False
+
+
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
@@ -226,16 +243,39 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
-    """Assemble context from retrieved results, call the LLM, and produce the final answer.
+    """Produce the final answer — reuse ``call_llm``'s output when it is
+    already complete, otherwise synthesize one with an LLM call.
 
     Reads tool-call results from the conversation history (ToolMessages)
     rather than from discrete state fields, so every tool's output is
     automatically included regardless of which tool was called.
 
-    The LLM call happens here (once) so the response is persisted in the
-    checkpointer state.  The API streaming layer reads the persisted
-    response and streams it token-by-token — no second LLM call.
+    Plain-chat shortcut: when the last message is an AIMessage with text,
+    no ``tool_calls``, and no ToolMessage appeared since the latest
+    HumanMessage, that output is already a complete answer and is returned
+    directly — no second LLM call.  Only tool turns hit the LLM here
+    (once), so the response is persisted in the checkpointer state and the
+    API streaming layer reads it token-by-token.
     """
+    # ── Plain-chat shortcut ─────────────────────────────────────────
+    # When call_llm_node's output is already a complete answer — the last
+    # message is an AIMessage with text and no tool_calls, and no tool
+    # results appeared this turn — reuse it instead of synthesizing again.
+    # Without this every plain chat turn paid two LLM calls (chat_raw for
+    # tool detection + chat for the final answer), discarding the first.
+    messages = state["messages"]
+    last = messages[-1] if messages else None
+    if (
+        isinstance(last, AIMessage)
+        and not getattr(last, "tool_calls", None)
+        and last.content
+        and not _has_tool_results_this_turn(messages)
+    ):
+        logger.info(
+            "Reusing call_llm output as final answer (no tool results this turn)"
+        )
+        return {"final_prompt": None, "final_response": str(last.content)}
+
     # ── Harvest context from ToolMessages in conversation history ──
     context_parts: list[str] = []
     for m in state["messages"]:

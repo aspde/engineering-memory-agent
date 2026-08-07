@@ -290,6 +290,85 @@ class TestGenerateFinalNode:
         has_context = any("Context" in p.get("content", "") for p in result["final_prompt"] if p["role"] == "system")
         assert not has_context
 
+    @pytest.mark.asyncio
+    async def test_plain_chat_reuses_call_llm_output(self, monkeypatch) -> None:
+        """No tool results this turn → the last call_llm AIMessage is the
+        final answer; no second LLM call is made."""
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "should not be used"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="hi"),
+                AIMessage(content="Hello! How can I help?"),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        assert result["final_response"] == "Hello! How can I help?"
+        mock_provider.chat.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_results_this_turn_still_synthesizes(self, monkeypatch) -> None:
+        """A ToolMessage in the current turn forces the synthesis path, so the
+        tool output can be folded into the final-answer context."""
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "Synthesized from tool output."
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="search"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "c1", "name": "fake_search",
+                                 "args": {"query": "x"}, "type": "tool_call"}],
+                ),
+                ToolMessage(content="Found 1 result", tool_call_id="c1"),
+                AIMessage(content="I found one result."),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        assert result["final_response"] == "Synthesized from tool output."
+        assert result["final_prompt"] is not None
+
+    @pytest.mark.asyncio
+    async def test_previous_turn_tool_results_do_not_block_shortcut(self, monkeypatch) -> None:
+        """Old-turn ToolMessages don't force synthesis — only this turn's do.
+
+        In a multi-turn thread the history keeps prior tool results; a later
+        plain-chat turn must still skip the second LLM call."""
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "should not be used"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="search for X"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "old", "name": "fake_search",
+                                 "args": {"query": "x"}, "type": "tool_call"}],
+                ),
+                ToolMessage(content="Found 1 result", tool_call_id="old"),
+                AIMessage(content="I found X."),
+                HumanMessage(content="thanks"),
+                AIMessage(content="You're welcome!"),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        assert result["final_response"] == "You're welcome!"
+        mock_provider.chat.assert_not_awaited()
+
 
 class TestCheckApprovalNode:
     """Tests for the HITL approval gate that intercepts sensitive tools."""

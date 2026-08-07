@@ -61,7 +61,12 @@ class TestGraphStructure:
 class TestGraphRouting:
     @pytest.mark.asyncio
     async def test_direct_answer_path_no_tools(self, monkeypatch) -> None:
-        """When LLM returns text (no tool_calls), route to generate_final."""
+        """When LLM returns text (no tool_calls), that text is the final answer.
+
+        call_llm_node's output is reused directly — generate_final_node does
+        NOT make a second LLM call (previously every plain chat turn paid
+        two LLM calls and discarded the first response).
+        """
         mock_provider = AsyncMock()
         mock_provider.chat_raw.return_value = {"content": "I can answer that directly."}
         mock_provider.chat.return_value = "Final synthesized answer."
@@ -76,10 +81,10 @@ class TestGraphRouting:
             {"configurable": {"thread_id": "test-1"}},
         )
 
-        # generate_final_node calls the LLM once and persists the response
+        # The chat_raw text becomes the final answer; chat is never called.
         assert "final_response" in result
-        assert result["final_response"] == "Final synthesized answer."
-        assert "final_prompt" in result
+        assert result["final_response"] == "I can answer that directly."
+        mock_provider.chat.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_tool_calling_path(self, monkeypatch) -> None:
