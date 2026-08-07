@@ -8,7 +8,50 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from backend.service.scheduler import PatrolScheduler
+from backend.service.scheduler import (
+    PatrolScheduler,
+    previous_daily_slot,
+    previous_weekly_slot,
+    should_catch_up,
+)
+
+
+class _FakeResult:
+    def __init__(self, value):
+        self._value = value
+
+    def fetchone(self):
+        return self._value
+
+    def scalar(self):
+        return self._value
+
+
+class _FakeSession:
+    """Minimal async-session stand-in for should_catch_up's two queries."""
+
+    def __init__(self, count: int, has_run: bool) -> None:
+        self._count = count
+        self._has_run = has_run
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    async def execute(self, stmt, params=None):
+        if "COUNT(*)" in str(stmt):
+            return _FakeResult(self._count)
+        return _FakeResult((1,) if self._has_run else None)
+
+
+class _FakeFactory:
+    def __init__(self, count: int, has_run: bool) -> None:
+        self._session = _FakeSession(count, has_run)
+
+    def __call__(self):
+        return self._session
 
 
 class TestSchedulerTimeCalculation:
@@ -113,3 +156,86 @@ class TestSchedulerLifecycle:
         # (the sleep loop hasn't finished, so our callback isn't hit)
         assert call_count == 0
         assert len(scheduler._tasks) == 0   # cleared
+
+
+class TestCatchUp:
+    """Missed-slot detection — previous_*_slot computation + should_catch_up."""
+
+    # ── slot computation ─────────────────────────────────────────
+
+    def test_previous_daily_slot(self) -> None:
+        # 10:30 → the previous 8:00 slot is today 8:00
+        now = datetime(2026, 1, 15, 10, 30, 0)
+        assert previous_daily_slot(8, now=now) == datetime(2026, 1, 15, 8, 0, 0)
+
+    def test_previous_daily_slot_before_target_hour(self) -> None:
+        # 07:30 → today's 8:00 hasn't happened; previous is yesterday 8:00
+        now = datetime(2026, 1, 15, 7, 30, 0)
+        assert previous_daily_slot(8, now=now) == datetime(2026, 1, 14, 8, 0, 0)
+
+    def test_previous_weekly_slot(self) -> None:
+        # Thursday 10:30, Monday@9 → previous is Mon 01-12 9:00
+        now = datetime(2026, 1, 15, 10, 30, 0)  # Thursday
+        assert previous_weekly_slot(0, 9, now=now) == datetime(2026, 1, 12, 9, 0, 0)
+
+    def test_previous_weekly_slot_same_day_before_hour(self) -> None:
+        # Monday 08:00, Monday@9 → today's 9:00 hasn't happened yet; the
+        # previous slot is last Monday 9:00
+        now = datetime(2026, 1, 12, 8, 0, 0)  # Monday
+        assert previous_weekly_slot(0, 9, now=now) == datetime(2026, 1, 5, 9, 0, 0)
+
+    # ── missed detection (mocked DB) ──────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_should_catch_up_true_when_slot_missed(self, monkeypatch) -> None:
+        # History exists but no run at/after the slot → missed.
+        monkeypatch.setattr(
+            "backend.db.get_session_factory",
+            lambda: _FakeFactory(count=2, has_run=False),
+        )
+        slot = datetime(2026, 1, 15, 8, 0, 0)
+        assert await should_catch_up("daily", slot) is True
+
+    @pytest.mark.asyncio
+    async def test_should_catch_up_false_when_ran(self, monkeypatch) -> None:
+        # A run at/after the slot satisfies it (even if it later failed).
+        monkeypatch.setattr(
+            "backend.db.get_session_factory",
+            lambda: _FakeFactory(count=2, has_run=True),
+        )
+        slot = datetime(2026, 1, 15, 8, 0, 0)
+        assert await should_catch_up("daily", slot) is False
+
+    @pytest.mark.asyncio
+    async def test_should_catch_up_false_without_history(self, monkeypatch) -> None:
+        # Fresh install (no patrol_logs rows) must not fire an immediate run.
+        monkeypatch.setattr(
+            "backend.db.get_session_factory",
+            lambda: _FakeFactory(count=0, has_run=False),
+        )
+        slot = datetime(2026, 1, 15, 8, 0, 0)
+        assert await should_catch_up("daily", slot) is False
+
+    def test_localize_wall_clock_resolves_slot_instant(self) -> None:
+        """A naive slot is localized to the system's local offset at *that*
+        wall-clock time (DST-aware), not the current offset.
+
+        Property: the localized instant, converted to UTC, must equal the
+        instant ``time.mktime`` assigns to the same wall clock — on any
+        system, with or without DST.
+        """
+        import time as time_mod
+        from datetime import timezone as dt_timezone
+
+        from backend.service.scheduler import _localize_wall_clock
+
+        slot = datetime(2026, 1, 15, 8, 0, 0)  # winter slot
+        aware = _localize_wall_clock(slot)
+        assert aware.tzinfo is not None
+        # Aware input passes through unchanged.
+        assert _localize_wall_clock(aware) is aware
+
+        epoch = time_mod.mktime(slot.timetuple())
+        assert aware.astimezone(dt_timezone.utc) == datetime.fromtimestamp(
+            epoch, dt_timezone.utc
+        )

@@ -2,8 +2,10 @@
 
 Uses ``asyncio.sleep`` loops rather than external task queues (APScheduler,
 Celery, etc.).  Schedules are simple — daily at a fixed hour, weekly at a
-fixed day+hour — so a persistent loop is sufficient.  Restarting the server
-may skip at most one patrol run; this is an acceptable trade-off.
+fixed day+hour — so a persistent loop is sufficient.  The loop skips a run
+when the server is down at the scheduled time; :func:`should_catch_up` +
+the startup hook in ``backend.main`` detect that miss and fire one
+catch-up run so a restart doesn't silently drop the patrol for a cycle.
 
 Usage::
 
@@ -18,9 +20,11 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import calendar
 import logging
+import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -113,3 +117,94 @@ class PatrolScheduler:
                     logger.warning("Scheduler task %d raised on shutdown: %s", i, r)
         self._tasks.clear()
         logger.info("PatrolScheduler stopped")
+
+
+# ── Catch-up ───────────────────────────────────────────────────────────
+# The scheduler loop can't fire a run it wasn't alive for.  On startup
+# (backend.main) we compare each schedule's most recent slot against the
+# patrol_logs: if the patrol has history but nothing started at/after the
+# slot, that run was missed and a single catch-up fires.  The history guard
+# keeps a fresh install — where "no run since slot" is simply the initial
+# state — from running an immediate patrol on first startup.
+
+
+def previous_daily_slot(hour: int, *, now: datetime | None = None) -> datetime:
+    """The most recent daily schedule slot at *hour* strictly in the past.
+
+    Matches the scheduler loop's wall-clock semantics (naive local time).
+    """
+    now = now or datetime.now()
+    slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if slot >= now:
+        slot -= timedelta(days=1)
+    return slot
+
+
+def previous_weekly_slot(
+    day: int, hour: int, *, now: datetime | None = None
+) -> datetime:
+    """The most recent weekly schedule slot (*day*, *hour*) strictly in the past."""
+    now = now or datetime.now()
+    slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    days_ahead = day - now.weekday()
+    slot += timedelta(days=days_ahead)
+    if slot >= now:
+        slot -= timedelta(days=7)
+    return slot
+
+
+def _localize_wall_clock(dt: datetime) -> datetime:
+    """Interpret a naive wall-clock *dt* in the system's local timezone.
+
+    Resolves the local UTC offset at *dt*'s own calendar time (via
+    ``time.mktime``) rather than the *current* offset, so a slot on the other
+    side of a DST transition is compared against TIMESTAMPTZ at the correct
+    instant — ``dt.replace(tzinfo=datetime.now().astimezone().tzinfo)`` would
+    be off by the offset delta.  (The single ambiguous DST fold-back hour is
+    resolved to one side by ``mktime``; acceptable for missed-slot detection.)
+    """
+    if dt.tzinfo is not None:
+        return dt
+    # timegm treats the naive time as UTC, mktime as local; the difference is
+    # the local UTC offset at that wall-clock instant (e.g. +08:00 for local
+    # 08:00 in UTC+8 → mktime is 8h *less* than timegm).
+    offset = timedelta(seconds=calendar.timegm(dt.timetuple()) - time.mktime(dt.timetuple()))
+    return dt.replace(tzinfo=timezone(offset))
+
+
+async def should_catch_up(patrol_type: str, slot: datetime) -> bool:
+    """True if the scheduled *slot* was missed and a catch-up run is warranted.
+
+    A slot counts as missed when the patrol has prior history (at least one
+    ``patrol_logs`` row) and no run started at/after *slot*.  A run that
+    started within the slot — even one that later failed — satisfies it: this
+    fills genuinely-missed slots, it does not retry failures (a separate
+    concern handled by the next scheduled slot / stale-row marking).
+
+    *slot* is a naive local wall-clock time (as ``previous_*_slot`` returns);
+    it is interpreted in the local timezone so the TIMESTAMPTZ comparison in
+    Postgres is against the same instant.
+    """
+    from sqlalchemy import text
+
+    from backend.db import get_session_factory
+
+    slot = _localize_wall_clock(slot)
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        count = await session.execute(
+            text("SELECT COUNT(*) FROM patrol_logs WHERE patrol_type = :type"),
+            {"type": patrol_type},
+        )
+        if (count.scalar() or 0) == 0:
+            return False
+        ran = await session.execute(
+            text(
+                """SELECT 1 FROM patrol_logs
+                   WHERE patrol_type = :type AND started_at >= :since
+                   LIMIT 1"""
+            ),
+            {"type": patrol_type, "since": slot},
+        )
+        return ran.fetchone() is None

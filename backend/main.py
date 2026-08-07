@@ -139,6 +139,10 @@ async def lifespan(app: FastAPI):
 
     # ── Phase 3: start patrol scheduler ─────────────────────────────
     _scheduler = None
+    # Catch-up patrol tasks (fired when a slot was missed while the server
+    # was down) — tracked so shutdown can cancel them instead of leaving
+    # detached tasks that warn on destruction.
+    _catchup_tasks: list[asyncio.Task[None]] = []
     if config.patrol_enabled:
         try:
             from backend.service.patrol import (
@@ -146,7 +150,12 @@ async def lifespan(app: FastAPI):
                 mark_stale_patrols_failed,
                 run_patrol,
             )
-            from backend.service.scheduler import PatrolScheduler
+            from backend.service.scheduler import (
+                PatrolScheduler,
+                previous_daily_slot,
+                previous_weekly_slot,
+                should_catch_up,
+            )
 
             # A previous process may have left patrols mid-run; re-mark them
             # failed before scheduling so the logs don't lie about in-flight.
@@ -154,12 +163,27 @@ async def lifespan(app: FastAPI):
 
             _scheduler = PatrolScheduler()
 
-            async def _run_daily_patrol() -> None:
+            async def _run_daily_patrol(trigger: str = "cron") -> None:
                 prompt = get_patrol_prompt("daily")
                 await run_patrol(
                     patrol_type="daily",
-                    trigger="cron",
+                    trigger=trigger,
                     system_prompt=prompt,
+                )
+
+            # A daily slot that elapsed while the server was down (restart /
+            # deploy / crash) is caught up once.  The catch-up runs as a
+            # background task so startup isn't gated on a full patrol; its
+            # trigger records the reason and the overlap guard in run_patrol
+            # keeps it from colliding with a concurrent run.
+            daily_slot = previous_daily_slot(config.patrol_daily_hour)
+            if await should_catch_up("daily", daily_slot):
+                logging.getLogger(__name__).info(
+                    "Daily patrol missed its %s slot — running catch-up",
+                    daily_slot.isoformat(),
+                )
+                _catchup_tasks.append(
+                    asyncio.create_task(_run_daily_patrol("cron_catchup"))
                 )
 
             _scheduler.schedule_daily(
@@ -168,12 +192,24 @@ async def lifespan(app: FastAPI):
             )
 
             if config.patrol_weekly_enabled:
-                async def _run_weekly_patrol() -> None:
+                async def _run_weekly_patrol(trigger: str = "cron") -> None:
                     prompt = get_patrol_prompt("weekly")
                     await run_patrol(
                         patrol_type="weekly",
-                        trigger="cron",
+                        trigger=trigger,
                         system_prompt=prompt,
+                    )
+
+                weekly_slot = previous_weekly_slot(
+                    config.patrol_weekly_day, config.patrol_weekly_hour
+                )
+                if await should_catch_up("weekly", weekly_slot):
+                    logging.getLogger(__name__).info(
+                        "Weekly patrol missed its %s slot — running catch-up",
+                        weekly_slot.isoformat(),
+                    )
+                    _catchup_tasks.append(
+                        asyncio.create_task(_run_weekly_patrol("cron_catchup"))
                     )
 
                 _scheduler.schedule_weekly(
@@ -222,13 +258,21 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # ── Shutdown: stop patrol scheduler ─────────────────────────────
+    # ── Shutdown: stop patrol scheduler + catch-up tasks ───────────
     if _scheduler is not None:
         try:
             await _scheduler.stop()
         except Exception:
             import logging
             logging.getLogger(__name__).warning("Failed to stop patrol scheduler")
+
+    # Cancel any catch-up patrol still in flight (same trade-off as the
+    # scheduler loops: a mid-run patrol is re-marked failed on next startup).
+    pending_catchup = [t for t in _catchup_tasks if not t.done()]
+    for t in pending_catchup:
+        t.cancel()
+    if pending_catchup:
+        await asyncio.gather(*pending_catchup, return_exceptions=True)
 
     await close_db()
 
