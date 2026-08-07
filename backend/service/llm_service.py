@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
 
 from backend.model.llm import LLMProvider
 from backend.shared.config import config
 from backend.shared.metrics import pop_scenario, record_usage
+from backend.shared.resilience import (
+    call_with_resilience,
+    call_with_resilience_sync,
+    circuit_breaker_guard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +52,15 @@ class OpenAICompatibleProvider(LLMProvider):
         scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        response = await self._async_client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            **kwargs,
-        )
+
+        async def _op() -> Any:
+            return await self._async_client.chat.completions.create(
+                model=self._model,
+                messages=messages,  # type: ignore[arg-type]
+                **kwargs,
+            )
+
+        response = await call_with_resilience("llm:openai", _op)
         record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
@@ -71,7 +81,10 @@ class OpenAICompatibleProvider(LLMProvider):
         if tools:
             create_kwargs["tools"] = tools
 
-        response = await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+        async def _op() -> Any:
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+
+        response = await call_with_resilience("llm:openai", _op)
         record_usage(scenario, getattr(response, "usage", None))
         msg = response.choices[0].message
         result: dict[str, object] = {"content": msg.content or ""}
@@ -91,11 +104,15 @@ class OpenAICompatibleProvider(LLMProvider):
         scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        response = self._sync_client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            **kwargs,
-        )
+
+        def _op() -> Any:
+            return self._sync_client.chat.completions.create(
+                model=self._model,
+                messages=messages,  # type: ignore[arg-type]
+                **kwargs,
+            )
+
+        response = call_with_resilience_sync("llm:openai", _op)
         record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
@@ -111,16 +128,25 @@ class OpenAICompatibleProvider(LLMProvider):
         Supported by DeepSeek and OpenAI; guarantees a valid JSON response
         shape so downstream ``jsonschema`` validation only has to fight
         structural drift, not malformed text.
+
+        Wired to the circuit breaker only — transport retries for this path
+        live in ``structured.py`` (semantic retry), so tenacity is not
+        layered here.
         """
         scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        response = await self._async_client.chat.completions.create(
-            model=self._model,
-            messages=messages,  # type: ignore[arg-type]
-            response_format={"type": "json_object"},
-            **kwargs,
-        )
+
+        async def _op() -> Any:
+            return await self._async_client.chat.completions.create(
+                model=self._model,
+                messages=messages,  # type: ignore[arg-type]
+                response_format={"type": "json_object"},
+                **kwargs,
+            )
+
+        async with circuit_breaker_guard("llm:openai"):
+            response = await _op()
         record_usage(scenario, getattr(response, "usage", None))
         return response.choices[0].message.content or ""
 
@@ -158,12 +184,16 @@ class AnthropicProvider(LLMProvider):
         scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        response = await self._async_client.messages.create(
-            model=self._model,
-            system=system,
-            messages=user_messages,  # type: ignore[arg-type]
-            **kwargs,
-        )
+
+        async def _op() -> Any:
+            return await self._async_client.messages.create(
+                model=self._model,
+                system=system,
+                messages=user_messages,  # type: ignore[arg-type]
+                **kwargs,
+            )
+
+        response = await call_with_resilience("llm:anthropic", _op)
         record_usage(scenario, getattr(response, "usage", None))
         return self._extract_text(response.content)
 
@@ -185,7 +215,10 @@ class AnthropicProvider(LLMProvider):
         if tools:
             create_kwargs["tools"] = tools
 
-        response = await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
+        async def _op() -> Any:
+            return await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
+
+        response = await call_with_resilience("llm:anthropic", _op)
         record_usage(scenario, getattr(response, "usage", None))
         content_blocks: list[object] = response.content  # type: ignore[assignment]
         result: dict[str, object] = {"content": self._extract_text(content_blocks)}
@@ -216,12 +249,16 @@ class AnthropicProvider(LLMProvider):
         scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
-        response = self._sync_client.messages.create(
-            model=self._model,
-            system=system,
-            messages=user_messages,  # type: ignore[arg-type]
-            **kwargs,
-        )
+
+        def _op() -> Any:
+            return self._sync_client.messages.create(
+                model=self._model,
+                system=system,
+                messages=user_messages,  # type: ignore[arg-type]
+                **kwargs,
+            )
+
+        response = call_with_resilience_sync("llm:anthropic", _op)
         record_usage(scenario, getattr(response, "usage", None))
         return self._extract_text(response.content)
 
@@ -239,31 +276,40 @@ class AnthropicProvider(LLMProvider):
         schema must be an *object* schema (our callers often want a top-level
         array), the caller's schema is wrapped in a ``{"result": <schema>}``
         envelope and unwrapped here.
+
+        Wired to the circuit breaker only — transport retries for this path
+        live in ``structured.py`` (semantic retry), so tenacity is not
+        layered here.
         """
         scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
         schema = json_schema or {"type": "object"}
-        response = await self._async_client.messages.create(
-            model=self._model,
-            system=system,
-            messages=user_messages,  # type: ignore[arg-type]
-            tools=[
-                {
-                    "name": "emit_json",
-                    "description": (
-                        'Return the requested data as a JSON value in the "result" field.'
-                    ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"result": schema},
-                        "required": ["result"],
-                    },
-                }
-            ],
-            tool_choice={"type": "tool", "name": "emit_json"},
-            **kwargs,
-        )
+
+        async def _op() -> Any:
+            return await self._async_client.messages.create(
+                model=self._model,
+                system=system,
+                messages=user_messages,  # type: ignore[arg-type]
+                tools=[
+                    {
+                        "name": "emit_json",
+                        "description": (
+                            'Return the requested data as a JSON value in the "result" field.'
+                        ),
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"result": schema},
+                            "required": ["result"],
+                        },
+                    }
+                ],
+                tool_choice={"type": "tool", "name": "emit_json"},
+                **kwargs,
+            )
+
+        async with circuit_breaker_guard("llm:anthropic"):
+            response = await _op()
         record_usage(scenario, getattr(response, "usage", None))
         for block in response.content:  # type: ignore[attr-defined]
             if getattr(block, "type", "") == "tool_use":

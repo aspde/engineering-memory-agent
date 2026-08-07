@@ -14,6 +14,7 @@ import pytest
 
 from backend.model.llm import LLMStructuredError
 from backend.service.structured import chat_structured
+from backend.shared.resilience import CircuitOpenError
 
 SCHEMA = {
     "type": "object",
@@ -89,6 +90,18 @@ class TestChatStructured:
                 _messages(), json_schema=SCHEMA, scenario="test", max_attempts=2, backoff=0
             )
         assert mock_llm.chat_json.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_propagates_circuit_open_error_without_retry(self, mock_llm) -> None:
+        """An open circuit breaker fails fast — CircuitOpenError is re-raised,
+        not retried through the semantic budget (provider is already failing fast).
+        """
+        mock_llm.chat_json.side_effect = CircuitOpenError("breaker open")
+        with pytest.raises(CircuitOpenError):
+            await chat_structured(
+                _messages(), json_schema=SCHEMA, scenario="test", max_attempts=3, backoff=0
+            )
+        assert mock_llm.chat_json.await_count == 1  # no retries burned
 
     @pytest.mark.asyncio
     async def test_scenario_and_schema_passed_through(self, mock_llm) -> None:

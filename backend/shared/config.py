@@ -73,9 +73,36 @@ class LLMConfig:
 
 
 @dataclass
+class ResilienceConfig:
+    """Transport retry + circuit breaker settings for external AI providers.
+
+    Shared by LLM and embedding provider calls (see
+    ``backend/shared/resilience.py``).  ``max_attempts`` counts the total
+    attempts including the first, so 3 means one initial try + two retries.
+    """
+
+    max_attempts: int = field(
+        default_factory=lambda: int(os.getenv("LLM_RETRY_MAX_ATTEMPTS", "3"))
+    )
+    backoff_base: float = field(
+        default_factory=lambda: float(os.getenv("LLM_RETRY_BACKOFF_BASE", "1.0"))
+    )
+    backoff_max: float = field(
+        default_factory=lambda: float(os.getenv("LLM_RETRY_BACKOFF_MAX", "8.0"))
+    )
+    circuit_breaker_threshold: int = field(
+        default_factory=lambda: int(os.getenv("LLM_CIRCUIT_BREAKER_THRESHOLD", "5"))
+    )
+    circuit_breaker_cooldown: float = field(
+        default_factory=lambda: float(os.getenv("LLM_CIRCUIT_BREAKER_COOLDOWN", "30.0"))
+    )
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    resilience: ResilienceConfig = field(default_factory=ResilienceConfig)
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/ema_dev")
     )

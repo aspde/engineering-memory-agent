@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 import time
+from typing import Any
 
 # ── Force offline BEFORE any HF/transformers imports ──────────────────
 # Must be at module top-level: when `from backend.service.embedding_service
@@ -18,6 +19,10 @@ for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
 
 from backend.model.embedding import EmbeddingProvider  # noqa: E402
 from backend.shared.config import config  # noqa: E402
+from backend.shared.resilience import (  # noqa: E402
+    call_with_resilience,
+    call_with_resilience_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -131,10 +136,14 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         t0 = time.perf_counter()
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
-            response = await self._async_client.embeddings.create(
-                model=self._model,
-                input=batch,
-            )
+
+            async def _op(batch: list[str] = batch) -> Any:
+                return await self._async_client.embeddings.create(
+                    model=self._model,
+                    input=batch,
+                )
+
+            response = await call_with_resilience("embedding:openai", _op)
             all_embeddings.extend(
                 [d.embedding for d in response.data]
             )
@@ -152,10 +161,14 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         all_embeddings: list[list[float]] = []
         for i in range(0, len(texts), self._batch_size):
             batch = texts[i : i + self._batch_size]
-            response = self._client.embeddings.create(
-                model=self._model,
-                input=batch,
-            )
+
+            def _op(batch: list[str] = batch) -> Any:
+                return self._client.embeddings.create(
+                    model=self._model,
+                    input=batch,
+                )
+
+            response = call_with_resilience_sync("embedding:openai", _op)
             all_embeddings.extend(
                 [d.embedding for d in response.data]
             )

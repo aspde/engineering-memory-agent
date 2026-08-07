@@ -29,6 +29,7 @@ from jsonschema import ValidationError, validate as jsonschema_validate
 from backend.model.llm import LLMStructuredError
 from backend.service.llm_service import get_llm_provider
 from backend.shared.config import config
+from backend.shared.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,10 @@ async def chat_structured(
                 raw,
             )
         except LLMStructuredError:
+            raise
+        except CircuitOpenError:
+            # Circuit breaker is open — fail fast, don't burn the semantic
+            # retry budget on a provider that is already failing fast.
             raise
         except Exception as exc:  # transient provider/API error → retry
             last_error = exc
