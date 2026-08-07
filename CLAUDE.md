@@ -11,8 +11,8 @@
 
 ## 开发环境
 
-- **操作系统**：Windows 10 Pro，终端为 PowerShell。需要用户手动执行的命令（如交互式登录、启动本地服务）按 PowerShell 语法书写，不要假定 POSIX 命令（`mv` / `cat` / `grep` 等）可用
-- **数据库**：本地 PostgreSQL（`postgresql://ema:ema123@localhost:5432/ema_dev`），含 pgvector 扩展
+- **操作系统**：Windows 10 Pro，终端为 PowerShell。需要用户手动执行的命令（如交互式登录、启动本地服务）按 PowerShell 语法书写；Claude 的 Bash 工具是 Git Bash，可正常使用 POSIX 命令
+- **数据库**：本地 PostgreSQL（含 pgvector），连接信息见 `backend/shared/config.py`（默认本地 `ema_dev`，可用 `DATABASE_URL` 环境变量覆盖）
 - **测试**：`python -m pytest`；测试环境用 NullPool，规避 Windows ProactorEventLoop + asyncpg 的连接池跨事件循环复用问题（见 `backend/db/__init__.py`）
 - **Windows 已知兼容性问题**：psycopg3 异步驱动（AsyncPostgresSaver）在 Windows 下不可用，checkpointer 降级为 InMemorySaver，开发期可接受（见 `backend/main.py`）；生产部署目标为 Linux
 
