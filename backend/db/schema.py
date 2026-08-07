@@ -136,6 +136,22 @@ _STATEMENTS = [
     CREATE INDEX IF NOT EXISTS idx_patrol_logs_type_time
         ON patrol_logs (patrol_type, started_at DESC)
     """,
+    # ── Hybrid search: jieba tokens column on chunks ────────────────
+    # Stores Python-side jieba segmentation results as a text array so
+    # sparse_search can use GIN-indexed ``tokens && :q_tokens`` instead of
+    # loading every chunk into Python (O(N) → O(log N)).  The tokens are
+    # produced by ``retrieval._tokenize`` (jieba + stopword filter) at
+    # write time and backfilled for pre-existing rows.
+    """
+    DO $$
+    BEGIN
+        ALTER TABLE chunks ADD COLUMN tokens TEXT[] DEFAULT '{}';
+    EXCEPTION WHEN duplicate_column THEN NULL;
+    END $$;
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_chunks_tokens ON chunks USING GIN(tokens)
+    """,
 ]
 
 

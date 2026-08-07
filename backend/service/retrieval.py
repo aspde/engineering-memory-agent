@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import jieba
 from sqlalchemy import text
 
 from backend.db import get_session_factory
@@ -21,6 +22,44 @@ from backend.service.embedding_service import get_embedding_provider
 logger = logging.getLogger(__name__)
 
 _ALLOWED_FILTER_COLS = {"document_id", "chunk_index"}
+
+# Rerank floor: scores below this are treated as irrelevant and dropped.
+# Shared by every read path so the threshold stays tunable in one place.
+_RERANK_FLOOR = 0.15
+
+# CJK stopword set, in two categories:
+#   (a) grammatical function words (的/了/是/…), which never discriminate;
+#   (b) a few high-frequency tokens whose content word always co-occurs with a
+#       more specific term — 支持 (support), 陷入 (fall into), 出过/分了 (aspect
+#       fragments) — so dropping them from a query shrinks the Jaccard
+#       denominator without losing signal.  Selected empirically on the eval
+#       corpus; kept intentionally small — aggressive stopword lists hurt
+#       recall on short technical queries.
+_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "的", "了", "是", "在", "我", "有", "和", "就", "不", "人", "都",
+        "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你",
+        "会", "着", "没有", "看", "好", "自己", "这", "那", "怎么",
+        "什么", "哪些", "哪个", "之前", "出过", "几个", "不会", "陷入",
+        "支持", "分了",
+    }
+)
+
+
+def _tokenize(text: str) -> set[str]:
+    """jieba tokenize, drop stopwords and single-char CJK tokens.
+
+    ASCII single-char tokens (e.g. ``c`` in variable names) are kept —
+    they carry signal in code queries.
+    """
+    tokens = jieba.lcut(text)
+    return {
+        t.strip().lower()
+        for t in tokens
+        if t.strip()
+        and t.strip() not in _STOPWORDS
+        and (len(t.strip()) >= 2 or t.strip().isascii())
+    }
 
 
 @dataclass
@@ -57,17 +96,21 @@ async def write_chunks(
             key_vec = f"vec_{i}"
             key_meta = f"meta_{i}"
             key_idx = f"idx_{i}"
+            key_tokens = f"tokens_{i}"
             values_clauses.append(
-                f"(:{key_doc}, :{key_content}, :{key_vec} ::vector, :{key_meta} ::jsonb, :{key_idx})"
+                f"(:{key_doc}, :{key_content}, :{key_vec} ::vector, "
+                f":{key_meta} ::jsonb, :{key_idx}, :{key_tokens} ::text[])"
             )
             params[key_doc] = document_id
             params[key_content] = chunk
             params[key_vec] = str(vec)
             params[key_meta] = meta_json
             params[key_idx] = i
+            params[key_tokens] = list(_tokenize(chunk))
 
         sql = (
-            "INSERT INTO chunks (document_id, content, embedding, meta, chunk_index) VALUES "
+            "INSERT INTO chunks (document_id, content, embedding, meta, "
+            "chunk_index, tokens) VALUES "
             + ", ".join(values_clauses)
         )
         await session.execute(text(sql), params)
@@ -141,6 +184,34 @@ def assemble(results: list[RetrievalResult], max_items: int = 5) -> str:
     return "\n\n".join(lines)
 
 
+async def _rerank_and_filter(
+    query: str,
+    candidates: list[dict[str, Any]],
+    top_k: int,
+    use_llm_rerank: bool,
+) -> list[RetrievalResult]:
+    """Rerank chunk candidates, drop below-floor results.
+
+    Shared by ``retrieve`` / ``retrieve_hybrid`` / ``retrieve_multi_query``
+    — the rerank + floor + assemble tail was copy-pasted in all three.
+    """
+    from backend.service.rerank import rerank_cross_encoder, rerank_llm
+
+    reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
+    ranked = await reranker(
+        query, [c["content"] for c in candidates], top_k=top_k
+    )
+    return [
+        RetrievalResult(
+            content=candidates[idx]["content"],
+            score=score,
+            metadata=candidates[idx].get("meta") or {},
+        )
+        for idx, score in ranked
+        if score >= _RERANK_FLOOR
+    ]
+
+
 async def retrieve(
     query: str,
     top_k: int = 5,
@@ -156,30 +227,193 @@ async def retrieve(
             default cross-encoder.  Slower and costs API tokens, but can
             produce more nuanced relevance judgments.
     """
-    from backend.service.rerank import rerank_cross_encoder, rerank_llm
-
     query_vec = await embed_query(query)
     candidates = await vector_search(query_vec, top_k=max(top_k * 4, 20))
 
     if not candidates:
         return []
 
-    reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
-    ranked = await reranker(
-        query, [c["content"] for c in candidates], top_k=top_k
-    )
+    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
 
-    _RERANK_FLOOR = 0.15
+
+async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
+    """BM25-style keyword search via jieba tokenization + Jaccard similarity.
+
+    Postgres ``simple`` tokenizer can't segment Chinese (treats a whole
+    CJK run as one token), so we tokenize the query with jieba and use a
+    GIN-indexed ``tokens`` column on ``chunks`` for O(log N) filtering:
+    only rows with at least one token overlap are fetched, then Jaccard
+    is computed from the DB-side intersection cardinality.
+
+    Requires ``tokens`` to be populated (done at write time by
+    ``write_chunks`` and backfilled for pre-existing rows).
+    """
+    q_tokens = _tokenize(query)
+    if not q_tokens:
+        return []
+
+    # GIN-indexed overlap filter — the main O(N) → O(log N) win.  Two stages
+    # so we never pull full ``content`` for chunks that don't survive scoring:
+    #   1. fetch only id + tokens for the overlap set, score Jaccard Python-side
+    #      (PG's ``&`` array-intersection operator is int[]-only, so inter
+    #      cardinality can't be computed DB-side for text[]);
+    #   2. fetch full rows for the surviving top-k by primary key.
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT id, tokens
+                FROM chunks
+                WHERE tokens && :q_tokens ::text[]
+                """
+            ),
+            {"q_tokens": list(q_tokens)},
+        )
+        scored: list[tuple[float, Any]] = []  # (jaccard, chunk_id)
+        for row in result:
+            cid = row._mapping["id"]
+            ct = set(row._mapping.get("tokens") or [])
+            if not ct:
+                continue
+            inter = len(q_tokens & ct)
+            if inter == 0:
+                continue
+            union = len(q_tokens | ct)
+            scored.append((inter / union, cid))
+
+        if not scored:
+            return []
+
+        scored.sort(key=lambda x: -x[0])
+        ids = [cid for _, cid in scored[:top_k]]
+
+        result = await session.execute(
+            text(
+                """
+                SELECT id, content, meta, chunk_index
+                FROM chunks
+                WHERE id = ANY(:ids)
+                """
+            ),
+            {"ids": ids},
+        )
+        by_id = {r._mapping["id"]: dict(r._mapping) for r in result}
 
     return [
-        RetrievalResult(
-            content=candidates[idx]["content"],
-            score=score,
-            metadata=candidates[idx].get("meta") or {},
-        )
-        for idx, score in ranked
-        if score >= _RERANK_FLOOR
+        {**by_id[cid], "rank": sim}
+        for sim, cid in scored[:top_k]
+        if cid in by_id
     ]
+
+
+async def retrieve_hybrid(
+    query: str,
+    top_k: int = 5,
+    *,
+    use_llm_rerank: bool = False,
+    skip_rerank: bool = False,
+) -> list[RetrievalResult]:
+    """Hybrid retrieval: dense vector + sparse BM25 union → rerank.
+
+    Combines semantic recall (``vector_search``) with keyword recall
+    (``sparse_search``) to rescue conceptual queries where dense embedding
+    misses due to low surface-form overlap.  Both candidate sets are
+    unioned (dedup by chunk id), then reranked.
+
+    When ``skip_rerank`` is True, candidates are ranked by the max of
+    dense similarity / sparse jaccard — used for A/B comparison to measure
+    rerank's contribution.
+    """
+    query_vec = await embed_query(query)
+    dense = await vector_search(query_vec, top_k=max(top_k * 4, 20))
+    sparse = await sparse_search(query, top_k=max(top_k * 4, 20))
+
+    # Union by chunk id, keeping BOTH scores so the skip_rerank fallback can
+    # take max(dense, sparse) even for chunks found by both retrievers.
+    merged: dict[str, dict[str, Any]] = {}
+    for r in dense + sparse:
+        cid = str(r["id"])
+        if cid in merged:
+            merged[cid]["rank"] = max(
+                float(merged[cid].get("rank") or 0.0),
+                float(r.get("rank") or 0.0),
+            )
+            merged[cid]["similarity"] = max(
+                float(merged[cid].get("similarity") or 0.0),
+                float(r.get("similarity") or 0.0),
+            )
+        else:
+            merged[cid] = r
+
+    if not merged:
+        return []
+
+    candidates = list(merged.values())
+
+    if skip_rerank:
+        # Fallback ranking: max(dense similarity, sparse jaccard).
+        def _fallback_score(c: dict[str, Any]) -> float:
+            return max(
+                float(c.get("similarity") or 0.0),
+                float(c.get("rank") or 0.0),
+            )
+
+        candidates.sort(key=_fallback_score, reverse=True)
+        return [
+            RetrievalResult(
+                content=c["content"],
+                score=_fallback_score(c),
+                metadata=c.get("meta") or {},
+            )
+            for c in candidates[:top_k]
+        ]
+
+    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
+
+
+async def retrieve_multi_query(
+    query: str,
+    top_k: int = 5,
+    *,
+    use_llm_rerank: bool = False,
+) -> list[RetrievalResult]:
+    """Multi-query retrieval: LLM rewrite → union → dedup → rerank.
+
+    1. ``rewrite_query`` expands the query into N concrete-term variations.
+    2. Variations are embedded in one batched call, then each is searched
+       via ``vector_search``.
+    3. Results are unioned and deduplicated by chunk id.
+    4. The union is reranked (cross-encoder by default) and trimmed.
+
+    Use this for conceptual queries (e.g. "之前出过什么问题") where the
+    user's wording won't surface-match stored memories.  Costs one extra
+    LLM call (~500ms) for the rewrite; fails safe to single-query if the
+    rewrite errors.
+    """
+    from backend.service.query_rewrite import rewrite_query
+
+    queries = await rewrite_query(query)
+
+    # Batch-embed every variation in one provider call (1 latency hit instead
+    # of N sequential embeds), then search each.
+    provider = get_embedding_provider()
+    vectors = await provider.embed(queries)
+
+    # Multi-query union, dedup by chunk id.
+    seen: dict[str, dict[str, Any]] = {}
+    for q, vec in zip(queries, vectors):
+        results = await vector_search(vec, top_k=max(top_k * 2, 10))
+        for r in results:
+            cid = str(r["id"])
+            if cid not in seen:
+                seen[cid] = r
+
+    if not seen:
+        return []
+
+    candidates = list(seen.values())[: max(top_k * 4, 20)]
+    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
 
 
 async def query_memories(
@@ -225,8 +459,6 @@ async def query_memories(
     # Drop results where the reranker score is below the minimum threshold —
     # this prevents irrelevant results from appearing when no real match exists.
     from backend.service.decay import update_decay
-
-    _RERANK_FLOOR = 0.15
 
     result: list[dict] = []
     for idx, score in ranked:

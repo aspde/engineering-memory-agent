@@ -10,6 +10,7 @@ from agent.tools import (
     ingest_document_tool,
     ingest_git_repo_tool,
     query_entity_tool,
+    query_rewrite_and_search_tool,
     retrieve_chunks_tool,
     search_memories_tool,
     write_memory_tool,
@@ -61,7 +62,7 @@ class TestRetrieveChunksTool:
         async def mock_retrieve(*args, **kwargs):
             return [RetrievalResult(content="def foo(): pass", score=0.88, metadata={"document_id": "test.py"})]
 
-        monkeypatch.setattr(mod, "retrieve", mock_retrieve)
+        monkeypatch.setattr(mod, "retrieve_hybrid", mock_retrieve)
 
         result = await retrieve_chunks_tool.ainvoke({"query": "foo function"})
         data = json.loads(result)
@@ -77,8 +78,46 @@ class TestRetrieveChunksTool:
     async def test_empty_results(self, monkeypatch) -> None:
         from agent import tools as mod
 
-        monkeypatch.setattr(mod, "retrieve", AsyncMock(return_value=[]))
+        monkeypatch.setattr(mod, "retrieve_hybrid", AsyncMock(return_value=[]))
         result = await retrieve_chunks_tool.ainvoke({"query": "nothing"})
+        assert "No relevant document chunks" in result
+
+
+class TestQueryRewriteAndSearchTool:
+    @pytest.mark.asyncio
+    async def test_returns_formatted_results(self, monkeypatch) -> None:
+        from backend.service.retrieval import RetrievalResult
+
+        async def mock_multi_query(*args, **kwargs):
+            return [
+                RetrievalResult(
+                    content="koa-connect ctx 泄漏",
+                    score=0.87,
+                    metadata={"document_id": "postmortem.md"},
+                )
+            ]
+
+        monkeypatch.setattr(
+            "backend.service.retrieval.retrieve_multi_query", mock_multi_query
+        )
+
+        result = await query_rewrite_and_search_tool.ainvoke(
+            {"query": "之前出过什么问题"}
+        )
+        data = json.loads(result)
+        assert "Found 1 relevant chunks" in data["display"]
+        assert "0.87" in data["display"]
+        assert len(data["sources"]) == 1
+        assert data["sources"][0]["document_id"] == "postmortem.md"
+        assert data["sources"][0]["type"] == "chunk"
+
+    @pytest.mark.asyncio
+    async def test_empty_results(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "backend.service.retrieval.retrieve_multi_query",
+            AsyncMock(return_value=[]),
+        )
+        result = await query_rewrite_and_search_tool.ainvoke({"query": "nothing"})
         assert "No relevant document chunks" in result
 
 
@@ -367,7 +406,7 @@ class TestConnectorAwareness:
         )
 
     def test_tool_count(self):
-        """Sanity check: the ALL_TOOLS roster should have 8 tools (7 core + notify_slack)."""
+        """Sanity check: the ALL_TOOLS roster should have 9 tools (7 core + query_rewrite + notify)."""
         from agent.tools import ALL_TOOLS
 
-        assert len(ALL_TOOLS) == 8
+        assert len(ALL_TOOLS) == 9

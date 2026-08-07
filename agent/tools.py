@@ -22,7 +22,7 @@ from backend.service.entity import (
 from backend.service.extraction import extract_memory
 from backend.service.ingestion import ingest_repo
 from backend.service.memory import write_memory
-from backend.service.retrieval import query_memories, retrieve, write_chunks
+from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
 
 
 # ── Retrieval tools ──────────────────────────────────────────────────
@@ -103,23 +103,75 @@ async def retrieve_chunks_tool(
     top_k: int = 5,
     use_llm_rerank: bool = False,
 ) -> str:
-    """Semantic search over ingested document chunks (code, docs, etc.).
+    """Hybrid search over ingested document chunks (dense vector + BM25 keyword).
 
-    Use this when the user asks about content that was ingested as
-    documents, or when memory search doesn't return enough context.
+    Combines BGE-M3 semantic recall with Postgres tsvector keyword recall
+    for better coverage on conceptual queries.  Use this as the default
+    document search, or when memory search doesn't return enough context.
 
     Args:
         query: Natural-language search query.
         top_k: Number of results (1-20).
         use_llm_rerank: Set to True for LLM-based relevance scoring.
     """
-    results = await retrieve(
+    results = await retrieve_hybrid(
         query, top_k=min(top_k, 20), use_llm_rerank=use_llm_rerank
     )
     if not results:
         return "No relevant document chunks found."
 
     lines = [f"Found {len(results)} relevant chunks:"]
+    sources: list[dict[str, Any]] = []
+    for i, r in enumerate(results):
+        lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
+        meta = r.metadata or {}
+        sources.append({
+            "document_id": str(meta.get("document_id", "")),
+            "chunk_index": meta.get("chunk_index", i),
+            "type": "chunk",
+            "snippet": r.content[:200],
+            "relevance": round(float(r.score), 4),
+            "metadata": meta,
+        })
+    return json.dumps(
+        {"display": "\n".join(lines), "sources": sources},
+        ensure_ascii=False,
+    )
+
+
+@tool
+async def query_rewrite_and_search_tool(
+    query: str,
+    top_k: int = 5,
+    use_llm_rerank: bool = False,
+) -> str:
+    """Multi-query retrieval: LLM rewrites the query into variations,
+    then unions and reranks results from all variations.
+
+    Use this for conceptual or abstract queries where the user's wording
+    may not match the stored memory's wording — e.g. "之前出过什么问题",
+    "会不会陷入死循环", "同名实体怎么归一化".  The LLM expands such
+    queries into concrete terms (component names, error types) that
+    surface in the knowledge base.
+
+    Costs one extra LLM call (~500ms) for rewriting.  For specific
+    technical queries (e.g. "pgvector 向量检索"), prefer
+    retrieve_chunks_tool instead.
+
+    Args:
+        query: Natural-language search query (especially conceptual ones).
+        top_k: Number of results (1-20).
+        use_llm_rerank: Set to True for LLM-based relevance scoring.
+    """
+    from backend.service.retrieval import retrieve_multi_query
+
+    results = await retrieve_multi_query(
+        query, top_k=min(top_k, 20), use_llm_rerank=use_llm_rerank
+    )
+    if not results:
+        return "No relevant document chunks found (even after query rewriting)."
+
+    lines = [f"Found {len(results)} relevant chunks (query rewritten):"]
     sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
         lines.append(f"[{i + 1}] (relevance: {r.score:.2f}) {r.content}")
@@ -409,6 +461,7 @@ ALL_TOOLS: list = [
     search_memories_tool,
     query_entity_tool,
     retrieve_chunks_tool,
+    query_rewrite_and_search_tool,
     write_memory_tool,
     extract_memory_tool,
     ingest_git_repo_tool,

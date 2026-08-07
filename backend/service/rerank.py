@@ -20,14 +20,19 @@ _cross_encoder = None
 def _get_cross_encoder():
     global _cross_encoder
     if _cross_encoder is None:
+        import os
+
         from sentence_transformers import CrossEncoder
 
         # Use the HF_ENDPOINT from embedding config for consistency
-        import os
-
         os.environ.setdefault("HF_ENDPOINT", config.embedding.hf_endpoint)
 
-        model_name = "BAAI/bge-reranker-v2-m3"
+        # Model is configurable via env var for A/B comparison.
+        # Production default: BAAI/bge-reranker-v2-m3 (568M, best quality).
+        # Lightweight alternative: BAAI/bge-reranker-base (278M, ~2x faster on CPU).
+        model_name = os.environ.get(
+            "RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"
+        )
         logger.info("Loading reranker model: %s", model_name)
         _cross_encoder = CrossEncoder(
             model_name,

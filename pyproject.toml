@@ -23,6 +23,7 @@ dependencies = [
     "httpx>=0.28",
     "pygit2>=1.19",
     "python-multipart>=0.0.30",
+    "jieba>=0.42",
 ]
 
 [build-system]

@@ -11,7 +11,7 @@ from sqlalchemy import text
 from backend.db import get_session_factory
 from backend.service.chunk import chunk_text
 from backend.service.memory import write_memory
-from backend.service.retrieval import query_memories, retrieve, write_chunks
+from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 
@@ -127,12 +127,12 @@ async def ingest(req: IngestRequest) -> IngestResponse:
 
 @router.post("/search", response_model=SearchResponse)
 async def search(req: SearchRequest) -> SearchResponse:
-    """Semantic search over ingested documents.
+    """Hybrid search over ingested documents.
 
-    Pipeline: embed → vector search → rerank.
+    Pipeline: dense vector + sparse BM25 union → rerank.
     """
     try:
-        results = await retrieve(req.query, top_k=req.top_k, use_llm_rerank=req.use_llm_rerank)
+        results = await retrieve_hybrid(req.query, top_k=req.top_k, use_llm_rerank=req.use_llm_rerank)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
