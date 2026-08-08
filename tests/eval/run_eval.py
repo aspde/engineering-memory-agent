@@ -18,6 +18,9 @@ Examples:
 
     # Save machine-readable JSON for CI gating / trend tracking
     python -m tests.eval.run_eval --retriever memory --report-json report.json
+
+    # Regression gate: fail (exit 2) if overall metrics fall below thresholds
+    python -m tests.eval.run_eval --retriever memory --min-recall@5 0.95 --min-mrr 0.90
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ from tests.eval.report import (
     write_markdown,
 )
 from tests.eval.runner import EvalConfig, compare_eval, run_eval
+from tests.eval.thresholds import check_thresholds, print_threshold_failures
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -109,7 +113,37 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override the run name in reports. Default: auto-generated label.",
     )
+    p.add_argument(
+        "--min-recall@5",
+        dest="min_recall_at_5",
+        type=float,
+        default=None,
+        help="Regression gate: fail (exit 2) if overall recall@5 drops below "
+        "this value. Not set by default — the gate is opt-in.",
+    )
+    p.add_argument(
+        "--min-mrr",
+        type=float,
+        default=None,
+        help="Regression gate: fail (exit 2) if overall MRR drops below this "
+        "value. Not set by default — the gate is opt-in.",
+    )
     return p
+
+
+def _build_thresholds(args: argparse.Namespace) -> dict[str, float]:
+    """Collect the non-None min-metric CLI flags into a thresholds map.
+
+    Metric keys use the same names as ``EvalResult.overall`` (e.g.
+    ``recall@5``, ``mrr``) so the map feeds straight into
+    :func:`~tests.eval.thresholds.check_thresholds`.
+    """
+    thresholds: dict[str, float] = {}
+    if args.min_recall_at_5 is not None:
+        thresholds["recall@5"] = args.min_recall_at_5
+    if args.min_mrr is not None:
+        thresholds["mrr"] = args.min_mrr
+    return thresholds
 
 
 def _make_config(
@@ -190,7 +224,25 @@ async def _run(args: argparse.Namespace) -> int:
         print(f"✓ JSON report → {path}", file=sys.stderr)
 
     # Non-zero exit if any retrieval errors occurred (useful for CI).
-    return 1 if any(r.errors for r in results) else 0
+    rc = 1 if any(r.errors for r in results) else 0
+
+    # Regression gate (opt-in via --min-* flags): when a threshold is set,
+    # fail the run if the corresponding overall metric falls below it.  The
+    # production-default (memory) config is the one the weekly workflow gates
+    # on.  Exit code 2 keeps this distinct from retrieval errors (1).
+    thresholds = _build_thresholds(args)
+    if thresholds:
+        for r in results:
+            outcome = check_thresholds(r.overall, thresholds)
+            if not outcome.passed:
+                print(
+                    f"✗ Threshold check failed for {r.config.name}:",
+                    file=sys.stderr,
+                )
+                print_threshold_failures(outcome)
+                rc = 2
+
+    return rc
 
 
 def main() -> None:

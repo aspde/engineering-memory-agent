@@ -2,6 +2,22 @@ import type { Interrupt, Source, SSEEvent, ToolCall } from '../types';
 
 const BASE_URL = ''; // Vite proxy handles /api/* → http://localhost:8000
 
+/**
+ * Build the extra headers common to every API request.
+ *
+ * When `VITE_EMA_API_KEY` is configured the request carries
+ * `Authorization: Bearer <key>` (the backend's API-key guard).  When it is
+ * not configured no auth header is sent, preserving backward compatibility
+ * with dev setups that have no key.
+ */
+function authHeaders(base: Record<string, string>): Record<string, string> {
+  const key = import.meta.env.VITE_EMA_API_KEY as string | undefined;
+  if (key) {
+    return { ...base, Authorization: `Bearer ${key}` };
+  }
+  return base;
+}
+
 /** Error thrown for HTTP-level failures (non-2xx responses). */
 export class ApiError extends Error {
   readonly status: number;
@@ -21,7 +37,7 @@ async function apiGet<T>(path: string): Promise<T> {
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method: 'GET',
-      headers: { Accept: 'application/json' },
+      headers: authHeaders({ Accept: 'application/json' }),
     });
   } catch (err) {
     throw new Error(
@@ -37,10 +53,10 @@ async function apiPost<T>(path: string, body: unknown): Promise<T> {
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method: 'POST',
-      headers: {
+      headers: authHeaders({
         'Content-Type': 'application/json',
         Accept: 'application/json',
-      },
+      }),
       body: JSON.stringify(body),
     });
   } catch (err) {
@@ -57,7 +73,7 @@ async function apiDelete<T>(path: string): Promise<T> {
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method: 'DELETE',
-      headers: { Accept: 'application/json' },
+      headers: authHeaders({ Accept: 'application/json' }),
     });
   } catch (err) {
     throw new Error(
@@ -80,10 +96,10 @@ async function* apiSSE(path: string, body: unknown): AsyncGenerator<SSEEvent> {
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method: 'POST',
-      headers: {
+      headers: authHeaders({
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
-      },
+      }),
       body: JSON.stringify(body),
     });
   } catch (err) {

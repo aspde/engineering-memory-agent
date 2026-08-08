@@ -135,7 +135,6 @@ describe('apiGet', () => {
       headers: { Accept: 'application/json' },
     });
   });
-
   it('throws ApiError on a non-2xx response', async () => {
     fetchMock.mockResolvedValue({
       ok: false,
@@ -240,5 +239,72 @@ describe('apiSSE', () => {
         }
       })(),
     ).rejects.toBeInstanceOf(ApiError);
+  });
+});
+
+describe('auth headers', () => {
+  it('omits Authorization when VITE_EMA_API_KEY is not configured', async () => {
+    vi.stubEnv('VITE_EMA_API_KEY', '');
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({}),
+    });
+    await apiGet('/api/x');
+    expect(fetchMock).toHaveBeenCalledWith('/api/x', {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+    });
+  });
+
+  it('sends Authorization: Bearer when VITE_EMA_API_KEY is set', async () => {
+    vi.stubEnv('VITE_EMA_API_KEY', 'test-key');
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({}),
+    });
+    await apiGet('/api/x');
+    expect(fetchMock).toHaveBeenCalledWith('/api/x', {
+      method: 'GET',
+      headers: { Accept: 'application/json', Authorization: 'Bearer test-key' },
+    });
+  });
+
+  it('carries the auth header on POST and SSE requests too', async () => {
+    vi.stubEnv('VITE_EMA_API_KEY', 'test-key');
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      body: streamFromChunks(['data: {"type":"done"}\n\n']),
+      json: async () => ({}),
+    });
+    await apiPost('/api/x', { a: 1 });
+    expect(fetchMock).toHaveBeenCalledWith('/api/x', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: 'Bearer test-key',
+      },
+      body: JSON.stringify({ a: 1 }),
+    });
+
+    fetchMock.mockClear();
+    for await (const _event of apiSSE('/api/chat', {})) {
+      // consume
+    }
+    expect(fetchMock).toHaveBeenCalledWith('/api/chat', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+        Authorization: 'Bearer test-key',
+      },
+      body: JSON.stringify({}),
+    });
   });
 });
