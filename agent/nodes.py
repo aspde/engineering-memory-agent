@@ -275,6 +275,11 @@ def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     providers tolerate several, but joining them is semantically identical
     and keeps both paths to a single system message.
 
+    The first system entry is the persona (instructions); every later one is
+    conversation-derived content (the compaction running summary), so it is
+    fenced as ``<summary>`` data — the same treatment ``generate_final_node``
+    gives it — keeping it out of the executable instruction section.
+
     Messages with at most one system message (the common case) are returned
     unchanged; otherwise all system content is joined (in order) into one
     ``SystemMessage`` pinned at the front.
@@ -282,9 +287,12 @@ def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
     system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
     if len(system_msgs) <= 1:
         return messages
-    merged = SystemMessage(
-        content="\n\n".join(str(m.content or "").strip() for m in system_msgs)
-    )
+    parts = [str(system_msgs[0].content or "").strip()]
+    for m in system_msgs[1:]:
+        content = str(m.content or "").strip()
+        if content:
+            parts.append(f"<summary>\n{content}\n</summary>")
+    merged = SystemMessage(content="\n\n".join(parts))
     return [merged] + [m for m in messages if not isinstance(m, SystemMessage)]
 
 
@@ -336,9 +344,10 @@ def _wrap_context_item(tool_name: str, content: str) -> str:
 
 
 # ── Automatic knowledge capture (B3) ──────────────────────────────
-# When AUTO_MEMORY_ENABLED=true, substantive user turns are written to the
-# memory store automatically (unless the agent already wrote this turn via
-# write_memory_tool).  Default off — the existing behaviour is unchanged.
+# When AUTO_MEMORY_ENABLED=true (default), substantive user turns are written
+# to the memory store automatically (unless the agent already wrote this turn
+# via write_memory_tool).  Set AUTO_MEMORY_ENABLED=false to restore explicit
+# write-on-request behaviour.
 _AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
 
 
@@ -457,7 +466,9 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
         messages.insert(0, SystemMessage(content=system_text.format(context="")))
     # Coalesce the persona system and compaction's running-summary SystemMessage
     # into one before serialization — Anthropic only accepts a single top-level
-    # ``system``, and a second ``role=system`` entry would be rejected.
+    # ``system``, and a second ``role=system`` entry would be rejected.  The
+    # conversation-derived summary is fenced as <summary> data, out of the
+    # instruction section.
     messages = _merge_system_messages(messages)
 
     tool_schemas = _to_openai_tools(tools)
