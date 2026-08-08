@@ -5,6 +5,7 @@ excluded from search and stats.
 """
 
 import json
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -106,8 +107,18 @@ class TestDeleteMemory:
 
 class TestSoftDeleteEffects:
     @pytest.mark.asyncio
-    async def test_search_excludes_deleted_memory(self, async_client: AsyncClient) -> None:
+    async def test_search_excludes_deleted_memory(self, async_client: AsyncClient, monkeypatch) -> None:
         """A soft-deleted memory never appears in search results."""
+        # Search embeds the query via the real BGE model.  CI has no HF model
+        # cache and runs offline, so the loaded model emits a mismatched-dim
+        # vector that fails against the vector(1024) column → 500.  Fake the
+        # provider with a 1024-dim vector matching the test-data dummy above.
+        provider = AsyncMock()
+        provider.embed.return_value = [[0.1, 0.2] * 512]
+        monkeypatch.setattr(
+            "backend.service.retrieval.get_embedding_provider", lambda: provider
+        )
+
         session_factory = get_session_factory()
         unique_token = f"searchable-token-{uuid4().hex}"
         memory_id = await insert_test_memory(

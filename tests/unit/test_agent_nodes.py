@@ -302,8 +302,16 @@ class TestCallLLMNode:
 
 class TestGenerateFinalNode:
     @pytest.mark.asyncio
-    async def test_produces_final_prompt(self) -> None:
+    async def test_produces_final_prompt(self, monkeypatch) -> None:
         import agent.nodes as mod
+        from tests._fake_llm import text_stream
+
+        # The synthesis path calls the real provider; on CI the empty
+        # LLM_API_KEY makes AsyncOpenAI raise at construction.  Feed it a
+        # fake streaming provider so no LLM is touched.
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final answer.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         state = _make_state(
             messages=[
@@ -473,9 +481,16 @@ class TestGenerateFinalNode:
         assert "OLD-MEMORY-RESULT" not in system["content"]
 
     @pytest.mark.asyncio
-    async def test_no_tools_produces_prompt(self) -> None:
+    async def test_no_tools_produces_prompt(self, monkeypatch) -> None:
         """Without any tool results, still produces a valid prompt (no context block)."""
         import agent.nodes as mod
+        from tests._fake_llm import text_stream
+
+        # Same fake-provider requirement as test_produces_final_prompt: the
+        # empty LLM_API_KEY on CI would make AsyncOpenAI raise.
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final answer.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         state = _make_state(
             messages=[
