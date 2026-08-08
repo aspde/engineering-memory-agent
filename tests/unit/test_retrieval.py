@@ -378,6 +378,88 @@ class TestRetrieveHybrid:
         assert results == []
 
 
+class TestRetrieve:
+    """``retrieve`` ranks by raw recall similarity by default; cross-encoder
+    and LLM rerank are explicit opt-ins."""
+
+    def _patch_sources(self, monkeypatch, dense):
+        from backend.service import retrieval as mod
+
+        monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
+        monkeypatch.setattr(mod, "vector_search", AsyncMock(return_value=dense))
+
+    @pytest.mark.asyncio
+    async def test_default_skips_cross_encoder(self, monkeypatch) -> None:
+        """Default read path ranks by similarity and must NOT load the
+        cross-encoder (mocked to raise)."""
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
+            {"id": "c2", "content": "c2", "meta": {}, "similarity": 0.6},
+        ]
+        self._patch_sources(monkeypatch, dense)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(side_effect=AssertionError("rerank must not run by default")),
+        )
+
+        results = await mod.retrieve("query", top_k=5)
+
+        assert [r.content for r in results] == ["c1", "c2"]
+        assert results[0].score == pytest.approx(0.8)
+
+    @pytest.mark.asyncio
+    async def test_use_cross_encoder_reranks_and_filters_floor(self, monkeypatch) -> None:
+        """Explicit ``use_cross_encoder=True`` runs the reranker and applies
+        the relevance floor."""
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
+            {"id": "c2", "content": "c2", "meta": {}, "similarity": 0.6},
+        ]
+        self._patch_sources(monkeypatch, dense)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(return_value=[(0, 0.9), (1, 0.1)]),
+        )
+
+        results = await mod.retrieve("query", top_k=5, use_cross_encoder=True)
+
+        # c2 scored 0.1 < _RERANK_FLOOR → dropped
+        assert [r.content for r in results] == ["c1"]
+        assert results[0].score == pytest.approx(0.9)
+
+    @pytest.mark.asyncio
+    async def test_use_llm_rerank_selects_llm(self, monkeypatch) -> None:
+        """``use_llm_rerank=True`` routes to the LLM pointwise reranker."""
+        from backend.service import retrieval as mod
+
+        dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8}]
+        self._patch_sources(monkeypatch, dense)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(side_effect=AssertionError("llm path must not call cross-encoder")),
+        )
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_llm",
+            AsyncMock(return_value=[(0, 0.85)]),
+        )
+
+        results = await mod.retrieve("query", top_k=5, use_llm_rerank=True)
+
+        assert results[0].score == pytest.approx(0.85)
+
+    @pytest.mark.asyncio
+    async def test_no_candidates_returns_empty(self, monkeypatch) -> None:
+        from backend.service import retrieval as mod
+
+        self._patch_sources(monkeypatch, [])
+        results = await mod.retrieve("query", top_k=5)
+        assert results == []
+
+
 class TestQueryMemoriesDecayBatch:
     """query_memories updates decay in ONE batch; a write failure can't sink the search."""
 
@@ -390,6 +472,8 @@ class TestQueryMemoriesDecayBatch:
             "entities": [],
             "relations": [],
             "decay_factor": decay,
+            # mirror of search_memories' decay-weighted similarity
+            "weighted_score": decay,
             "recall_count": 1,
             "meta": {},
             "created_at": None,
@@ -424,7 +508,9 @@ class TestQueryMemoriesDecayBatch:
     @pytest.mark.asyncio
     async def test_batch_update_in_single_call(self, monkeypatch) -> None:
         """All surviving memory ids go through ONE update_decay_batch call,
-        not N sequential update_decay commits (the N+1 fix)."""
+        not N sequential update_decay commits (the N+1 fix).  Exercises the
+        explicit cross-encoder path: the reranker ranks, floor passes both,
+        then decay bumps them in one batch."""
         from backend.service import retrieval as mod
         from backend.service import decay as decay_mod
 
@@ -436,13 +522,44 @@ class TestQueryMemoriesDecayBatch:
             decay_map={"m1": 0.99, "m2": 0.77},
         )
 
-        results = await mod.query_memories("q", top_k=5)
+        results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
         assert [r["id"] for r in results] == ["m1", "m2"]
         decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
         # New factors from the batch overwrite the candidates' stale ones.
         assert results[0]["decay_factor"] == pytest.approx(0.99)
         assert results[1]["decay_factor"] == pytest.approx(0.77)
+
+    @pytest.mark.asyncio
+    async def test_default_path_skips_cross_encoder(self, monkeypatch) -> None:
+        """Default memory search must not run the cross-encoder (mocked to
+        raise) — candidates rank by decay-weighted similarity and the batch
+        decay update still runs.  Regression guard for the eval finding that
+        the 568M reranker costs ~90x latency without recall gain."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
+        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(side_effect=AssertionError("rerank must not run by default")),
+        )
+        monkeypatch.setattr(
+            decay_mod,
+            "update_decay_batch",
+            AsyncMock(return_value={"m1": 0.95, "m2": 0.4}),
+        )
+
+        results = await mod.query_memories("q", top_k=5)
+
+        assert [r["id"] for r in results] == ["m1", "m2"]
+        # rerank_score carries the decay-weighted similarity, not a reranker score
+        assert results[0]["rerank_score"] == pytest.approx(0.9)
+        assert results[1]["rerank_score"] == pytest.approx(0.5)
+        decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
+        assert results[0]["decay_factor"] == pytest.approx(0.95)
+        assert results[1]["decay_factor"] == pytest.approx(0.4)
 
     @pytest.mark.asyncio
     async def test_decay_failure_returns_stale_factors(self, monkeypatch) -> None:
@@ -453,7 +570,7 @@ class TestQueryMemoriesDecayBatch:
         cands = [self._candidate("m1", 0.8)]
         self._patch(monkeypatch, cands, [(0, 0.9)], decay_raises=True)
 
-        results = await mod.query_memories("q", top_k=5)
+        results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
         assert len(results) == 1
         assert results[0]["id"] == "m1"
@@ -462,14 +579,15 @@ class TestQueryMemoriesDecayBatch:
     @pytest.mark.asyncio
     async def test_floor_filters_before_decay(self, monkeypatch) -> None:
         """Scores below the rerank floor are dropped before the decay batch,
-        so they never consume an update."""
+        so they never consume an update.  The floor only applies on the
+        explicit cross-encoder path."""
         from backend.service import retrieval as mod
         from backend.service import decay as decay_mod
 
         cands = [self._candidate("m1"), self._candidate("m2")]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.1)])  # m2 below floor
 
-        results = await mod.query_memories("q", top_k=5)
+        results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
         assert [r["id"] for r in results] == ["m1"]
         decay_mod.update_decay_batch.assert_awaited_once_with(["m1"])
@@ -493,6 +611,7 @@ class TestRetrieveMultiQuery:
 
     @pytest.mark.asyncio
     async def test_unions_and_dedups_across_variations(self, monkeypatch) -> None:
+        """Union/dedup orchestration on the explicit cross-encoder path."""
         from backend.service import retrieval as mod
 
         queries = ["原查询", "变体一", "变体二"]
@@ -508,12 +627,35 @@ class TestRetrieveMultiQuery:
             AsyncMock(return_value=[(0, 0.9), (1, 0.8), (2, 0.7)]),
         )
 
-        results = await mod.retrieve_multi_query("原查询", top_k=5)
+        results = await mod.retrieve_multi_query("原查询", top_k=5, use_cross_encoder=True)
 
         # c2 appears in two variations but is deduped to one result
         assert [r.content for r in results] == ["c1", "c2", "c3"]
         # All variations embedded in ONE provider call
         provider.embed.assert_awaited_once_with(queries)
+
+    @pytest.mark.asyncio
+    async def test_default_path_skips_cross_encoder(self, monkeypatch) -> None:
+        """Default multi-query path ranks by recall similarity and must NOT
+        run the cross-encoder (mocked to raise)."""
+        from backend.service import retrieval as mod
+
+        vector_search = AsyncMock(side_effect=[
+            [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.7}],
+            [{"id": "c2", "content": "c2", "meta": {}, "similarity": 0.6}],
+            [{"id": "c3", "content": "c3", "meta": {}, "similarity": 0.9}],
+        ])
+        self._patch_llm_and_embed(monkeypatch, ["q1", "q2", "q3"], vector_search)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder",
+            AsyncMock(side_effect=AssertionError("rerank must not run by default")),
+        )
+
+        results = await mod.retrieve_multi_query("query", top_k=5)
+
+        # ranked by raw similarity across the union: c3 (0.9) > c1 (0.7) > c2 (0.6)
+        assert [r.content for r in results] == ["c3", "c1", "c2"]
+        assert [r.score for r in results] == [pytest.approx(0.9), pytest.approx(0.7), pytest.approx(0.6)]
 
     @pytest.mark.asyncio
     async def test_empty_results_returns_empty(self, monkeypatch) -> None:
@@ -528,6 +670,7 @@ class TestRetrieveMultiQuery:
 
     @pytest.mark.asyncio
     async def test_floor_filters_low_scores(self, monkeypatch) -> None:
+        """The relevance floor only applies on the explicit cross-encoder path."""
         from backend.service import retrieval as mod
 
         vector_search = AsyncMock(return_value=[
@@ -539,7 +682,7 @@ class TestRetrieveMultiQuery:
             AsyncMock(return_value=[(0, 0.1)]),
         )
 
-        results = await mod.retrieve_multi_query("query", top_k=5)
+        results = await mod.retrieve_multi_query("query", top_k=5, use_cross_encoder=True)
         assert results == []
 
 
