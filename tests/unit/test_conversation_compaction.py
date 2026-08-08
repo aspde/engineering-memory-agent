@@ -1,8 +1,8 @@
-"""Tests for conversation compaction (B4) — opt-in, fails safe.
+"""Tests for conversation compaction (B4) — enabled by default, fails safe.
 
 When enabled, messages older than the context window are folded into one
-running-summary SystemMessage; when disabled, the existing truncation
-behaviour is unchanged.
+running-summary SystemMessage; when explicitly disabled, the existing
+truncation behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -15,12 +15,22 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from backend.shared import config as config_mod
 
 
+@pytest.fixture(autouse=True)
+def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep auto memory off — these tests exercise compaction, not B3.
+
+    Auto memory defaults on; generate_final_node would otherwise hit the
+    real extraction service (unmocked) at the end of each turn.
+    """
+    monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
+
+
 def _set_compaction(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", enabled)
 
 
 class TestCompactionDisabled:
-    """Default off — truncation behaviour is identical to before."""
+    """Explicitly disabled — truncation behaviour is identical to before."""
 
     @pytest.mark.asyncio
     async def test_returns_messages_unchanged_without_llm_call(self, monkeypatch) -> None:
@@ -185,6 +195,92 @@ class TestCompactionThroughNodes:
         system = next(p for p in result["final_prompt"] if p["role"] == "system")
         assert "<summary>" not in system["content"]
         assert "SUMMARY-OF-EARLY-HISTORY" not in system["content"]
+
+
+class TestCompactionSingleSystem:
+    """The running summary is merged into the persona system before sending.
+
+    Anthropic's Messages API accepts a single top-level ``system``; a second
+    ``role=system`` message would be rejected.  ``call_llm_node`` coalesces
+    the persona system and the compaction summary into one, so both provider
+    paths see exactly one system message.
+    """
+
+    def test_merge_system_messages_coalesces_into_one(self) -> None:
+        import agent.nodes as mod
+
+        merged = mod._merge_system_messages([
+            SystemMessage(content="PINNED-SYSTEM"),
+            SystemMessage(content="RUNNING-SUMMARY"),
+            HumanMessage(content="hi"),
+        ])
+        systems = [m for m in merged if isinstance(m, SystemMessage)]
+        assert len(systems) == 1
+        assert "PINNED-SYSTEM" in systems[0].content
+        assert "RUNNING-SUMMARY" in systems[0].content
+        assert merged[-1].content == "hi"
+
+    def test_merge_system_messages_passthrough_when_single(self) -> None:
+        import agent.nodes as mod
+
+        messages = [
+            SystemMessage(content="PINNED-SYSTEM"),
+            HumanMessage(content="hi"),
+        ]
+        assert mod._merge_system_messages(messages) is messages
+
+    @pytest.mark.asyncio
+    async def test_call_llm_emits_single_system_with_summary(self, monkeypatch) -> None:
+        """OpenAI-compatible wire shape: exactly one system message, summary folded in."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+        mock_provider.chat.return_value = "SUMMARY-OF-EARLY-MESSAGES"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from agent.tools import ALL_TOOLS
+
+        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        await mod.call_llm_node(_agent_state(history), tools=ALL_TOOLS)
+
+        sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
+        system_msgs = [m for m in sent if m["role"] == "system"]
+        # One system message, carrying the persona AND the running summary.
+        assert len(system_msgs) == 1
+        assert "SUMMARY-OF-EARLY-MESSAGES" in system_msgs[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_anthropic_conversion_sees_single_system(self, monkeypatch) -> None:
+        """Anthropic's split/conversion must not emit a second role=system message."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+        mock_provider.chat.return_value = "SUMMARY-OF-EARLY-MESSAGES"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from agent.tools import ALL_TOOLS
+
+        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        await mod.call_llm_node(_agent_state(history), tools=ALL_TOOLS)
+        sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
+
+        from backend.service.llm_service import AnthropicProvider
+
+        system, user_messages = AnthropicProvider._split_messages(sent)
+        # The summary rides inside the single top-level system param…
+        assert "SUMMARY-OF-EARLY-MESSAGES" in system
+        # …and nothing role=system is left to be emitted as a message.
+        assert all(m["role"] != "system" for m in user_messages)
+        converted = AnthropicProvider._to_anthropic_messages(user_messages)
+        assert all(m["role"] in ("user", "assistant") for m in converted)
 
 
 def _agent_state(messages: list) -> dict:

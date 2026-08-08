@@ -14,6 +14,22 @@ from agent.nodes import (
     _window_messages,
 )
 from agent.state import AgentState
+from backend.shared import config as config_mod
+
+
+@pytest.fixture(autouse=True)
+def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep auto memory off — these tests exercise the graph nodes, not B3.
+
+    Auto memory defaults on; generate_final_node would otherwise hit the
+    real extraction service (unmocked) at the end of each turn.
+    """
+    monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
+
+
+def _disable_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable conversation compaction for tests that assert pure windowing."""
+    monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", False)
 
 
 class TestMessageConversion:
@@ -430,6 +446,8 @@ class TestGenerateFinalNode:
 
         def _tool_msg(tool_call_id: str, content: str) -> ToolMessage:
             return ToolMessage(content=content, tool_call_id=tool_call_id)
+
+        _disable_compaction(monkeypatch)  # assert pure windowing, not summary
 
         messages: list = []
         # An old turn's tool result, then enough filler to push it out of the
@@ -868,6 +886,7 @@ class TestContextBounding:
 
         from agent.tools import ALL_TOOLS
 
+        _disable_compaction(monkeypatch)  # assert pure windowing, not summary
         history = [HumanMessage(content=f"old message {i}") for i in range(30)]
         await mod.call_llm_node(_make_state(history), tools=ALL_TOOLS)
 
@@ -887,6 +906,7 @@ class TestContextBounding:
         mock_provider.chat_stream = text_stream("Final.")
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
+        _disable_compaction(monkeypatch)  # assert pure windowing, not summary
         state = _make_state(
             messages=[
                 HumanMessage(content="search"),

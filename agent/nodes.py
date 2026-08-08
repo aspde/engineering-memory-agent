@@ -196,8 +196,9 @@ def _window_messages(
 # Long threads previously dropped everything outside the window.  When
 # CONVERSATION_COMPACTION_ENABLED=true, the overflow is folded into one
 # running-summary SystemMessage (a single LLM call) so the retained tail
-# keeps its conversational context.  Default off — the existing truncation
-# behaviour is unchanged.
+# keeps its conversational context.  The summary is later coalesced into
+# the persona system by ``_merge_system_messages`` so both OpenAI-compatible
+# and Anthropic providers see exactly one system message.  Default on.
 
 
 async def _summarize_overflow(messages: list[BaseMessage]) -> str:
@@ -235,7 +236,7 @@ async def _maybe_compact(
     """Fold messages older than the window into a running-summary SystemMessage.
 
     Only active when ``config.conversation_compaction_enabled`` is set
-    (default off).  When the non-system history exceeds *max_messages*, the
+    (default on).  When the non-system history exceeds *max_messages*, the
     overflow prefix is summarised in one LLM call and prepended as a
     ``SystemMessage`` so the retained tail keeps its conversational context.
     On any failure it returns *messages* unchanged and the caller's windowing
@@ -256,10 +257,35 @@ async def _maybe_compact(
     if not summary:
         return messages
     # Pinned system messages stay first, then the running summary, then the
-    # retained tail.  (OpenAI-compatible providers accept multiple system
-    # messages; the Anthropic provider lifts only the first as ``system`` —
-    # a documented limitation of this opt-in feature.)
+    # retained tail.  The summary may coexist with the persona system in the
+    # LangChain message list — ``call_llm_node`` coalesces all system messages
+    # into one before serialization, so Anthropic's single-top-level-system
+    # constraint is met (see ``_merge_system_messages``).
     return system + [SystemMessage(content=summary)] + rest[-max_messages:]
+
+
+def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Coalesce multiple SystemMessages into a single leading one.
+
+    Compaction (B4) injects its running summary as its own SystemMessage,
+    which can sit beside the pinned persona system.  Anthropic's Messages
+    API accepts exactly one top-level ``system`` and ``_split_messages``
+    lifts only the first ``role=system`` entry, so a second one would be
+    emitted as a message — which Anthropic rejects.  OpenAI-compatible
+    providers tolerate several, but joining them is semantically identical
+    and keeps both paths to a single system message.
+
+    Messages with at most one system message (the common case) are returned
+    unchanged; otherwise all system content is joined (in order) into one
+    ``SystemMessage`` pinned at the front.
+    """
+    system_msgs = [m for m in messages if isinstance(m, SystemMessage)]
+    if len(system_msgs) <= 1:
+        return messages
+    merged = SystemMessage(
+        content="\n\n".join(str(m.content or "").strip() for m in system_msgs)
+    )
+    return [merged] + [m for m in messages if not isinstance(m, SystemMessage)]
 
 
 async def _bounded_messages(
@@ -429,6 +455,10 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
         version, system_text = get_prompt("agent.system")
         logger.info("call_llm_node: using agent.system prompt v%s", version)
         messages.insert(0, SystemMessage(content=system_text.format(context="")))
+    # Coalesce the persona system and compaction's running-summary SystemMessage
+    # into one before serialization — Anthropic only accepts a single top-level
+    # ``system``, and a second ``role=system`` entry would be rejected.
+    messages = _merge_system_messages(messages)
 
     tool_schemas = _to_openai_tools(tools)
     dicts = _messages_to_dicts(messages)
