@@ -57,7 +57,11 @@ async def rerank_cross_encoder(
     if not candidates:
         return []
 
-    model = _get_cross_encoder()
+    # Model loading is lazy and CPU-bound (a 568M weights download+init on
+    # first use); run it in the thread pool so the first explicit rerank
+    # never freezes the event loop.  Subsequent calls hit the cached
+    # instance (one cheap thread-pool hop).
+    model = await asyncio.to_thread(_get_cross_encoder)
     pairs = [[query, c] for c in candidates]
     scores = await asyncio.to_thread(model.predict, pairs)
 

@@ -62,3 +62,41 @@ class TestRerankLlmConcurrency:
         ranked = await mod.rerank_llm("query", ["a", "b"], top_k=5)
         # Sorted by score — both 0.0, stable sort keeps input order.
         assert ranked == [(0, 0.0), (1, 0.0)]
+
+
+class TestCrossEncoderFirstLoad:
+    """The lazy cross-encoder load must not freeze the event loop.
+
+    Loading a 568M model synchronously on first use would block the async
+    request that triggers an explicit rerank; the loader runs via
+    ``asyncio.to_thread`` instead.
+    """
+
+    @pytest.mark.asyncio
+    async def test_load_offloaded_to_thread_pool(self, monkeypatch) -> None:
+        from backend.service import rerank as mod
+
+        offloaded: list = []
+
+        async def fake_to_thread(fn, *args, **kwargs):  # noqa: ANN001, ANN003, ANN002
+            offloaded.append(fn)
+            return fn(*args, **kwargs)
+
+        class FakeModel:
+            def predict(self, pairs):  # noqa: ANN001
+                return [0.9, 0.1]
+
+        monkeypatch.setattr(mod.asyncio, "to_thread", fake_to_thread)
+        monkeypatch.setattr(mod, "_get_cross_encoder", lambda: FakeModel())
+
+        ranked = await mod.rerank_cross_encoder("q", ["a", "b"], top_k=2)
+
+        assert ranked == [(0, 0.9), (1, 0.1)]
+        # The model loader was invoked through the thread pool, not inline.
+        assert mod._get_cross_encoder in offloaded
+
+    @pytest.mark.asyncio
+    async def test_empty_candidates(self) -> None:
+        from backend.service import rerank as mod
+
+        assert await mod.rerank_cross_encoder("q", [], top_k=5) == []
