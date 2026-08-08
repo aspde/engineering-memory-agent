@@ -448,3 +448,236 @@ class TestAnthropicChatRaw:
             {"name": "t", "description": "d", "input_schema": {"type": "object"}}
         ]
         assert AnthropicProvider._to_anthropic_tools(already) == already
+
+
+# ── Streaming token accounting ─────────────────────────────────────────
+
+
+class _FakeAsyncStream:
+    """Minimal async-iterable stand-in for an OpenAI ``AsyncStream``.
+
+    Mirrors the SDK surface the provider reads after iteration: an optional
+    ``usage`` attribute on the stream object (newer SDKs) and per-chunk
+    ``usage`` on the final chunk.
+    """
+
+    def __init__(self, chunks: list, usage=None) -> None:
+        self._chunks = list(chunks)
+        self.usage = usage
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        for chunk in self._chunks:
+            yield chunk
+
+
+def _openai_chunk(text: str, usage=None):
+    delta = MagicMock(content=text, tool_calls=None)
+    chunk = MagicMock(choices=[MagicMock(delta=delta)])
+    chunk.usage = usage
+    return chunk
+
+
+class TestStreamingUsage:
+    """Streaming paths must record token usage per scenario so
+    ``agent_chat`` / ``agent_final`` are not permanently zero."""
+
+    def setup_method(self) -> None:
+        reset_token_usage()
+
+    def teardown_method(self) -> None:
+        reset_token_usage()
+
+    @pytest.mark.asyncio
+    async def test_openai_stream_object_usage_recorded(self) -> None:
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        stream = _FakeAsyncStream(
+            [_openai_chunk("hello", usage=None)],
+            usage=SimpleNamespace(total_tokens=42),
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=stream)
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "hello"}]
+        assert get_token_usage()["agent_chat"] == 42
+
+    @pytest.mark.asyncio
+    async def test_openai_final_chunk_usage_fallback(self) -> None:
+        """SDKs that only carry usage on the last chunk still record it."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        stream = _FakeAsyncStream(
+            [
+                _openai_chunk("Hel", usage=None),
+                _openai_chunk("lo", usage=SimpleNamespace(total_tokens=55)),
+            ],
+            usage=None,  # no stream-level usage — rely on the final chunk
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=stream)
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        text = "".join(
+            [
+                event["text"]
+                async for event in provider.chat_raw_stream(
+                    [{"role": "user", "content": "hi"}], scenario="agent_chat"
+                )
+                if event.get("type") == "content"
+            ]
+        )
+
+        assert text == "Hello"
+        assert get_token_usage()["agent_chat"] == 55
+
+    @pytest.mark.asyncio
+    async def test_openai_chat_stream_records_usage(self) -> None:
+        """``chat_stream`` (used by agent_final) delegates to the raw stream
+        and therefore records usage too."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        stream = _FakeAsyncStream(
+            [_openai_chunk("done", usage=None)],
+            usage=SimpleNamespace(total_tokens=30),
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=stream)
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        text = "".join(
+            [
+                token
+                async for token in provider.chat_stream(
+                    [{"role": "user", "content": "hi"}], scenario="agent_final"
+                )
+            ]
+        )
+
+        assert text == "done"
+        assert get_token_usage()["agent_final"] == 30
+
+    @pytest.mark.asyncio
+    async def test_openai_no_usage_is_silent(self) -> None:
+        """A provider stream that reports no usage must not fail the stream."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        stream = _FakeAsyncStream(
+            [_openai_chunk("x", usage=None)], usage=None
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=stream)
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "x"}]
+        assert get_token_usage() == {}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_stream_usage_recorded(self) -> None:
+        from backend.service.llm_service import AnthropicProvider
+
+        provider = AnthropicProvider(api_key="k", model="claude-test")
+
+        class _TextEvent:
+            type = "content_block_delta"
+            index = 0
+            delta = SimpleNamespace(type="text_delta", text="hello")
+
+        class _StopEvent:
+            type = "message_stop"
+
+        class _FakeStream:
+            current_message_snapshot = SimpleNamespace(
+                usage=SimpleNamespace(input_tokens=100, output_tokens=50)
+            )
+
+            def __aiter__(self):
+                return self._iter()
+
+            async def _iter(self):
+                yield _TextEvent()
+                yield _StopEvent()
+
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=_FakeStream())
+        manager.__aexit__ = AsyncMock(return_value=False)
+        mock_client = MagicMock()
+        mock_client.messages.stream.return_value = manager
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "hello"}]
+        assert get_token_usage()["agent_chat"] == 150
+
+    @pytest.mark.asyncio
+    async def test_anthropic_no_usage_is_silent(self) -> None:
+        from backend.service.llm_service import AnthropicProvider
+
+        provider = AnthropicProvider(api_key="k", model="claude-test")
+
+        class _StopEvent:
+            type = "message_stop"
+
+        class _FakeStream:
+            # snapshot that never materialised (raises like the SDK property)
+            @property
+            def current_message_snapshot(self):
+                raise AssertionError("snapshot is None")
+
+            def __aiter__(self):
+                return self._iter()
+
+            async def _iter(self):
+                yield _StopEvent()
+
+        manager = MagicMock()
+        manager.__aenter__ = AsyncMock(return_value=_FakeStream())
+        manager.__aexit__ = AsyncMock(return_value=False)
+        mock_client = MagicMock()
+        mock_client.messages.stream.return_value = manager
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == []
+        assert get_token_usage() == {}

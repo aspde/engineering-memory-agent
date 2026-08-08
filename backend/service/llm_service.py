@@ -166,8 +166,10 @@ class OpenAICompatibleProvider(LLMProvider):
 
         The circuit breaker guards connection establishment; token
         iteration is not retried (an established stream is consumed once).
-        Token usage is not recorded on this path (streamed ``usage`` is
-        provider-inconsistent) — the non-streaming calls still report it.
+        Token usage is recorded when the provider returns it: the OpenAI
+        SDK surfaces usage on the stream object (or on the final chunk) once
+        the stream is fully consumed.  Providers whose stream carries no
+        usage are silently skipped — accounting never fails the stream.
         """
         scenario = pop_scenario(kwargs)
         kwargs.setdefault("temperature", self._temperature)
@@ -189,7 +191,9 @@ class OpenAICompatibleProvider(LLMProvider):
 
         tool_calls_map: dict[int, dict[str, str]] = {}
         tool_call_order: list[int] = []
+        last_chunk: Any = None
         async for chunk in response:
+            last_chunk = chunk
             choices = getattr(chunk, "choices", None)
             if not choices:
                 continue
@@ -210,6 +214,15 @@ class OpenAICompatibleProvider(LLMProvider):
                         tool_calls_map[idx]["name"] = tc.function.name
                     if tc.function.arguments:
                         tool_calls_map[idx]["arguments"] += tc.function.arguments
+
+        # After full consumption the SDK surfaces usage on the stream object
+        # (some versions) or on the final chunk (most versions); either way a
+        # missing usage just means this provider's stream didn't report it.
+        usage = getattr(response, "usage", None)
+        if usage is None and last_chunk is not None:
+            usage = getattr(last_chunk, "usage", None)
+        if usage is not None:
+            record_usage(scenario, usage)
 
         if tool_calls_map:
             tool_calls: list[dict[str, object]] = []
@@ -415,8 +428,11 @@ class AnthropicProvider(LLMProvider):
         ``messages.stream()`` is lazy, so the HTTP connection opens during
         iteration, not at call time.
 
-        Token usage is not recorded on this path (streamed ``usage`` is
-        provider-inconsistent) — the non-streaming calls still report it.
+        Token usage is recorded after the stream completes: Anthropic's
+        stream object accumulates the final ``Message`` (whose ``usage``
+        carries ``input_tokens``/``output_tokens``) as events are consumed.
+        Providers that omit usage are silently skipped — accounting never
+        fails the stream.
         """
         scenario = pop_scenario(kwargs)
         system, user_messages = self._split_messages(messages)
@@ -452,6 +468,17 @@ class AnthropicProvider(LLMProvider):
                             parts.append(delta.partial_json)
                     elif event.type == "message_stop":
                         break
+
+                # The final message snapshot (populated by ``message_stop``)
+                # carries the token usage.  Best-effort: a stream that never
+                # materialised the snapshot (or a provider that omits usage)
+                # must not fail the stream.
+                try:
+                    usage = getattr(stream.current_message_snapshot, "usage", None)
+                except Exception:
+                    usage = None
+                if usage is not None:
+                    record_usage(scenario, usage)
 
         if tool_buf:
             tool_calls: list[dict[str, object]] = []
