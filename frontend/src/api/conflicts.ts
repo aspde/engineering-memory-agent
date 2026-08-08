@@ -1,9 +1,24 @@
-import type { ConflictResolveResponse, PendingConflict } from '../types';
+import type {
+  ConflictReopenResponse,
+  ConflictResolveResponse,
+  PendingConflict,
+} from '../types';
 import { apiGet, apiPost } from './client';
 
-/** List unresolved memory conflicts awaiting a human decision. */
-async function getConflicts(): Promise<PendingConflict[]> {
-  return apiGet<PendingConflict[]>('/api/conflicts');
+interface GetConflictsParams {
+  conflict_type?: string;
+  status?: string;
+}
+
+/** List memory conflicts, optionally filtered by type and/or status. */
+async function getConflicts(
+  params?: GetConflictsParams,
+): Promise<PendingConflict[]> {
+  const searchParams = new URLSearchParams();
+  if (params?.conflict_type) searchParams.set('conflict_type', params.conflict_type);
+  if (params?.status) searchParams.set('status', params.status);
+  const qs = searchParams.toString();
+  return apiGet<PendingConflict[]>(`/api/conflicts${qs ? `?${qs}` : ''}`);
 }
 
 /** Resolve a pending conflict with one of keep_existing/overwrite/merge/keep_both. */
@@ -17,4 +32,12 @@ async function resolveConflict(
   );
 }
 
-export { getConflicts, resolveConflict };
+/** Reset a resolved patrol conflict to pending for re-arbitration. */
+async function reopenConflict(id: string): Promise<ConflictReopenResponse> {
+  return apiPost<ConflictReopenResponse>(
+    `/api/conflicts/${encodeURIComponent(id)}/reopen`,
+    {},
+  );
+}
+
+export { getConflicts, reopenConflict, resolveConflict };

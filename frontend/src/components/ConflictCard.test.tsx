@@ -85,4 +85,37 @@ describe('ConflictCard', () => {
       expect(btn).toBeDisabled();
     }
   });
+
+  it('re-words the card for patrol contradictions', () => {
+    render(
+      <ConflictCard
+        interrupt={createConflictInterrupt()}
+        onResume={vi.fn()}
+        variant="patrol"
+      />,
+    );
+
+    expect(screen.getByText('检测到记忆矛盾（巡检发现）')).toBeInTheDocument();
+    expect(screen.getByText('记忆 B')).toBeInTheDocument();
+    expect(screen.getByText('记忆 A')).toBeInTheDocument();
+    // The default ingestion wording is gone.
+    expect(screen.queryByText('检测到记忆冲突')).not.toBeInTheDocument();
+    expect(screen.queryByText('新记忆')).not.toBeInTheDocument();
+    expect(screen.queryByText('现有记忆')).not.toBeInTheDocument();
+  });
+
+  it('keeps the four options identical for patrol contradictions', () => {
+    render(
+      <ConflictCard
+        interrupt={createConflictInterrupt()}
+        onResume={vi.fn()}
+        variant="patrol"
+      />,
+    );
+
+    expect(screen.getByText(/保留现有/)).toBeInTheDocument();
+    expect(screen.getByText(/覆盖/)).toBeInTheDocument();
+    expect(screen.getByText(/合并/)).toBeInTheDocument();
+    expect(screen.getByText(/两者都保留/)).toBeInTheDocument();
+  });
 });

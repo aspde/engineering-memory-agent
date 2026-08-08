@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { dismissFinding, getPatrolLog, listPatrolLogs, triggerPatrol } from '../api/patrol';
+import {
+  dismissFinding,
+  getPatrolLog,
+  listPatrolLogs,
+  queuePatrolConflict,
+  triggerPatrol,
+} from '../api/patrol';
 import type { PatrolLogDetail, PatrolLogSummary, PatrolFinding } from '../types';
 
 const FINDING_GROUPS: Record<string, { label: string; color: string; emoji: string }> = {
@@ -19,6 +25,15 @@ const PATROL_TYPE_LABELS: Record<string, string> = {
   manual: '手动触发',
 };
 
+/** Normalized key for a contradiction finding: sorted memory pair, matching the
+ *  backend's LEAST/GREATEST dedup so (A,B) and (B,A) map to the same key. */
+function patrolFindingKey(f: PatrolFinding): string | null {
+  const a = String(f.memory_a_id ?? '');
+  const b = String(f.memory_b_id ?? '');
+  if (!a || !b) return null;
+  return [a, b].sort().join(':');
+}
+
 const PAGE_SIZE = 20;
 
 export default function PatrolPage() {
@@ -31,6 +46,9 @@ export default function PatrolPage() {
   const [detail, setDetail] = useState<PatrolLogDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
+  const [arbitratingKey, setArbitratingKey] = useState<string | null>(null);
+  const [arbitratedKeys, setArbitratedKeys] = useState<Set<string>>(new Set());
+  const [arbitrateError, setArbitrateError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string>('');
 
   const fetchLogs = useCallback(async (newOffset: number) => {
@@ -92,6 +110,45 @@ export default function PatrolPage() {
       // silently fail — user can retry
     }
   }, [selectedId]);
+
+  const handleArbitrate = useCallback(
+    async (finding: PatrolFinding, findingKey: string) => {
+      if (!selectedId) return;
+      const key = patrolFindingKey(finding);
+      if (!key) return;
+      setArbitratingKey(key);
+      setArbitrateError(null);
+      try {
+        const resp = await queuePatrolConflict(selectedId, finding);
+        setArbitratedKeys((prev) => new Set(prev).add(key));
+        if (resp.status === 'already_pending') {
+          setArbitrateError('该矛盾已在待处理列表中');
+        } else if (resp.status === 'already_resolved') {
+          setArbitrateError('该矛盾已仲裁过（两者都保留）');
+        }
+        // The finding has been handed off to the arbitration queue — dismiss it
+        // from the patrol so it stops showing as an open item.  Best-effort:
+        // a failed dismiss only leaves the card visible, user can re-dismiss.
+        try {
+          await dismissFinding(selectedId, findingKey);
+          setDismissedIds((prev) => new Set(prev).add(findingKey));
+        } catch {
+          // ignore — the arbitration already happened
+        }
+      } catch (err) {
+        setArbitrateError(
+          err instanceof Error && /409|conflict|Conflict/.test(err.message)
+            ? '该矛盾已处理或记忆已删除，可忽略'
+            : err instanceof Error
+              ? err.message
+              : '转入仲裁失败，请重试',
+        );
+      } finally {
+        setArbitratingKey(null);
+      }
+    },
+    [selectedId],
+  );
 
   const hasPrev = offset > 0;
   const hasNext = offset + logs.length < total;
@@ -258,6 +315,12 @@ export default function PatrolPage() {
               </p>
             </div>
 
+            {arbitrateError && (
+              <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
+                {arbitrateError}
+              </p>
+            )}
+
             {detail.findings && Object.keys(detail.findings).length > 0 ? (
               Object.entries(detail.findings).map(([groupKey, findings]) => {
                 const group = FINDING_GROUPS[groupKey];
@@ -271,6 +334,9 @@ export default function PatrolPage() {
                       {findings.map((f: PatrolFinding, i: number) => {
                         const fKey = f.id ? String(f.id) : `${groupKey}-${i}`;
                         const dismissed = dismissedIds.has(fKey);
+                        const arbitrateKey = patrolFindingKey(f);
+                        const arbitrated = arbitrateKey ? arbitratedKeys.has(arbitrateKey) : false;
+                        const isContradiction = groupKey === 'contradictions';
                         return (
                           <div
                             key={fKey}
@@ -289,18 +355,38 @@ export default function PatrolPage() {
                                   </p>
                                 )}
                               </div>
-                              <button
-                                type="button"
-                                onClick={() => handleDismiss(fKey)}
-                                disabled={dismissed}
-                                className={`shrink-0 text-xs px-2 py-0.5 rounded ${
-                                  dismissed
-                                    ? 'bg-gray-100 text-gray-400 cursor-default'
-                                    : 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-600'
-                                }`}
-                              >
-                                {dismissed ? '已忽略' : '忽略'}
-                              </button>
+                              <div className="flex shrink-0 items-center gap-1.5">
+                                {isContradiction && arbitrateKey && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleArbitrate(f, fKey)}
+                                    disabled={arbitrated || arbitratingKey === arbitrateKey}
+                                    className={`shrink-0 text-xs px-2 py-0.5 rounded ${
+                                      arbitrated
+                                        ? 'bg-orange-100 text-orange-400 cursor-default'
+                                        : 'bg-orange-50 text-orange-600 hover:bg-orange-100 disabled:opacity-50'
+                                    }`}
+                                  >
+                                    {arbitrated
+                                      ? '已转入仲裁'
+                                      : arbitratingKey === arbitrateKey
+                                        ? '处理中…'
+                                        : '转入仲裁'}
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleDismiss(fKey)}
+                                  disabled={dismissed}
+                                  className={`shrink-0 text-xs px-2 py-0.5 rounded ${
+                                    dismissed
+                                      ? 'bg-gray-100 text-gray-400 cursor-default'
+                                      : 'bg-gray-100 text-gray-500 hover:bg-red-50 hover:text-red-600'
+                                  }`}
+                                >
+                                  {dismissed ? '已忽略' : '忽略'}
+                                </button>
+                              </div>
                             </div>
                           </div>
                         );

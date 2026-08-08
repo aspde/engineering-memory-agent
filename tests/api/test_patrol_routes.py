@@ -1,4 +1,4 @@
-"""Tests for patrol API routes with mocked database."""
+"""Tests for patrol API routes."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import text
+
+from backend.db import get_session_factory
 
 
 @pytest.fixture
@@ -232,3 +236,182 @@ class TestDismissFinding:
             assert resp.status_code == 200
             data = resp.json()
             assert data["ok"] is True
+
+
+class TestQueuePatrolConflict:
+    """POST /api/patrol/findings/{log_id}/conflict"""
+
+    def test_queue_contradiction_returns_conflict_id(self, client):
+        """A contradiction finding is queued and its conflict id returned."""
+        mock_session = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.fetchone.return_value = MagicMock()  # log exists
+        mock_session.execute.return_value = exists_result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=factory,
+        ), patch(
+            "backend.api.routes.patrol_routes.persist_patrol_conflict",
+            new_callable=AsyncMock,
+        ) as mock_persist:
+            mock_persist.return_value = {
+                "id": "conflict-1",
+                "status": "queued",
+                "queued": True,
+            }
+            resp = client.post(
+                "/api/patrol/findings/log-1/conflict",
+                json={
+                    "memory_a_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    "memory_b_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+                    "severity": "warning",
+                },
+            )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["conflict_id"] == "conflict-1"
+            assert data["status"] == "queued"
+            mock_persist.assert_awaited_once()
+            finding = mock_persist.await_args.args[1]
+            assert finding["memory_a_id"] == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+
+    def test_queue_missing_log_returns_404(self, client):
+        """Queueing on a nonexistent log returns 404."""
+        mock_session = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.fetchone.return_value = None  # log missing
+        mock_session.execute.return_value = exists_result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=factory,
+        ):
+            resp = client.post(
+                "/api/patrol/findings/missing-log/conflict",
+                json={"memory_a_id": "a", "memory_b_id": "b"},
+            )
+            assert resp.status_code == 404
+
+    def test_queue_stale_finding_returns_409(self, client):
+        """A stale finding (memory deleted) is a 409, not a crash."""
+        mock_session = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.fetchone.return_value = MagicMock()  # log exists
+        mock_session.execute.return_value = exists_result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=factory,
+        ), patch(
+            "backend.api.routes.patrol_routes.persist_patrol_conflict",
+            new_callable=AsyncMock,
+            side_effect=ValueError("memory_a not found or already deleted"),
+        ):
+            resp = client.post(
+                "/api/patrol/findings/log-1/conflict",
+                json={"memory_a_id": "a", "memory_b_id": "b"},
+            )
+            assert resp.status_code == 409
+
+
+class TestDismissFindingRealDB:
+    """Real-DB regression: dismissal is keyed by *finding key*, not a UUID.
+
+    The LLM finding JSON carries no per-finding ``id``, so the frontend sends
+    keys like ``contradictions-0``.  The endpoint previously cast the key to
+    ``::uuid``, which Postgres rejects for non-UUID input → 500 on every real
+    dismiss.  The ``dismissed_findings`` column is TEXT[]; a non-UUID key must
+    append and persist cleanly.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _ensure_patrol_table(self) -> None:
+        from backend.db.schema import init_db
+
+        await init_db()
+
+    @pytest.fixture(autouse=True)
+    async def _clean_patrol_rows(self) -> None:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await session.execute(text("DELETE FROM patrol_logs"))
+            await session.commit()
+        yield
+
+    @pytest.fixture
+    async def patrol_log_id(self) -> str:
+        from uuid import uuid4
+
+        log_id = str(uuid4())
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """INSERT INTO patrol_logs
+                       (id, patrol_type, trigger, status, findings)
+                       VALUES (:id, 'weekly', 'cron', 'completed', :findings)"""
+                ),
+                {
+                    "id": log_id,
+                    "findings": json.dumps(
+                        {
+                            "contradictions": [
+                                {
+                                    "memory_a_id": "a",
+                                    "memory_b_id": "b",
+                                    "conflict_description": "opposite",
+                                }
+                            ]
+                        }
+                    ),
+                },
+            )
+            await session.commit()
+        return log_id
+
+    async def test_dismiss_with_non_uuid_finding_key_persists(
+        self, async_client: AsyncClient, patrol_log_id: str
+    ) -> None:
+        """A contradiction finding (no ``id`` → ``contradictions-0``) dismisses."""
+        resp = await async_client.post(
+            f"/api/patrol/findings/{patrol_log_id}/dismiss",
+            json={"finding_id": "contradictions-0"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        # The key is persisted and re-served by GET.
+        detail = await async_client.get(f"/api/patrol/logs/{patrol_log_id}")
+        assert detail.status_code == 200
+        assert detail.json()["dismissed_findings"] == ["contradictions-0"]
+
+    async def test_dismiss_is_idempotent_for_non_uuid_key(
+        self, async_client: AsyncClient, patrol_log_id: str
+    ) -> None:
+        """Re-dismissing the same finding key is a no-op, not a duplicate."""
+        for _ in range(2):
+            resp = await async_client.post(
+                f"/api/patrol/findings/{patrol_log_id}/dismiss",
+                json={"finding_id": "pattern_matches-1"},
+            )
+            assert resp.status_code == 200
+
+        detail = await async_client.get(f"/api/patrol/logs/{patrol_log_id}")
+        assert detail.json()["dismissed_findings"] == ["pattern_matches-1"]

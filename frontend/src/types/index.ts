@@ -238,12 +238,19 @@ export interface PendingConflict {
   status: string;
   resolution: string | null;
   created_at: string | null;
+  conflict_type?: string;
+  peer_id?: string | null;
 }
 
 export interface ConflictResolveResponse {
   id: string;
   resolution: string;
   outcome: Record<string, unknown>;
+}
+
+export interface ConflictReopenResponse {
+  id: string;
+  status: string;
 }
 
 // ── Connector API types ──────────────────────────────────────────────
@@ -301,7 +308,18 @@ export interface PatrolFinding {
   title?: string;
   description?: string;
   severity?: 'critical' | 'warning' | 'info';
+  memory_a_id?: string;
+  memory_a_summary?: string;
+  memory_b_id?: string;
+  memory_b_summary?: string;
+  conflict_description?: string;
   [key: string]: unknown;
+}
+
+export interface QueuePatrolConflictResponse {
+  conflict_id: string;
+  status: string;
+  message?: string | null;
 }
 
 export interface PatrolLogDetail {

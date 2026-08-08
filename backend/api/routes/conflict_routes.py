@@ -9,10 +9,15 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from backend.service.conflicts import list_pending_conflicts, resolve_pending_conflict
+from backend.service.conflicts import (
+    ConflictNotFoundError,
+    list_pending_conflicts,
+    reopen_patrol_conflict,
+    resolve_pending_conflict,
+)
 
 _RESOLUTIONS = {"keep_existing", "overwrite", "merge", "keep_both"}
 
@@ -29,6 +34,8 @@ class ConflictListItem(BaseModel):
     status: str
     resolution: str | None = None
     created_at: str | None = None
+    conflict_type: str = "ingestion"
+    peer_id: str | None = None
 
 
 class ConflictResolveRequest(BaseModel):
@@ -42,11 +49,19 @@ class ConflictResolveResponse(BaseModel):
 
 
 @router.get("", response_model=list[ConflictListItem])
-async def get_conflicts(limit: int = 50) -> list[ConflictListItem]:
-    """List unresolved memory conflicts awaiting a human decision."""
+async def get_conflicts(
+    limit: int = Query(default=50, ge=1, le=200),
+    conflict_type: str | None = Query(default=None),
+    status: str = Query(default="pending"),
+) -> list[ConflictListItem]:
+    """List memory conflicts. Defaults to unresolved; ``status="resolved"``
+    returns the arbitration ledger (used by the reopen surface for patrol
+    keep_both records)."""
     return [
         ConflictListItem(**item)
-        for item in await list_pending_conflicts(limit=limit)
+        for item in await list_pending_conflicts(
+            limit=limit, conflict_type=conflict_type, status=status
+        )
     ]
 
 
@@ -67,4 +82,29 @@ async def resolve_conflict(
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail=f"Conflict resolution error: {exc}"
+        ) from exc
+
+
+class ConflictReopenResponse(BaseModel):
+    id: str
+    status: str
+
+
+@router.post("/{conflict_id}/reopen", response_model=ConflictReopenResponse)
+async def reopen_conflict(conflict_id: str) -> ConflictReopenResponse:
+    """Reset a resolved *patrol* conflict to pending for re-arbitration.
+
+    Meaningful after a mistaken keep_both — both memories are still live, so
+    the pair can be re-arbitrated.  Refused when the losing memory (B) has
+    since been deleted or the row is not a resolved patrol conflict.
+    """
+    try:
+        return await reopen_patrol_conflict(conflict_id)
+    except ConflictNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"Conflict reopen error: {exc}"
         ) from exc

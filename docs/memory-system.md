@@ -75,6 +75,10 @@ extract_entities(content) ─┘
 
 检测到矛盾时，两种路径都进入人工处理（HITL），绝不静默丢弃：**agent 路径**通过 `interrupt()` 暂停对话等待选择；**webhook/连接器路径**没有交互会话，冲突内容落入 `pending_conflicts` 队列（保存 `_deferred` 载荷），由人通过 `GET/POST /api/conflicts` 用相同的四种选项（keep_existing / overwrite / merge / keep_both）经同一个 `resolve_conflict()` 解决。队列对同一冲突（同一 `existing_id` + 同一内容哈希）只保留一条 pending 记录——webhook 至少一次投递的重放不会堆叠重复行；已解决的行离开去重范围，同类内容再次出现会正常重新入队。
 
+**巡检矛盾**是第三条来源（`conflict_type='patrol'`）：每周巡检的全量矛盾扫描发现两条**都已在库**的记忆（A、B）结论相反，但写入时检测没拦住（embedding 距离远、或检测上线前就存在的旧矛盾）。这类矛盾由 Patrol 页手动逐条「转入仲裁」（入队成功自动忽略该 finding），入队到同一个 `pending_conflicts` 队列，`peer_id` 列记录被放弃方（B），`_deferred` 载荷把 B 的完整内容作为"新侧"。解析走独立的 `resolve_patrol_conflict()`——四选项语义重解释为「保留侧 A + 被放弃方 B」：keep_existing / overwrite / merge 都软删 B（`memories.deleted_at`），B 从检索与巡检中消失，矛盾不再重报；keep_both 不改任何记忆行，靠队列里已 resolved 的记录抑制重复入队。`resolve_pending_conflict` 按 `conflict_type` 分派两条流水线，仍是同一个裁决出口。
+
+已仲裁的巡检对子（`status='resolved'`）可通过 `GET /api/conflicts?status=resolved&conflict_type=patrol` 查看台账，误选的 keep_both 可用 `POST /api/conflicts/{id}/reopen` 重置回待处理重新仲裁——仅 patrol 冲突可重新打开，且被放弃方 B 仍存活时才允许（keep_existing / overwrite / merge 已软删 B，重开会在缺失记忆上仲裁，故拒绝）。
+
 ### 4. 艾宾浩斯遗忘衰减
 
 衰减因子是一条**时间连续曲线**，检索时实时计算，不依赖存储快照：

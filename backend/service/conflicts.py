@@ -6,6 +6,14 @@ session, so a conflict detected during ingestion is persisted here and
 resolved later by a human through the *same* ``resolve_conflict()`` — the
 four options and their semantics are identical:
 keep_existing / overwrite / merge / keep_both.
+
+Patrol (weekly inspection) contradictions are a second source: two
+*already-stored* memories (A, B) that the patrol LLM found to contradict
+each other.  They are queued manually (one click per finding from the
+Patrol page) with ``conflict_type='patrol'``, and resolved by
+``resolve_patrol_conflict`` — same four options, re-interpreted for two
+stored memories where B loses the arbitration (soft-deleted via
+``memories.deleted_at``) and A survives.
 """
 
 from __future__ import annotations
@@ -15,9 +23,17 @@ import logging
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from backend.db import get_session_factory
-from backend.service.memory import resolve_conflict
+from backend.service.embedding_service import get_embedding_provider
+from backend.service.memory import (
+    _merge_entities,
+    _merge_relations,
+    _find_by_content_hash,
+    resolve_conflict,
+)
+from backend.service.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -103,22 +119,39 @@ async def persist_pending_conflict(source: str, result: dict[str, Any]) -> dict[
     }
 
 
-async def list_pending_conflicts(limit: int = 50) -> list[dict[str, Any]]:
-    """Return unresolved conflicts, newest first."""
+async def list_pending_conflicts(
+    limit: int = 50,
+    conflict_type: str | None = None,
+    status: str = "pending",
+) -> list[dict[str, Any]]:
+    """Return conflicts, newest first.
+
+    Defaults to unresolved rows; pass ``status="resolved"`` for the arbitration
+    ledger (used by the "reopen" surface for patrol keep_both records).  An
+    optional ``conflict_type`` narrows to ``ingestion`` or ``patrol`` rows.
+    """
+    conditions = ["status = :status"]
+    params: dict[str, Any] = {"status": status, "limit": limit}
+    if conflict_type:
+        conditions.append("conflict_type = :conflict_type")
+        params["conflict_type"] = conflict_type
+    where_clause = " AND ".join(conditions)
+
     session_factory = get_session_factory()
     async with session_factory() as session:
         result = await session.execute(
             text(
-                """\
+                f"""\
                 SELECT id, source, source_type, existing_id, existing_summary,
-                       new_summary, status, resolution, created_at
+                       new_summary, status, resolution, created_at,
+                       conflict_type, peer_id
                 FROM pending_conflicts
-                WHERE status = 'pending'
+                WHERE {where_clause}
                 ORDER BY created_at DESC
                 LIMIT :limit
                 """
             ),
-            {"limit": limit},
+            params,
         )
         rows = result.fetchall()
 
@@ -133,6 +166,8 @@ async def list_pending_conflicts(limit: int = 50) -> list[dict[str, Any]]:
             "status": r.status,
             "resolution": r.resolution,
             "created_at": r.created_at.isoformat() if r.created_at else None,
+            "conflict_type": r.conflict_type,
+            "peer_id": str(r.peer_id) if r.peer_id else None,
         }
         for r in rows
     ]
@@ -156,7 +191,7 @@ async def resolve_pending_conflict(
         row = await session.execute(
             text(
                 """\
-                SELECT existing_id, deferred, status
+                SELECT existing_id, deferred, status, conflict_type, peer_id
                 FROM pending_conflicts WHERE id = :id
                 """
             ),
@@ -176,8 +211,17 @@ async def resolve_pending_conflict(
     if isinstance(deferred, str):
         deferred = json.loads(deferred)
 
-    # Same pipeline the agent HITL uses — identical options & semantics.
-    outcome = await resolve_conflict(resolution, existing_id, deferred)
+    # Route by conflict shape: ingestion conflicts (existing in store + new
+    # not yet written) go through the shared resolve_conflict pipeline;
+    # patrol contradictions (both memories already stored) resolve via the
+    # patrol pipeline that soft-deletes the losing side (B).  Both mark the
+    # row resolved below — one unified arbitration exit.
+    if conflict.conflict_type == "patrol":
+        outcome = await resolve_patrol_conflict(
+            resolution, existing_id, str(conflict.peer_id) if conflict.peer_id else "", deferred
+        )
+    else:
+        outcome = await resolve_conflict(resolution, existing_id, deferred)
 
     async with session_factory() as session:
         await session.execute(
@@ -199,3 +243,497 @@ async def resolve_pending_conflict(
         "resolution": resolution,
         "outcome": outcome,
     }
+
+
+async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[str, Any]:
+    """Queue a patrol contradiction for later HITL arbitration.
+
+    Patrol contradictions are two *already-stored* memories (A, B).  ``finding``
+    carries ``memory_a_id`` / ``memory_b_id``; the full rows are re-read from
+    the store so the ``deferred`` payload (needed by ``resolve_patrol_conflict``)
+    is self-contained and immutable — the memories may change while the
+    conflict sits in the queue.
+
+    A is the surviving side (``existing_id``) and B the losing side
+    (``peer_id``): keep_existing/overwrite/merge soft-delete B.  Users who
+    prefer B over A express it via overwrite (B's content replaces A's) or
+    merge (both folded into A) — the four options cover both directions.
+
+    Returns ``{"id", "status", "queued", ...}`` where status is one of
+    ``"queued"``, ``"already_pending"`` (same pair already in the queue), or
+    ``"already_resolved"`` (this pair was arbitrated before and both memories
+    are still live — i.e. the prior choice was keep_both).
+    """
+    a_id = str(finding.get("memory_a_id") or "").strip()
+    b_id = str(finding.get("memory_b_id") or "").strip()
+    if not a_id or not b_id:
+        raise ValueError("Patrol finding missing memory_a_id or memory_b_id")
+    if a_id == b_id:
+        raise ValueError("Patrol finding memory_a_id and memory_b_id must differ")
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        rows = await session.execute(
+            text(
+                """\
+                SELECT id, summary, entities, relations, embedding, source_type,
+                       meta, content_hash
+                FROM memories
+                WHERE id IN (:a_id, :b_id) AND deleted_at IS NULL
+                """
+            ),
+            {"a_id": a_id, "b_id": b_id},
+        )
+        stored = {str(r.id): dict(r._mapping) for r in rows.fetchall()}
+        memory_a = stored.get(a_id)
+        memory_b = stored.get(b_id)
+
+    if memory_a is None or memory_b is None:
+        raise ValueError(
+            "memory_a or memory_b not found or already deleted — patrol finding is stale"
+        )
+    if memory_a.get("embedding") is None or memory_b.get("embedding") is None:
+        raise ValueError(
+            "memory_a or memory_b has no embedding — cannot arbitrate; re-embed the memories first"
+        )
+
+    # ── Already-arbitrated check (keep_both record) ─────────────────────
+    # Resolved rows leave the partial unique index, so a re-run of the same
+    # pair must be suppressed explicitly.  Both memories being live (verified
+    # above) means the prior resolution did not soft-delete B → keep_both.
+    async with session_factory() as session:
+        resolved = await session.execute(
+            text(
+                """\
+                SELECT id FROM pending_conflicts
+                WHERE conflict_type = 'patrol' AND status = 'resolved'
+                  AND LEAST(existing_id, peer_id) = :lo
+                  AND GREATEST(existing_id, peer_id) = :hi
+                LIMIT 1
+                """
+            ),
+            {
+                "lo": min(a_id, b_id),
+                "hi": max(a_id, b_id),
+            },
+        )
+        resolved_row = resolved.fetchone()
+    if resolved_row is not None:
+        logger.info(
+            "Patrol conflict (%s, %s) already arbitrated as %s — skipping",
+            a_id,
+            b_id,
+            resolved_row[0],
+        )
+        return {
+            "id": str(resolved_row[0]),
+            "status": "already_resolved",
+            "queued": False,
+        }
+
+    deferred = {
+        "kind": "patrol",
+        "extracted": {
+            "summary": memory_b["summary"],
+            "entities": _as_list(memory_b.get("entities")),
+            "relations": _as_list(memory_b.get("relations")),
+        },
+        "embedding": str(memory_b["embedding"]),
+        "source_type": memory_b.get("source_type"),
+        "metadata": {
+            "conflicts_with": a_id,
+            "conflicting_summary": memory_a["summary"],
+            "peer_id": b_id,
+            "peer_summary": memory_b["summary"],
+            "conflict_description": finding.get("conflict_description", ""),
+            "severity": finding.get("severity", "info"),
+            "patrol_log_id": log_id,
+        },
+        "content_hash": memory_b.get("content_hash"),
+    }
+
+    new_summary = memory_b["summary"]
+    existing_summary = memory_a["summary"]
+    async with session_factory() as session:
+        row = await session.execute(
+            text(
+                """\
+                INSERT INTO pending_conflicts
+                    (source, source_type, existing_id, existing_summary,
+                     new_summary, deferred, conflict_type, peer_id)
+                VALUES
+                    ('patrol', :source_type, :existing_id, :existing_summary,
+                     :new_summary, :deferred ::jsonb, 'patrol', :peer_id)
+                ON CONFLICT DO NOTHING
+                RETURNING id, created_at
+                """
+            ),
+            {
+                "source_type": memory_b.get("source_type"),
+                "existing_id": a_id,
+                "existing_summary": existing_summary,
+                "new_summary": new_summary,
+                "deferred": json.dumps(deferred, ensure_ascii=False),
+                "peer_id": b_id,
+            },
+        )
+        new_row = row.fetchone()
+        already_pending = False
+        if new_row is None:
+            # Same pair already queued (unique patrol-pair index rejected our
+            # insert) — return the pending row instead of stacking a duplicate.
+            already_pending = True
+            existing = await session.execute(
+                text(
+                    """\
+                    SELECT id, created_at FROM pending_conflicts
+                    WHERE conflict_type = 'patrol' AND status = 'pending'
+                      AND LEAST(existing_id, peer_id) = :lo
+                      AND GREATEST(existing_id, peer_id) = :hi
+                    ORDER BY created_at
+                    LIMIT 1
+                    """
+                ),
+                {
+                    "lo": min(a_id, b_id),
+                    "hi": max(a_id, b_id),
+                },
+            )
+            new_row = existing.fetchone()
+        await session.commit()
+        if new_row is None:  # duplicate resolved concurrently — retry is safe
+            raise RuntimeError(
+                "Conflict already queued and resolved concurrently; please retry"
+            )
+
+    logger.info(
+        "Persisted patrol conflict (a=%s, b=%s) as %s",
+        a_id,
+        b_id,
+        new_row[0],
+    )
+    return {
+        "id": str(new_row[0]),
+        "source": "patrol",
+        "status": "already_pending" if already_pending else "queued",
+        "queued": not already_pending,
+        "created_at": new_row[1].isoformat() if new_row[1] else None,
+    }
+
+
+async def _require_live_memory(
+    session: Any, memory_id: str, role: str
+) -> None:
+    """Raise ValueError unless *memory_id* is a live (non-deleted) memory row.
+
+    Patrol arbitration resolves against two *already-stored* memories; if the
+    surviving side (A) was deleted while the conflict sat in the queue, every
+    resolution is meaningless — keep_both would bless a dead pair, and
+    overwrite/merge/keep_existing would report success against a gone row.
+    """
+    row = await session.execute(
+        text("SELECT id FROM memories WHERE id = :id AND deleted_at IS NULL"),
+        {"id": memory_id},
+    )
+    if row.fetchone() is None:
+        raise ValueError(
+            f"{role.capitalize()} memory {memory_id} no longer exists"
+        )
+
+
+async def resolve_patrol_conflict(
+    resolution: str,
+    existing_id: str,
+    peer_id: str,
+    deferred_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve a patrol contradiction per the human's decision.
+
+    Both memories are already stored: ``existing_id`` (A) survives, ``peer_id``
+    (B) loses the arbitration.  keep_existing/overwrite/merge soft-delete B;
+    keep_both leaves both rows untouched (arbitration is a "both stay" record —
+    the resolved row in ``pending_conflicts`` suppresses re-queueing).
+
+    Independent of ``resolve_conflict``: patrol's B is already in the store, so
+    that pipeline's keep_both would re-insert it (colliding on the content-hash
+    unique index), and overwrite/merge must soft-delete B *inside the same
+    transaction* before re-pointing A's content_hash at B's (the unique index
+    is per-statement, so B must be gone before A adopts its hash).
+    """
+    extracted = deferred_payload["extracted"]
+    embedding = deferred_payload["embedding"]
+    metadata = deferred_payload.get("metadata") or {}
+    content_hash = deferred_payload.get("content_hash")
+
+    # The surviving side (A) must still be live before any resolution is
+    # applied (see ``_require_live_memory``).  overwrite/merge additionally
+    # check the affected-row count in the write transaction to close the race
+    # with a concurrent deletion.
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        await _require_live_memory(session, existing_id, "surviving")
+
+    if resolution == "keep_existing":
+        # A survives unchanged; B is dropped.
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE memories SET deleted_at = NOW() WHERE id = :id AND deleted_at IS NULL"
+                ),
+                {"id": peer_id},
+            )
+            await session.commit()
+        return {
+            "id": existing_id,
+            "action": "conflict_resolved",
+            "resolution": "keep_existing",
+        }
+
+    elif resolution == "overwrite":
+        try:
+            # Soft-delete B BEFORE updating A: A adopts B's content_hash, and
+            # the live-content-hash unique index is enforced per statement —
+            # B must be gone before A takes its hash.  Same transaction, so a
+            # failure rolls both back.
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        "UPDATE memories SET deleted_at = NOW() WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": peer_id},
+                )
+                result = await session.execute(
+                    text(
+                        """\
+                        UPDATE memories
+                        SET summary = :summary,
+                            entities = :entities,
+                            relations = :relations,
+                            embedding = :embedding,
+                            meta = :meta,
+                            content_hash = :content_hash,
+                            updated_at = NOW()
+                        WHERE id = :id AND deleted_at IS NULL
+                        """
+                    ),
+                    {
+                        "id": existing_id,
+                        "summary": extracted["summary"],
+                        "entities": json.dumps(_as_list(extracted.get("entities")), ensure_ascii=False),
+                        "relations": json.dumps(_as_list(extracted.get("relations")), ensure_ascii=False),
+                        "embedding": str(embedding),
+                        "meta": json.dumps(metadata or {}),
+                        "content_hash": content_hash,
+                    },
+                )
+                if result.rowcount != 1:
+                    raise ValueError(
+                        f"Surviving memory {existing_id} no longer exists"
+                    )
+                await session.commit()
+        except IntegrityError:
+            winner = await _find_by_content_hash(content_hash, get_session_factory())
+            if winner is None:
+                raise
+            logger.info(
+                "Overwrite lost content-hash race for %s — content already stored as %s",
+                content_hash[:12] if content_hash else "?",
+                winner["id"],
+            )
+            return {
+                "id": str(winner["id"]),
+                "action": "duplicate",
+                "resolution": "overwrite",
+                "summary": winner["summary"],
+            }
+        return {
+            "id": existing_id,
+            "action": "conflict_resolved",
+            "resolution": "overwrite",
+        }
+
+    elif resolution == "merge":
+        # Read A's current content, LLM-merge with B (extracted), re-embed —
+        # all outside the transaction (LLM + provider calls must not hold a
+        # DB session).  Then one transaction: soft-delete B, write A.
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            result = await session.execute(
+                text(
+                    "SELECT summary, entities, relations FROM memories WHERE id = :id"
+                ),
+                {"id": existing_id},
+            )
+            row = result.fetchone()
+        if row:
+            existing_summary = row[0]
+            existing_entities = _as_list(row[1])
+            existing_relations = _as_list(row[2])
+        else:
+            existing_summary = extracted["summary"]
+            existing_entities = []
+            existing_relations = []
+
+        from backend.service.llm_service import get_llm_provider
+
+        try:
+            llm = get_llm_provider()
+            version, prompt = get_prompt("memory.merge")
+            logger.debug("resolve_patrol_conflict(merge): using prompt memory.merge v%s", version)
+            prompt = prompt.format(
+                existing_summary=existing_summary,
+                new_summary=extracted["summary"],
+            )
+            merged_summary = (await llm.chat([{"role": "user", "content": prompt}], scenario="memory_merge")).strip()
+        except Exception:
+            merged_summary = extracted["summary"]
+
+        merged_entities = _merge_entities(existing_entities, extracted.get("entities"))
+        merged_relations = _merge_relations(existing_relations, extracted.get("relations"))
+
+        vectors = await get_embedding_provider().embed([merged_summary.strip()])
+        merged_embedding = vectors[0]
+
+        try:
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        "UPDATE memories SET deleted_at = NOW() WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": peer_id},
+                )
+                result = await session.execute(
+                    text(
+                        """\
+                        UPDATE memories
+                        SET summary = :summary,
+                            entities = :entities,
+                            relations = :relations,
+                            embedding = :embedding,
+                            meta = :meta,
+                            content_hash = :content_hash,
+                            updated_at = NOW()
+                        WHERE id = :id AND deleted_at IS NULL
+                        """
+                    ),
+                    {
+                        "id": existing_id,
+                        "summary": merged_summary.strip(),
+                        "entities": json.dumps(merged_entities, ensure_ascii=False),
+                        "relations": json.dumps(merged_relations, ensure_ascii=False),
+                        "embedding": str(merged_embedding),
+                        "meta": json.dumps(metadata or {}),
+                        "content_hash": content_hash,
+                    },
+                )
+                if result.rowcount != 1:
+                    raise ValueError(
+                        f"Surviving memory {existing_id} no longer exists"
+                    )
+                await session.commit()
+        except IntegrityError:
+            winner = await _find_by_content_hash(content_hash, get_session_factory())
+            if winner is None:
+                raise
+            logger.info(
+                "Merge lost content-hash race for %s — content already stored as %s",
+                content_hash[:12] if content_hash else "?",
+                winner["id"],
+            )
+            return {
+                "id": str(winner["id"]),
+                "action": "duplicate",
+                "resolution": "merge",
+                "summary": winner["summary"],
+            }
+        return {
+            "id": existing_id,
+            "action": "conflict_resolved",
+            "resolution": "merge",
+        }
+
+    elif resolution == "keep_both":
+        # Both memories stay — the arbitration record is the resolved row
+        # written by resolve_pending_conflict; re-queueing the pair is
+        # suppressed by the already-arbitrated check in persist_patrol_conflict.
+        return {
+            "id": existing_id,
+            "action": "conflict_resolved",
+            "resolution": "keep_both",
+        }
+
+    raise ValueError(
+        f"Unknown resolution: {resolution} — expected one of {sorted(_RESOLUTIONS)}"
+    )
+
+
+class ConflictNotFoundError(ValueError):
+    """Raised when a conflict row does not exist (maps to 404, not 409)."""
+
+
+async def reopen_patrol_conflict(conflict_id: str) -> dict[str, Any]:
+    """Reset a resolved *patrol* conflict to pending for re-arbitration.
+
+    Only patrol conflicts can be reopened, and only when both participating
+    memories are still live.  The meaningful case is a mistaken keep_both:
+    both memories survived, so re-arbitration is safe.  keep_existing/
+    overwrite/merge already soft-deleted B, so reopening would resolve against
+    a gone memory — refused.  Likewise if A was deleted separately while the
+    conflict sat resolved.
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        row = await session.execute(
+            text(
+                """\
+                SELECT existing_id, peer_id, status, conflict_type
+                FROM pending_conflicts WHERE id = :id
+                """
+            ),
+            {"id": conflict_id},
+        )
+        conflict = row.fetchone()
+        if conflict is None:
+            raise ConflictNotFoundError(f"Pending conflict {conflict_id} not found")
+        if conflict.status != "resolved":
+            raise ValueError(f"Conflict {conflict_id} is not resolved; nothing to reopen")
+        if conflict.conflict_type != "patrol":
+            raise ValueError(f"Conflict {conflict_id} is not a patrol conflict")
+
+        # Re-arbitration resolves against two *live* memories; either side
+        # deleted makes it meaningless.
+        await _require_live_memory(session, str(conflict.existing_id), "surviving")
+
+        peer_id = str(conflict.peer_id) if conflict.peer_id else ""
+        if peer_id:
+            await _require_live_memory(session, peer_id, "losing")
+
+        await session.execute(
+            text(
+                """\
+                UPDATE pending_conflicts
+                SET status = 'pending', resolution = NULL, resolved_at = NULL
+                WHERE id = :id
+                """
+            ),
+            {"id": conflict_id},
+        )
+        await session.commit()
+
+    logger.info("Reopened patrol conflict %s for re-arbitration", conflict_id)
+    return {"id": conflict_id, "status": "pending"}
+
+
+def _as_list(value: Any) -> list[Any]:
+    """Tolerate JSONB column forms (parsed list, raw JSON string, or None)."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return []
+        return parsed if isinstance(parsed, list) else []
+    return []

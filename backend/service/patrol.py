@@ -20,7 +20,7 @@ from backend.service.patrol_prompts import (
     JIRA_RESOLVED_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )
-from backend.shared.config import config, current_thread_id
+from backend.shared.config import config, current_thread_id, current_trace_id
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +182,8 @@ async def run_patrol(
         # Use a dedicated thread_id to isolate patrol from user conversations
         patrol_thread_id = f"patrol-{patrol_id}"
         token = current_thread_id.set(patrol_thread_id)
+        # Link every LLM call in this patrol run to the patrol's own trace id.
+        trace_token = current_trace_id.set(patrol_id)
 
         try:
             agent = get_agent()
@@ -220,6 +222,7 @@ async def run_patrol(
                         break
         finally:
             current_thread_id.reset(token)
+            current_trace_id.reset(trace_token)
 
     except Exception as exc:
         logger.exception("Patrol %s (%s) failed", patrol_id, patrol_type)

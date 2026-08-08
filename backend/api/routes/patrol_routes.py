@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
+from backend.service.conflicts import persist_patrol_conflict
 from backend.service.patrol import (
     VALID_PATROL_TYPES,
     get_patrol_prompt,
@@ -38,6 +39,12 @@ class PatrolTriggerResponse(BaseModel):
 
 class FindingDismissRequest(BaseModel):
     finding_id: str
+
+
+class PatrolConflictQueueResponse(BaseModel):
+    conflict_id: str
+    status: str = "queued"
+    message: str | None = None
 
 
 class PatrolLogSummary(BaseModel):
@@ -218,7 +225,13 @@ async def get_patrol_log(log_id: str):
 
 @router.post("/findings/{log_id}/dismiss")
 async def dismiss_finding(log_id: str, body: FindingDismissRequest):
-    """Mark a finding as dismissed (adds finding_id to dismissed_findings array)."""
+    """Mark a finding as dismissed (adds its key to dismissed_findings array).
+
+    ``finding_id`` is a *finding key*, not a memory UUID — the patrol finding
+    JSON carries no per-finding id, so the frontend keys dismissals by
+    ``<group>-<index>`` (and contradiction findings by their memory pair).
+    The column is TEXT[]; append is idempotent via the containment check.
+    """
     session_factory = get_session_factory()
     async with session_factory() as session:
         # Verify the log exists
@@ -234,14 +247,53 @@ async def dismiss_finding(log_id: str, body: FindingDismissRequest):
             text(
                 """UPDATE patrol_logs
                    SET dismissed_findings = array_append(
-                       COALESCE(dismissed_findings, ARRAY[]::uuid[]),
-                       :finding_id::uuid
+                       COALESCE(dismissed_findings, ARRAY[]::text[]),
+                       :finding_id
                    )
                    WHERE id = :id
-                     AND NOT (:finding_id::uuid = ANY(COALESCE(dismissed_findings, ARRAY[]::uuid[])))"""
+                     AND NOT (:finding_id = ANY(COALESCE(dismissed_findings, ARRAY[]::text[])))"""
             ),
             {"id": log_id, "finding_id": body.finding_id},
         )
         await session.commit()
 
     return {"ok": True, "log_id": log_id, "dismissed_finding_id": body.finding_id}
+
+
+@router.post("/findings/{log_id}/conflict", response_model=PatrolConflictQueueResponse)
+async def queue_patrol_conflict(log_id: str, finding: dict[str, Any]):
+    """Queue a patrol contradiction finding for HITL arbitration.
+
+    The finding is keyed by its memory pair (memory_a_id / memory_b_id) rather
+    than a finding index — contradictions carry no id, and an index would drift
+    as findings change.  The memory pair is the stable key, matching the
+    backend's unordered-pair dedup.  Returns the queued conflict row (or the
+    already-queued / already-arbitrated row for duplicates).
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        exists = await session.execute(
+            text("SELECT id FROM patrol_logs WHERE id = :id"),
+            {"id": log_id},
+        )
+        if exists.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Patrol log not found")
+
+    try:
+        queued = await persist_patrol_conflict(log_id, finding)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return PatrolConflictQueueResponse(
+        conflict_id=queued["id"],
+        status=queued["status"],
+        message=(
+            None
+            if queued["status"] == "queued"
+            else (
+                "该矛盾已在待处理列表中"
+                if queued["status"] == "already_pending"
+                else "该矛盾已仲裁过（两者都保留）"
+            )
+        ),
+    )

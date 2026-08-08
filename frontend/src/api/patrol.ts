@@ -1,8 +1,10 @@
 import { apiGet, apiPost } from './client';
 import type {
   DismissFindingResponse,
+  PatrolFinding,
   PatrolLogDetail,
   PatrolLogList,
+  QueuePatrolConflictResponse,
   TriggerPatrolRequest,
   TriggerPatrolResponse,
 } from '../types';
@@ -37,5 +39,16 @@ export function dismissFinding(
   return apiPost<DismissFindingResponse>(
     `/api/patrol/findings/${logId}/dismiss`,
     { finding_id: findingId },
+  );
+}
+
+/** Queue a patrol contradiction finding for HITL arbitration. */
+export function queuePatrolConflict(
+  logId: string,
+  finding: PatrolFinding,
+): Promise<QueuePatrolConflictResponse> {
+  return apiPost<QueuePatrolConflictResponse>(
+    `/api/patrol/findings/${logId}/conflict`,
+    finding,
   );
 }

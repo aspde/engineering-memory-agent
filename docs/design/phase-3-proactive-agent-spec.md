@@ -136,7 +136,7 @@ CREATE TABLE patrol_logs (
     trigger TEXT NOT NULL,            -- cron | webhook | manual
     status TEXT NOT NULL DEFAULT 'running',  -- running | completed | failed
     findings JSONB,                   -- 结构化巡检结果
-    dismissed_findings UUID[],        -- 用户已忽略的 finding IDs
+    dismissed_findings TEXT[],         -- 用户已忽略的 finding 键（<group>-<index>，矛盾用 memory 对）
     started_at TIMESTAMPTZ DEFAULT now(),
     completed_at TIMESTAMPTZ
 );
