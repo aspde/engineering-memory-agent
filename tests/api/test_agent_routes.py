@@ -21,7 +21,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -46,7 +46,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -68,7 +68,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -90,7 +90,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -121,7 +121,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -146,7 +146,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -174,7 +174,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
         monkeypatch.setattr(agent_config, "agent_timeout", 0.1)
 
@@ -204,7 +204,7 @@ class TestAgentChat:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -301,7 +301,7 @@ class TestAgentChatHITL:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -329,7 +329,7 @@ class TestAgentChatHITL:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -366,7 +366,7 @@ class TestAgentChatHITL:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -396,7 +396,7 @@ class TestAgentChatHITL:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -478,35 +478,8 @@ class TestDeleteThread:
         assert "not found" in data["detail"].lower()
 
 
-class TestStreamFinalAnswer:
-    """Tests for the SSE final-answer replay helper."""
-
-    @pytest.mark.asyncio
-    async def test_stops_when_client_disconnected(self) -> None:
-        """A disconnected SSE client aborts token replay immediately."""
-        from backend.api.routes.agent_routes import _stream_final_answer
-
-        class _Disconnected:
-            async def is_disconnected(self) -> bool:
-                return True
-
-        chunks = [c async for c in _stream_final_answer(_Disconnected(), "hello world")]
-        assert chunks == []
-
-    @pytest.mark.asyncio
-    async def test_yields_all_chunks_when_connected(self) -> None:
-        """While connected, every 4-char chunk is streamed."""
-        import json
-
-        from backend.api.routes.agent_routes import _stream_final_answer
-
-        class _Connected:
-            async def is_disconnected(self) -> bool:
-                return False
-
-        chunks = [c async for c in _stream_final_answer(_Connected(), "hello world")]
-        assert len(chunks) == 3  # "hell", "o wo", "rld"
-        assert json.loads(chunks[0].split("data: ", 1)[1])["content"] == "hell"
+class TestAgentStream:
+    """Tests for the /api/agent/chat/stream SSE route (first run and resume)."""
 
     @pytest.mark.asyncio
     async def test_llm_error_token_reaches_sse_client(
@@ -534,7 +507,7 @@ class TestStreamFinalAnswer:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -563,7 +536,7 @@ class TestStreamFinalAnswer:
 
         monkeypatch.setattr(
             "backend.api.routes.agent_routes.get_agent_for_thread",
-            lambda: mock_agent,
+            lambda *a, **k: mock_agent,
         )
 
         response = await async_client.post(
@@ -573,3 +546,97 @@ class TestStreamFinalAnswer:
         assert response.status_code == 200
         assert '"type": "error"' in response.text
         assert "secret-db-url" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_stream_resume_yields_live_tokens(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """Resume streams real token deltas through the same custom-stream
+        pipeline as a new message (not a replayed final answer)."""
+        from unittest.mock import AsyncMock
+
+        from langgraph.types import Command
+
+        mock_agent = AsyncMock()
+
+        astream_calls: list = []
+
+        async def _astream(*args, **kwargs):
+            astream_calls.append((args, kwargs))
+            yield (), "updates", {"check_approval": None}
+            yield (), "custom", {"type": "token", "content": "记忆"}
+            yield (), "custom", {"type": "token", "content": "已写入。"}
+            yield (), "updates", {"generate_final": {"final_response": "记忆已写入。"}}
+
+        mock_agent.astream = _astream
+        mock_agent.aget_state.return_value = None
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={
+                "message": "",
+                "thread_id": "test-hitl-1",
+                "resume_data": {"approved": True},
+            },
+        )
+        assert response.status_code == 200
+        assert '"type": "token"' in response.text
+        assert "记忆" in response.text
+        assert "已写入。" in response.text
+
+        # Resume must drive the graph via Command(resume=...), not ainvoke.
+        call_args, call_kwargs = astream_calls[0]
+        arg = call_args[0]
+        assert isinstance(arg, Command)
+        assert arg.resume == {"approved": True}
+        assert call_kwargs["stream_mode"] == ["updates", "custom"]
+
+    @pytest.mark.asyncio
+    async def test_stream_resume_second_interrupt(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A resume that hits another interrupt surfaces it as an SSE event and
+        stops the stream (no stale tokens after the interrupt)."""
+        from unittest.mock import AsyncMock
+
+        from langgraph.types import Interrupt
+
+        mock_agent = AsyncMock()
+
+        async def _astream(*args, **kwargs):
+            yield (), "updates", {"check_conflict": None}
+            yield (), "updates", {
+                "__interrupt__": (
+                    Interrupt(
+                        value={"type": "conflict", "new_summary": "new"},
+                    ),
+                ),
+            }
+            yield (), "custom", {"type": "token", "content": "IGNORED"}
+
+        mock_agent.astream = _astream
+        mock_agent.aget_state.return_value = None
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={
+                "message": "",
+                "thread_id": "test-hitl-1",
+                "resume_data": {"resolution": "merge"},
+            },
+        )
+        assert response.status_code == 200
+        assert '"type": "interrupt"' in response.text
+        assert '"type": "conflict"' in response.text
+        # Stream returns at the interrupt — the trailing token never reaches the client.
+        assert "IGNORED" not in response.text

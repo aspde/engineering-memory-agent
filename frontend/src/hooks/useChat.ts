@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
-import { chatNonStream, chatStream } from '../api/agent';
+import { chatStream } from '../api/agent';
 import { invalidateStatsCache } from './useMemories';
 
 /** SSE `node` event → Chinese status label (mirrors frontend/app.py `_node_labels`). */
@@ -187,7 +187,9 @@ export function useChat() {
 
   /**
    * Resume an interrupted conversation with the user's decision
-   * (approve/reject/conflict resolution). Non-streaming response.
+   * (approve/reject/conflict resolution). Streams the resumed run's tokens
+   * live through SSE — identical UX to the first send, instead of waiting
+   * for the whole answer and appending it at once.
    */
   const resume = useCallback(
     async (resumeData: Record<string, unknown>) => {
@@ -196,48 +198,98 @@ export function useChat() {
       dispatch({ type: 'SET_STREAMING', isStreaming: true });
       dispatch({ type: 'CLEAR_INTERRUPT' });
 
+      // Fresh assistant placeholder that the resumed turn's tokens stream into.
+      dispatch({ type: 'ADD_MESSAGE', message: { role: 'assistant', content: '' } });
+
+      tokenBufferRef.current = '';
+      const yieldedNodes = new Set<string>();
+
       try {
-        const result = await chatNonStream({
+        const stream = chatStream({
           message: '',
           thread_id: threadId,
           resume_data: resumeData,
         });
+        for await (const event of stream) {
+          switch (event.type) {
+            case 'token':
+              tokenBufferRef.current += event.content;
+              if (flushTimerRef.current === null) {
+                flushTimerRef.current = window.setInterval(
+                  flushTokens,
+                  TOKEN_BATCH_INTERVAL_MS,
+                );
+              }
+              break;
 
-        if (result.status === 'interrupted' && result.interrupt) {
-          dispatch({ type: 'SET_INTERRUPT', interrupt: result.interrupt });
-          dispatch({
-            type: 'ADD_MESSAGE',
-            message: { role: 'system', content: '另一个操作需要处理。' },
-          });
-        } else {
-          dispatch({
-            type: 'ADD_MESSAGE',
-            message: {
-              role: 'assistant',
-              content: result.response || '(无回复)',
-              _meta: {
-                toolCalls: result.tool_calls ?? [],
-                sources: result.sources ?? [],
-              },
-            },
-          });
+            case 'node': {
+              const node = event.node;
+              if (node !== 'generate_final' && !yieldedNodes.has(node)) {
+                yieldedNodes.add(node);
+                const label = NODE_LABELS[node] ?? node;
+                tokenBufferRef.current += `> ${label}\n`;
+              }
+              break;
+            }
+
+            case 'interrupt': {
+              // A resumed run can pause again (e.g. a write approved, then a
+              // conflict surfaced). Flush first so buffered tokens land on the
+              // assistant placeholder before the interrupt card appears.
+              flushTokens();
+              stopTokenTimer();
+              dispatch({ type: 'SET_INTERRUPT', interrupt: event.data });
+              dispatch({
+                type: 'ADD_MESSAGE',
+                message: {
+                  role: 'system',
+                  content:
+                    event.data.type === 'conflict'
+                      ? '检测到记忆冲突，请选择如何解决。'
+                      : '智能体想要执行写入操作，请批准或拒绝。',
+                },
+              });
+              return;
+            }
+
+            case 'meta':
+              dispatch({
+                type: 'UPDATE_LAST_MESSAGE',
+                meta: { toolCalls: event.tool_calls, sources: event.sources },
+              });
+              break;
+
+            case 'error':
+              flushTokens();
+              stopTokenTimer();
+              dispatch({
+                type: 'UPDATE_LAST_MESSAGE',
+                appendContent: `\n\n错误: ${event.message}`,
+              });
+              break;
+
+            case 'done':
+              break;
+          }
         }
       } catch (err) {
+        flushTokens();
+        stopTokenTimer();
         dispatch({
-          type: 'ADD_MESSAGE',
-          message: {
-            role: 'assistant',
-            content: `错误: ${err instanceof Error ? err.message : String(err)}`,
-          },
+          type: 'UPDATE_LAST_MESSAGE',
+          appendContent: `\n\n错误: ${err instanceof Error ? err.message : String(err)}`,
         });
       } finally {
+        // Always flush any remaining buffered tokens and clean up.
+        flushTokens();
+        stopTokenTimer();
         isStreamingRef.current = false;
         dispatch({ type: 'SET_STREAMING', isStreaming: false });
         dispatch({ type: 'INVALIDATE_THREADS' });
         invalidateStatsCache();
       }
     },
-    [dispatch, threadId],
+    [dispatch, threadId, flushTokens, stopTokenTimer],
   );
 
   return { sendMessage, resume, isStreaming };

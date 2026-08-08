@@ -18,8 +18,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
+from agent.nodes import CHAT_APPROVAL_TOOLS
 from backend.service.agent_service import get_agent_for_thread
-from backend.shared.config import config, current_thread_id
+from backend.shared.config import config, current_thread_id, current_trace_id
 from backend.service.llm_service import get_llm_provider
 
 logger = logging.getLogger(__name__)
@@ -63,29 +64,6 @@ async def _is_disconnected(request: Request) -> bool:
         return await request.is_disconnected()
     except Exception:
         return False
-
-
-async def _stream_final_answer(
-    request: Request, final_response: str
-):
-    """Replay *final_response* as SSE tokens — used on the resume path only.
-
-    New-message runs stream the final answer live (LLM tokens pushed through
-    the graph's ``custom`` stream).  A resumed run uses ``ainvoke``, which
-    has no custom stream, so the already-generated answer is replayed here
-    as small chunks so the frontend still shows the token animation.
-    Checks per-chunk that the client is still connected and stops early if
-    they closed the tab (avoids pushing tokens to a dead socket).
-    """
-    # Stream the response in small chunks so the frontend sees a
-    # token-by-token animation (same UX as before, but deterministic).
-    chunk_size = 4
-    for i in range(0, len(final_response), chunk_size):
-        if await _is_disconnected(request):
-            logger.info("SSE client disconnected during final-answer stream — aborting")
-            return
-        chunk = final_response[i:i + chunk_size]
-        yield f"data: {json.dumps({'type': 'token', 'content': chunk}, ensure_ascii=False)}\n\n"
 
 
 async def _mark_interrupted_thread(agent, thread_id: str) -> None:
@@ -402,11 +380,14 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     ``{"approved": true}`` or ``{"approved": false, "reason": "..."}``)
     to resume.
     """
-    agent = get_agent_for_thread()
+    agent = get_agent_for_thread(approval_required_tools=CHAT_APPROVAL_TOOLS)
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
     current_thread_id.set(req.thread_id)
+
+    # Link every LLM call in this run to one trace id (usage observability).
+    current_trace_id.set(str(uuid4()))
 
     # Record this conversation as active
     title = req.message[:80] if req.message else ""
@@ -523,15 +504,22 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
     token of the final answer, and ``data: {"type":"interrupt",...}``
     when the agent pauses for human approval.
 
+    A ``resume_data`` body continues an interrupted run through the same
+    stream pipeline: the resumed nodes emit live token deltas via the
+    graph's ``custom`` stream, so resume feels identical to the first send.
+
     The client can use ``event:`` lines to route different event types.
     The whole run is bounded by ``AGENT_TIMEOUT``; a disconnected SSE
     client aborts the stream so later tool/LLM steps don't burn tokens.
     """
-    agent = get_agent_for_thread()
+    agent = get_agent_for_thread(approval_required_tools=CHAT_APPROVAL_TOOLS)
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
     current_thread_id.set(req.thread_id)
+
+    # Link every LLM call in this run to one trace id (usage observability).
+    current_trace_id.set(str(uuid4()))
 
     # Record this conversation as active
     title = req.message[:80] if req.message else ""
@@ -542,33 +530,17 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
         try:
             async with asyncio.timeout(config.agent_timeout):
                 if req.resume_data is not None:
-                    # Resume: use ainvoke (interrupt/resume doesn't stream nodes cleanly)
-                    result = await agent.ainvoke(
-                        Command(resume=req.resume_data),
-                        config=run_config,
-                    )
-                    # Check interrupt after resume
-                    interrupts = result.get("__interrupt__")
-                    if interrupts:
-                        payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
-                        yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
-                        return
+                    # Resume: continue the interrupted run through the same
+                    # stream pipeline as a new message.  Nodes on the resume
+                    # path (check_approval / check_conflict → tools →
+                    # call_llm → generate_final) push LLM tokens through the
+                    # graph's custom stream via get_stream_writer(), so the
+                    # client sees live token deltas — not a replayed answer.
+                    graph_input: dict | Command = Command(resume=req.resume_data)
+                else:
+                    graph_input = {"messages": [HumanMessage(content=req.message)]}
 
-                    # Client gone while the resume run was in flight — don't push to a dead socket.
-                    if await _is_disconnected(request):
-                        return
-
-                    # Stream the final answer from the state
-                    final_response = result.get("final_response")
-                    if final_response:
-                        async for sse_line in _stream_final_answer(request, final_response):
-                            yield sse_line
-
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                    return
-
-                # New message: stream through the graph.
-                # Two modes:
+                # Stream through the graph.  Two modes:
                 #   updates — node-completion events, interrupts
                 #   custom  — live LLM tokens pushed from inside the nodes
                 #             via get_stream_writer() (real streaming; the
@@ -576,7 +548,7 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                 # With subgraphs=True + a mode list, events arrive as
                 # (namespace, mode, data) tuples.
                 async for _, mode, event_data in agent.astream(
-                    {"messages": [HumanMessage(content=req.message)]},
+                    graph_input,
                     config=run_config,
                     stream_mode=["updates", "custom"],
                     subgraphs=True,

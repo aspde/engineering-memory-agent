@@ -346,87 +346,135 @@ describe('useChat', () => {
   });
 
   describe('resume', () => {
-    it('calls chatNonStream with the resume data', async () => {
-      (chatNonStream as unknown as Mock).mockResolvedValue({
-        thread_id: 'test-thread',
-        status: 'completed',
-        response: 'Done!',
-        interrupt: null,
-        tool_calls: [],
-        sources: [],
-      });
+    it('calls chatStream with resume_data and streams tokens into a fresh assistant placeholder', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        mockSSE([
+          { type: 'token', content: '记忆' },
+          { type: 'token', content: '已写入。' },
+          { type: 'meta', tool_calls: [], sources: [{ type: 'memory', id: 'm1' }] },
+          { type: 'done' },
+        ]),
+      );
 
       const { result } = renderHook(() => useChat());
-      const resumeData = { decision: 'approve' };
+      const resumeData = { approved: true };
       await act(async () => {
         await result.current.resume(resumeData);
       });
 
-      expect(chatNonStream).toHaveBeenCalledWith({
+      expect(chatStream).toHaveBeenCalledWith({
         message: '',
         thread_id: 'test-thread',
         resume_data: resumeData,
       });
+      // Resumed tokens land on a fresh assistant message.
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'ADD_MESSAGE',
+        message: { role: 'assistant', content: '' },
+      });
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: '记忆已写入。',
+      });
+      // The resumed run's sources attach to the same assistant message.
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'UPDATE_LAST_MESSAGE',
+        meta: { toolCalls: [], sources: [{ type: 'memory', id: 'm1' }] },
+      });
+      expect(chatNonStream).not.toHaveBeenCalled();
     });
 
-    it('dispatches ADD_MESSAGE with the response text and _meta on completion', async () => {
-      (chatNonStream as unknown as Mock).mockResolvedValue({
-        thread_id: 'test-thread',
-        status: 'completed',
-        response: 'Done!',
-        interrupt: null,
-        tool_calls: [{ tool: 'search', content: 'x' }],
-        sources: [],
-      });
+    it('appends a status label for resumed node events', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        mockSSE([{ type: 'node', node: 'tools' }, { type: 'done' }]),
+      );
 
       const { result } = renderHook(() => useChat());
       await act(async () => {
-        await result.current.resume({ decision: 'approve' });
+        await result.current.resume({ approved: true });
       });
 
       expect(dispatch).toHaveBeenCalledWith({
-        type: 'ADD_MESSAGE',
-        message: {
-          role: 'assistant',
-          content: 'Done!',
-          _meta: { toolCalls: [{ tool: 'search', content: 'x' }], sources: [] },
-        },
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: '> 执行工具…\n',
       });
     });
 
-    it('dispatches SET_INTERRUPT and a system message when the resumed call is interrupted again', async () => {
-      (chatNonStream as unknown as Mock).mockResolvedValue({
-        thread_id: 'test-thread',
-        status: 'interrupted',
-        response: '',
-        interrupt: { type: 'approval' },
-        tool_calls: [],
-        sources: [],
-      });
+    it('flushes tokens first and surfaces a second interrupt when the resumed run pauses again', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        mockSSE([
+          { type: 'token', content: '部分' },
+          { type: 'interrupt', data: { type: 'conflict', existing_id: 'e1' } },
+          { type: 'token', content: 'IGNORED' },
+        ]),
+      );
 
       const { result } = renderHook(() => useChat());
       await act(async () => {
-        await result.current.resume({ decision: 'approve' });
+        await result.current.resume({ resolution: 'keep_existing' });
       });
 
-      expect(dispatch).toHaveBeenCalledWith({ type: 'SET_INTERRUPT', interrupt: { type: 'approval' } });
+      // Buffered tokens flush before the interrupt is surfaced.
+      const calls = dispatch.mock.calls.map((c) => c[0]);
+      const flushIdx = calls.findIndex(
+        (a) => a?.type === 'UPDATE_LAST_MESSAGE' && a.appendContent === '部分',
+      );
+      const interruptIdx = calls.findIndex((a) => a?.type === 'SET_INTERRUPT');
+      expect(flushIdx).toBeGreaterThan(-1);
+      expect(interruptIdx).toBeGreaterThan(flushIdx);
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'SET_INTERRUPT',
+        interrupt: { type: 'conflict', existing_id: 'e1' },
+      });
       expect(dispatch).toHaveBeenCalledWith({
         type: 'ADD_MESSAGE',
-        message: { role: 'system', content: '另一个操作需要处理。' },
+        message: { role: 'system', content: '检测到记忆冲突，请选择如何解决。' },
+      });
+      // Returns early — the trailing token is never processed.
+      expect(dispatch).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'UPDATE_LAST_MESSAGE',
+          appendContent: expect.stringContaining('IGNORED'),
+        }),
+      );
+    });
+
+    it('appends an error message when the resume stream errors', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        (async function* (): AsyncGenerator<SSEEvent> {
+          throw new Error('boom');
+        })(),
+      );
+
+      const { result } = renderHook(() => useChat());
+      await act(async () => {
+        await result.current.resume({ approved: true });
+      });
+
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: '\n\n错误: boom',
       });
     });
 
-    it('dispatches ADD_MESSAGE with an error message when chatNonStream rejects', async () => {
-      (chatNonStream as unknown as Mock).mockRejectedValue(new Error('boom'));
+    it('appends an error message when an error event is emitted', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        mockSSE([{ type: 'token', content: 'Hi' }, { type: 'error', message: 'boom' }]),
+      );
 
       const { result } = renderHook(() => useChat());
       await act(async () => {
-        await result.current.resume({ decision: 'approve' });
+        await result.current.resume({ approved: true });
       });
 
       expect(dispatch).toHaveBeenCalledWith({
-        type: 'ADD_MESSAGE',
-        message: { role: 'assistant', content: '错误: boom' },
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: 'Hi',
+      });
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'UPDATE_LAST_MESSAGE',
+        appendContent: '\n\n错误: boom',
       });
     });
   });

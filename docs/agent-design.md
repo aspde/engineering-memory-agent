@@ -19,7 +19,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 | 节点 | 实现 | 职责 |
 |------|------|------|
 | `call_llm` | `agent/nodes.py` | 将对话历史 + tool schema 发给 LLM，解析返回的 `AIMessage`（含 `tool_calls`，如有） |
-| `check_approval` | `agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批 |
+| `check_approval` | `agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批。审批集合由 `approval_required_tools` 参数化：默认集写/摄入供自动化流程（巡检/场景）自主执行；交互式 chat 路径用 `CHAT_APPROVAL_TOOLS`，额外把 `notify_feishu_tool`（外发到团队飞书群）纳入审批 |
 | `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage` |
 | `check_conflict` | `agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
 | `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；本轮无工具结果（纯聊天）时直接复用 `call_llm` 输出，不重复调用 LLM |
@@ -54,6 +54,10 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 ### 为什么工具结果从 ToolMessage 而不是 state 字段读取
 
 `@tool` 函数通过 `ToolNode` 只能写入 `messages`，不能直接写 state 的其他字段。`generate_final_node` 从消息历史中提取 `ToolMessage` 作为上下文——比维护专门的 `retrieved_chunks`/`retrieved_memories` 字段更健壮，且对任意 tool 通用。
+
+### 为什么上下文窗口按 token 预算而不是消息条数
+
+发送给 LLM 的对话历史由 `context_token_budget`（默认 12000，`CONTEXT_TOKEN_BUDGET` 可调）约束，而不是旧的固定 12 条窗口。长消息自动收窄窗口、短消息放宽，避免"12 条都超长逼近上下文上限"的硬编码问题。token 数量用 CJK 感知的粗略估算（`_estimate_tokens`，中文 ~1 token/字符、ASCII ~4 字符/token），不引入 tokenizer 依赖。对话压缩（`CONVERSATION_COMPACTION_ENABLED`）的触发条件同样是预算：超预算的早期历史被折叠为一条 running-summary，保留尾部约占预算 60%，压缩调用自身的输入也被截断（`_COMPACTION_TRANSCRIPT_CHARS`），防止溢出历史把压缩调用本身撑爆。压缩摘要按"prompt 版本 + 逐字 transcript"有界记忆化：工具回合会两次界定量（`call_llm_node` 与 `generate_final_node`），相同的溢出前缀复用同一次压缩结果，既省一次 LLM 调用，也让同一回合内两处注入的摘要一致。
 
 ## 文件结构
 

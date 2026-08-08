@@ -219,3 +219,61 @@ class TestGraphHITLRouting:
         first_interrupt = result["__interrupt__"][0].value
         # The first gate is the tool approval — write_memory_tool
         assert first_interrupt["tool_name"] == "write_memory_tool"
+
+    @pytest.mark.asyncio
+    async def test_notify_gated_in_chat_but_not_default(self, monkeypatch) -> None:
+        """notify_feishu_tool requires approval on the chat set; the default
+        (patrol/scenario) set passes it through so automated flows notify
+        autonomously."""
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
+
+        from agent.nodes import CHAT_APPROVAL_TOOLS
+        from agent.tools import notify_feishu_tool
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config, "feishu_webhook_url", "")
+
+        notify_call = {
+            "id": "call_n",
+            "name": "notify_feishu_tool",
+            "args": {"message": "hi team"},
+        }
+
+        # Default approval set (patrol): notify passes through, tool executes.
+        mock_default = AsyncMock()
+        mock_default.chat_raw_stream = sequential_stream(
+            tool_call_stream([notify_call]),
+            content_stream("Notified."),
+        )
+        mock_default.chat_stream = text_stream("Final.")
+        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_default)
+
+        graph_default = build_agent_graph([notify_feishu_tool], checkpointer=None)
+        result_default = await graph_default.ainvoke(
+            {"messages": [HumanMessage(content="ping the team")]},
+            {"configurable": {"thread_id": "test-notify-default"}},
+        )
+        assert "__interrupt__" not in result_default
+
+        # Chat approval set: notify is gated → the graph pauses for approval.
+        mock_chat = AsyncMock()
+        mock_chat.chat_raw_stream = sequential_stream(tool_call_stream([notify_call]))
+        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_chat)
+
+        graph_chat = build_agent_graph(
+            [notify_feishu_tool],
+            checkpointer=None,
+            approval_required_tools=CHAT_APPROVAL_TOOLS,
+        )
+        result_chat = await graph_chat.ainvoke(
+            {"messages": [HumanMessage(content="ping the team")]},
+            {"configurable": {"thread_id": "test-notify-chat"}},
+        )
+        assert "__interrupt__" in result_chat
+        first_interrupt = result_chat["__interrupt__"][0].value
+        assert first_interrupt["tool_name"] == "notify_feishu_tool"

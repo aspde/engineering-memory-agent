@@ -88,6 +88,24 @@ class TestAutoMemoryGate:
         mock_write.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_memory_pipeline_disabled_blocks_auto_memory(self, monkeypatch) -> None:
+        """MEMORY_ENABLED=false turns the agent into pure chat — auto capture
+        must not keep extracting and writing memories behind the scenes."""
+        import agent.nodes as mod
+
+        # auto_memory_enabled is on (the default), but the whole memory
+        # pipeline is off.
+        assert config_mod.config.auto_memory_enabled is True
+        monkeypatch.setattr(config_mod.config, "memory_enabled", False)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="记住：用 PostgreSQL 存向量")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_enabled_writes_substantive_message(self, monkeypatch) -> None:
         import agent.nodes as mod
 
@@ -114,7 +132,9 @@ class TestAutoMemorySubstance:
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch, summary="ok", entities=[])
 
-        await mod._maybe_auto_memory(_make_state([HumanMessage(content="你好")]))
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
         mock_extract.assert_awaited_once()
         mock_write.assert_not_awaited()
 
@@ -127,7 +147,9 @@ class TestAutoMemorySubstance:
             monkeypatch, summary="x", entities=[{"name": "pgvector", "type": "technology"}]
         )
 
-        await mod._maybe_auto_memory(_make_state([HumanMessage(content="pgvector")]))
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="pgvector 是向量检索插件")])
+        )
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -221,7 +243,7 @@ class TestAutoMemorySuppression:
                     name="write_memory_tool",
                 ),
                 AIMessage(content="记住了"),
-                HumanMessage(content="今天上线了新的限流器"),
+                HumanMessage(content="今天上线了新的限流中间件"),
                 AIMessage(content="好的"),
             ]
         )
@@ -299,7 +321,7 @@ class TestAutoMemoryWiring:
 
         state = _make_state(
             [
-                HumanMessage(content="搜索一下"),
+                HumanMessage(content="我们验证了 pgvector 索引方案"),
                 AIMessage(
                     content="",
                     tool_calls=[
@@ -333,3 +355,173 @@ class TestAutoMemoryWiring:
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "已记住"
         mock_write.assert_not_awaited()
+
+
+class TestAutoMemoryQualityGate:
+    """Declarative-knowledge gate — questions, requests, and filler skip
+    before any LLM call is made."""
+
+    @pytest.mark.asyncio
+    async def test_question_turn_is_not_extracted(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="PostgreSQL 怎么优化性能？")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_request_turn_is_not_extracted(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="帮我查一下 pgvector 的索引配置")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_short_fragment_is_not_extracted(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(_make_state([HumanMessage(content="pgvector")]))
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_chatty_filler_is_not_extracted(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="好的，谢谢！")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_declarative_statement_is_extracted(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="生产环境禁止用 root 跑 PostgreSQL")])
+        )
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
+
+
+class TestAutoMemoryThrottle:
+    """Frequency control — per-thread interval/cap, repeat skip, global window."""
+
+    @pytest.mark.asyncio
+    async def test_repeat_content_in_same_thread_is_skipped(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        config_mod.current_thread_id.set("t-a")
+        state = _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        await mod._maybe_auto_memory(state)
+        mock_write.assert_awaited_once()
+
+        mock_extract.reset_mock()
+        mock_write.reset_mock()
+        await mod._maybe_auto_memory(state)
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_min_interval_throttles_rapid_writes(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        config_mod.current_thread_id.set("t-a")
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        mock_write.assert_awaited_once()
+
+        mock_extract.reset_mock()
+        mock_write.reset_mock()
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="回滚了 Kafka 的配置")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_interval_disabled_when_zero(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_min_interval", 0)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        config_mod.current_thread_id.set("t-a")
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="回滚了 Kafka 的配置")])
+        )
+        assert mock_write.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_per_thread_cap_limits_writes(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_max_per_thread", 2)
+        monkeypatch.setattr(config_mod.config, "auto_memory_min_interval", 0)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        config_mod.current_thread_id.set("t-a")
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        assert mock_write.await_count == 1
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="回滚了 Kafka 的配置")])
+        )
+        assert mock_write.await_count == 2
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="升级了 pgvector 索引")])
+        )
+        assert mock_write.await_count == 2  # capped at the per-thread limit
+
+    @pytest.mark.asyncio
+    async def test_global_window_cap_across_threads(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_max_per_window", 2)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        for tid, content in (
+            ("t-a", "部署了新的限流中间件"),
+            ("t-b", "回滚了 Kafka 的配置"),
+            ("t-c", "升级了 pgvector 索引"),
+        ):
+            config_mod.current_thread_id.set(tid)
+            await mod._maybe_auto_memory(
+                _make_state([HumanMessage(content=content)])
+            )
+        assert mock_write.await_count == 2  # third crosses the global window cap

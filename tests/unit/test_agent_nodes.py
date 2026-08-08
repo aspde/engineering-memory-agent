@@ -1,6 +1,6 @@
 """Tests for agent node functions — mock LLM provider."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from langgraph.types import Command
@@ -8,6 +8,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
+    _estimate_tokens,
     _messages_to_dicts,
     _to_openai_tools,
     _truncate_tool_content,
@@ -30,6 +31,11 @@ def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 def _disable_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable conversation compaction for tests that assert pure windowing."""
     monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", False)
+
+
+def _set_budget(monkeypatch: pytest.MonkeyPatch, tokens: int) -> None:
+    """Set the context-window token budget — what drives windowing."""
+    monkeypatch.setattr(config_mod.config, "context_token_budget", tokens)
 
 
 class TestMessageConversion:
@@ -114,6 +120,37 @@ class TestMessageConversion:
         assert len(dicts) == 3
         assert "tool_calls" in dicts[0]
         assert dicts[0]["tool_calls"][0]["id"] == "call_1"
+        assert dicts[1]["role"] == "tool"
+        assert dicts[1]["tool_call_id"] == "call_1"
+
+    def test_messages_to_dicts_drops_orphaned_tool_result(self) -> None:
+        """A ToolMessage whose tool-call AIMessage was windowed/compacted out
+        must not be emitted — OpenAI-compatible APIs reject a ``role=tool``
+        message whose ``tool_call_id`` has no preceding assistant tool_calls.
+        The window boundary can land between the two (large prose + tool_calls
+        on the AIMessage), leaving only the ToolMessage in the suffix."""
+        dicts = _messages_to_dicts([
+            ToolMessage(content="Found 3 results", tool_call_id="call_1"),
+            HumanMessage(content="thanks"),
+            AIMessage(content="you're welcome"),
+        ])
+        # The orphaned result is dropped; the rest serializes normally.
+        assert [d["role"] for d in dicts] == ["user", "assistant"]
+
+    def test_messages_to_dicts_keeps_tool_result_when_parent_retained(self) -> None:
+        """A retained tool-call AIMessage keeps its ToolMessage result."""
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="Let me search.",
+                tool_calls=[
+                    {"id": "call_1", "name": "search_memories_tool",
+                     "args": {"query": "test"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="Found 3 results", tool_call_id="call_1"),
+        ])
+        assert dicts[1]["role"] == "tool"
+        assert dicts[1]["tool_call_id"] == "call_1"
 
     def test_messages_to_dicts_mixed_orphaned_and_answered(self) -> None:
         """Only the answered tool_calls survive; orphaned ones are dropped."""
@@ -169,6 +206,29 @@ class TestMessageConversion:
         assert len(schemas) == 1
         assert schemas[0]["type"] == "function"
         assert schemas[0]["function"]["name"] == "search_memories_tool"
+
+    def test_to_openai_tools_cached_per_tool_set(self, monkeypatch) -> None:
+        """Serialisation runs once per tool name — later calls hit the cache.
+
+        A tool unique to this test keeps the module-level cache key from
+        colliding with other tests' schemas.
+        """
+        from langchain_core.tools import tool
+
+        @tool
+        async def unique_schema_tool(query: str) -> str:
+            """A tool only this test uses."""
+            return "ok"
+
+        args_schema = MagicMock()
+        args_schema.model_json_schema.return_value = {"type": "object", "properties": {}}
+        monkeypatch.setattr(unique_schema_tool, "args_schema", args_schema)
+
+        first = _to_openai_tools([unique_schema_tool])
+        second = _to_openai_tools([unique_schema_tool])
+        assert args_schema.model_json_schema.call_count == 1
+        assert first == second
+        assert first is not second  # shallow copy — callers can't mutate the cache
 
 
 def _make_state(messages=None, final_response=None, error=None, pending_approval=None, final_prompt=None):
@@ -456,10 +516,13 @@ class TestGenerateFinalNode:
             return ToolMessage(content=content, tool_call_id=tool_call_id)
 
         _disable_compaction(monkeypatch)  # assert pure windowing, not summary
+        # A small token budget pushes the old turn's tool result out of the
+        # window while keeping the current turn's.
+        _set_budget(monkeypatch, 20)
 
         messages: list = []
         # An old turn's tool result, then enough filler to push it out of the
-        # 12-message window, then the current turn's tool result.
+        # token-budget window, then the current turn's tool result.
         messages += [
             AIMessage(content="", tool_calls=[
                 {"id": "old", "name": "search_memories_tool",
@@ -843,22 +906,50 @@ class TestCheckConflictNode:
 class TestContextBounding:
     """Windowed history + tool-content truncation bound the LLM context."""
 
-    def test_window_keeps_most_recent_messages(self) -> None:
-        messages = [HumanMessage(content=f"m{i}") for i in range(20)]
-        windowed = _window_messages(messages, max_messages=5)
+    def test_estimate_tokens_cjk_and_ascii(self) -> None:
+        # ASCII ≈ 4 chars/token.
+        assert _estimate_tokens("x" * 20) == 5
+        assert _estimate_tokens("short") == 2  # ceil(5/4)
+        # CJK ≈ 1 token/char.
+        assert _estimate_tokens("中文") == 2
+        assert _estimate_tokens("") == 0
+
+    def test_window_keeps_most_recent_messages_by_budget(self) -> None:
+        # Each message is ~5 tokens ("x"*20 → 5 ASCII tokens); a budget of
+        # 25 keeps exactly the newest 5.
+        messages = [HumanMessage(content="x" * 20) for _ in range(20)]
+        windowed = _window_messages(messages, max_tokens=25)
         assert len(windowed) == 5
-        # The oldest messages are dropped; the tail is kept.
-        assert windowed[0].content == "m15"
-        assert windowed[-1].content == "m19"
+        # The oldest messages are dropped; the tail is kept (by reference).
+        assert windowed[0] is messages[15]
+        assert windowed[-1] is messages[-1]
 
     def test_window_pins_system_prompt(self) -> None:
         messages = [SystemMessage(content="SYS")] + [
-            HumanMessage(content=f"m{i}") for i in range(20)
+            HumanMessage(content="x" * 20) for _ in range(20)
         ]
-        windowed = _window_messages(messages, max_messages=5)
+        windowed = _window_messages(messages, max_tokens=25)
         assert windowed[0].content == "SYS"
         assert len(windowed) == 6  # pinned system + 5 recent
-        assert windowed[-1].content == "m19"
+        assert windowed[-1] is messages[-1]
+
+    def test_window_by_token_not_message_count(self) -> None:
+        # The same budget keeps more short messages than long ones — the
+        # window is sized by tokens, not a fixed message count.
+        short = _window_messages(
+            [HumanMessage(content="hi") for _ in range(30)], max_tokens=30
+        )
+        long = _window_messages(
+            [HumanMessage(content="x" * 120) for _ in range(30)], max_tokens=30
+        )
+        assert len(short) == 30  # 30 × 1 token fits
+        assert len(long) == 1  # one 30-token message fits, the next doesn't
+
+    def test_window_keeps_newest_message_when_oversized(self) -> None:
+        messages = [HumanMessage(content="x" * 2000), HumanMessage(content="tail")]
+        windowed = _window_messages(messages, max_tokens=10)
+        assert len(windowed) == 1
+        assert windowed[0].content == "tail"
 
     def test_window_passthrough_when_within_budget(self) -> None:
         messages = [HumanMessage(content="a"), HumanMessage(content="b")]
@@ -902,6 +993,9 @@ class TestContextBounding:
         from agent.tools import ALL_TOOLS
 
         _disable_compaction(monkeypatch)  # assert pure windowing, not summary
+        # Each "old message N" is ~4 estimated tokens; a 48-token budget keeps
+        # exactly the newest 12.
+        _set_budget(monkeypatch, 48)
         history = [HumanMessage(content=f"old message {i}") for i in range(30)]
         await mod.call_llm_node(_make_state(history), tools=ALL_TOOLS)
 
@@ -922,6 +1016,8 @@ class TestContextBounding:
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         _disable_compaction(monkeypatch)  # assert pure windowing, not summary
+        # Each "m{i}" is ~1 estimated token; a 12-token budget keeps 12.
+        _set_budget(monkeypatch, 12)
         state = _make_state(
             messages=[
                 HumanMessage(content="search"),

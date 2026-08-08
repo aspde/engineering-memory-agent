@@ -30,6 +30,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
 from agent.nodes import (
+    APPROVAL_REQUIRED_TOOLS,
     call_llm_node,
     check_approval_node,
     check_conflict_node,
@@ -60,6 +61,7 @@ def build_agent_graph(
     tools: list,
     checkpointer: object | None = None,
     max_steps: int = 5,
+    approval_required_tools: frozenset[str] = APPROVAL_REQUIRED_TOOLS,
 ) -> CompiledStateGraph:
     """Build and compile the EMA agent graph.
 
@@ -69,16 +71,24 @@ def build_agent_graph(
             (InMemorySaver, PostgresSaver, etc.).  Defaults to InMemorySaver.
         max_steps: Maximum ReAct loop iterations before the graph
             forces a final answer.  Defaults to 5.
+        approval_required_tools: Tool names that pause for human approval
+            before execution.  Defaults to ``APPROVAL_REQUIRED_TOOLS`` (the
+            write/ingest set); the interactive chat path passes
+            ``CHAT_APPROVAL_TOOLS`` to also gate the notification tool.
 
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
     """
     _call_llm = partial(call_llm_node, tools=tools)
+    _check_approval = partial(
+        check_approval_node,
+        approval_required_tools=approval_required_tools,
+    )
 
     builder = StateGraph(AgentState)
 
     builder.add_node("call_llm", _call_llm)
-    builder.add_node("check_approval", check_approval_node)
+    builder.add_node("check_approval", _check_approval)
     builder.add_node("tools", ToolNode(tools, handle_tool_errors=True))
     builder.add_node("check_conflict", check_conflict_node)
     builder.add_node("generate_final", generate_final_node)

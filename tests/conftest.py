@@ -39,6 +39,34 @@ def _noop_conversation_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_auto_memory_throttle() -> None:
+    """Reset auto-memory throttle state so tests never throttle each other.
+
+    Auto-memory captures are rate-limited in-process (see
+    ``agent.nodes._auto_memory_throttled``); without a reset, writes
+    accumulating across tests would start tripping the process-wide
+    rolling-window cap and tests would fail spuriously.
+    """
+    from agent.nodes import reset_auto_memory_throttle
+
+    reset_auto_memory_throttle()
+
+
+@pytest.fixture(autouse=True)
+def _reset_compaction_cache() -> None:
+    """Reset the compaction-summary memo cache between tests.
+
+    ``agent.nodes._maybe_compact`` memoizes summaries by transcript so a tool
+    turn doesn't pay two compaction LLM calls; without a reset, a summary
+    cached by an earlier test would short-circuit a later test's
+    ``assert provider.chat.assert_awaited_once()``.
+    """
+    from agent.nodes import reset_compaction_cache
+
+    reset_compaction_cache()
+
+
 def pytest_sessionstart(session: pytest.Session) -> None:
     """Reset the test database once per pytest run (hermetic tests).
 

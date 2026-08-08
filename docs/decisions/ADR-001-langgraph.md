@@ -121,6 +121,9 @@ LangGraph 常规模式是 `call_llm → tools → call_llm`。EMA 在中间插�
 | 提取 | `extract_memory_tool` | 读（不持久化） | 直接放行 |
 | 摄入 | `ingest_git_repo_tool` | 写 | 审批 |
 | 摄入 | `ingest_document_tool` | 写 | 审批 |
+| 通知 | `notify_feishu_tool` | 外发副作用 | 仅交互式 chat 审批 |
+
+审批集合通过 `build_agent_graph(approval_required_tools=...)` 参数化：默认集（`APPROVAL_REQUIRED_TOOLS`，写/摄入）供巡检与场景等自动化流程使用；交互式 chat 路径额外传入 `CHAT_APPROVAL_TOOLS`，把 `notify_feishu_tool` 也纳入审批——发到团队群的外发副作用需要用户确认，且防止检索注入内容触发外发。自动化流程仍可自主通知团队。
 
 Tool 与 Agent 解耦——每个 tool 只是现有 backend/service 函数的 `@tool` 装饰器包装，零逻辑重复。Tool 可以独立测试、独立替换，不依赖 Agent 层。
 

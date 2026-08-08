@@ -29,6 +29,16 @@ def _set_compaction(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", enabled)
 
 
+def _set_budget(monkeypatch: pytest.MonkeyPatch, tokens: int) -> None:
+    """Set the context-window token budget — what drives the compaction trigger."""
+    monkeypatch.setattr(config_mod.config, "context_token_budget", tokens)
+
+
+# A message long enough to register a meaningful token count under the
+# estimated budgets used in these tests (a short "m{i}" is ~1 token).
+_OVERFLOW_MSG = "old detail {i} — extra content to exceed the token budget"
+
+
 class TestCompactionDisabled:
     """Explicitly disabled — truncation behaviour is identical to before."""
 
@@ -51,6 +61,8 @@ class TestCompactionDisabled:
 
         _set_compaction(monkeypatch, False)
 
+        # Short messages stay well under the default token budget, so windowing
+        # keeps everything and compaction (disabled) never summarises.
         messages = [HumanMessage(content=f"m{i}") for i in range(30)]
         result = await mod._bounded_messages(messages)
         expected = mod._window_messages(messages)
@@ -66,13 +78,15 @@ class TestCompactionEnabled:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat.return_value = "Early part: user asked about X, then Y."
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        # 14 filler messages push the first ones out of a 12-message window.
+        # 14 long filler messages exceed the 60-token budget, pushing the
+        # oldest ones into the compaction overflow.
         messages = [
-            HumanMessage(content=f"old detail {i}") for i in range(14)
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ] + [HumanMessage(content="current question")]
 
         result = await mod._maybe_compact(messages)
@@ -104,14 +118,94 @@ class TestCompactionEnabled:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat.side_effect = RuntimeError("LLM down")
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        messages = [HumanMessage(content=f"m{i}") for i in range(30)]
+        messages = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(30)
+        ]
         result = await mod._maybe_compact(messages)
         # Falls back to the original list; windowing still truncates later.
         assert result is messages
+
+
+class TestCompactionMemoization:
+    """A tool turn bounds the conversation twice — the second bound reuses the
+    first's compaction summary instead of paying a second compaction LLM call."""
+
+    @pytest.mark.asyncio
+    async def test_second_bound_reuses_cached_summary(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "SUMMARY-OF-OLD-HISTORY"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        # call_llm_node bounds before tools run; generate_final_node bounds
+        # after (extra tool messages in the tail).  The oldest overflow
+        # prefix is identical, so one compaction call must serve both.
+        pre_tool = overflow + [HumanMessage(content="current question")]
+        post_tool = overflow + [
+            HumanMessage(content="current question"),
+            AIMessage(content="", tool_calls=[{"id": "c1", "name": "x", "args": {}}]),
+            ToolMessage(content="result", tool_call_id="c1"),
+        ]
+
+        r1 = await mod._maybe_compact(pre_tool)
+        r2 = await mod._maybe_compact(post_tool)
+
+        mock_provider.chat.assert_awaited_once()
+        # Both bounds inject the SAME summary (deterministic within a turn).
+        assert str(r1[0].content) == "SUMMARY-OF-OLD-HISTORY"
+        assert str(r2[0].content) == "SUMMARY-OF-OLD-HISTORY"
+
+    @pytest.mark.asyncio
+    async def test_distinct_overflow_recompacts(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "S"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        # One extra early message changes the overflow transcript → new call.
+        list_a = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        list_b = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(15)
+        ]
+        await mod._maybe_compact(list_a)
+        await mod._maybe_compact(list_b)
+        assert mock_provider.chat.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_summary_not_cached(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.side_effect = [RuntimeError("LLM down"), "S"]
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        messages = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        r1 = await mod._maybe_compact(messages)
+        assert r1 is messages  # failure falls back to the original list
+        r2 = await mod._maybe_compact(messages)
+        # The failure was not cached — the retry hits the LLM again.
+        assert mock_provider.chat.await_count == 2
+        assert isinstance(r2[0], SystemMessage)
 
 
 class TestCompactionThroughNodes:
@@ -124,6 +218,7 @@ class TestCompactionThroughNodes:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
         # The compaction LLM call (provider.chat) is separate from the stream.
@@ -132,7 +227,9 @@ class TestCompactionThroughNodes:
 
         from agent.tools import ALL_TOOLS
 
-        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        history = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(30)
+        ]
         await mod.call_llm_node(_agent_state(history), tools=ALL_TOOLS)
 
         sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
@@ -146,13 +243,14 @@ class TestCompactionThroughNodes:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
         mock_provider.chat.return_value = "SUMMARY-OF-EARLY-HISTORY"
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         messages = [
-            HumanMessage(content=f"early {i}") for i in range(14)
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ] + [
             HumanMessage(content="current question"),
             AIMessage(
@@ -261,6 +359,7 @@ class TestCompactionSingleSystem:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
         mock_provider.chat.return_value = "SUMMARY-OF-EARLY-MESSAGES"
@@ -268,7 +367,9 @@ class TestCompactionSingleSystem:
 
         from agent.tools import ALL_TOOLS
 
-        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        history = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(30)
+        ]
         await mod.call_llm_node(_agent_state(history), tools=ALL_TOOLS)
 
         sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
@@ -285,6 +386,7 @@ class TestCompactionSingleSystem:
         import agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
         mock_provider.chat.return_value = "SUMMARY-OF-EARLY-MESSAGES"
@@ -292,7 +394,9 @@ class TestCompactionSingleSystem:
 
         from agent.tools import ALL_TOOLS
 
-        history = [HumanMessage(content=f"old message {i}") for i in range(30)]
+        history = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(30)
+        ]
         await mod.call_llm_node(_agent_state(history), tools=ALL_TOOLS)
         sent = mock_provider.chat_raw_stream.call_args.kwargs["messages"]
 

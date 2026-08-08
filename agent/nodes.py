@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
+from collections import deque
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -41,8 +44,28 @@ def _stream_writer():
         return lambda _payload: None
 
 
+# Tool schemas are serialised from each tool's pydantic args schema.  The
+# roster is fixed at graph-build time, so the serialised OpenAI function-
+# calling schemas are cached per tool-name tuple and reused — one
+# ``model_json_schema()`` per tool per process instead of per LLM turn.
+_tool_schema_cache: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+_tool_schema_cache_lock = threading.Lock()
+
+
 def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
-    """Convert LangChain tool objects to OpenAI function-calling schemas."""
+    """Convert LangChain tool objects to OpenAI function-calling schemas.
+
+    Serialisation is cached by tool-name tuple: the roster is fixed for the
+    process lifetime, so repeated agent turns reuse the same schemas instead
+    of re-running ``model_json_schema()`` every call.  A shallow copy of the
+    list is returned so callers cannot mutate the cache.
+    """
+    key = tuple(t.name for t in tools)
+    with _tool_schema_cache_lock:
+        cached = _tool_schema_cache.get(key)
+        if cached is not None:
+            return list(cached)
+
     schemas: list[dict[str, Any]] = []
     for t in tools:
         schema: dict[str, Any] = {
@@ -65,7 +88,10 @@ def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
         else:
             schema["function"]["parameters"] = {"type": "object", "properties": {}}
         schemas.append(schema)
-    return schemas
+
+    with _tool_schema_cache_lock:
+        _tool_schema_cache[key] = schemas
+    return list(schemas)
 
 
 def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
@@ -84,6 +110,11 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
             responded_ids.add(m.tool_call_id)
 
     dicts: list[dict[str, object]] = []
+    # tool_call ids actually emitted on retained assistant messages.  A
+    # ToolMessage whose tool-call AIMessage was windowed/compacted out must
+    # not be emitted — OpenAI-compatible APIs reject a ``role=tool`` message
+    # whose ``tool_call_id`` has no preceding assistant ``tool_calls``.
+    emitted_tool_call_ids: set[str] = set()
     for m in messages:
         # 1. Determine role
         if isinstance(m, SystemMessage):
@@ -137,13 +168,24 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
                     }
                     for tc in answered
                 ]
+                emitted_tool_call_ids.update(tc["id"] for tc in answered)
             elif not content.strip():
                 # Orphaned tool_calls with no content — supply a placeholder
                 # so the API sees a valid assistant message.
                 entry["content"] = "(tool call was interrupted)"
 
-        # 4. Preserve tool_call_id on tool messages (OpenAI API requirement)
+        # 4. Preserve tool_call_id on tool messages (OpenAI API requirement),
+        #    but only when the tool-call AIMessage survived windowing.
         if isinstance(m, ToolMessage) and m.tool_call_id:
+            if m.tool_call_id not in emitted_tool_call_ids:
+                # The parent assistant message (with this tool_call) was
+                # windowed or compacted out — emitting the result would make
+                # the API reject the whole turn, so drop the orphaned result.
+                logger.debug(
+                    "Dropping orphaned ToolMessage (tool_call %s not in window)",
+                    m.tool_call_id,
+                )
+                continue
             entry["tool_call_id"] = m.tool_call_id
 
         dicts.append(entry)
@@ -169,27 +211,81 @@ def _has_tool_results_this_turn(messages: list[BaseMessage]) -> bool:
 
 # ── Context bounding ───────────────────────────────────────────────
 # A long-lived thread must not resend unbounded history plus every full
-# ToolMessage on each turn.  The window caps how many recent messages reach
-# the LLM, and tool-result content is truncated per message.
-_MAX_CONTEXT_MESSAGES = 12  # most recent (non-system) messages kept
+# ToolMessage on each turn.  The window is sized by a *token budget* (rough
+# CJK-aware estimate, see ``_estimate_tokens``) rather than a fixed message
+# count, and tool-result content is truncated per message.
 _MAX_TOOL_CONTENT_CHARS = 800  # per-ToolMessage content cap
 
 
-def _window_messages(
-    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
-) -> list[BaseMessage]:
-    """Keep the *max_messages* most recent messages for the LLM context.
+def _estimate_tokens(text: str) -> int:
+    """Rough token count for CJK-mixed text — no tokenizer dependency.
 
-    System prompts are pinned to the front; anything older than the window
-    is dropped.  Only what gets *sent to the LLM* is windowed — nodes that
-    inspect the full state (plain-chat shortcut, approval/conflict gates)
-    use the raw list, so routing decisions are unaffected.
+    Non-ASCII (CJK) characters cost ~1 token each; ASCII runs ~4 chars per
+    token.  Used only to size the agent context window, so a coarse estimate
+    is fine — it should over-approximate Chinese text (cheaper to over-budget
+    than to overflow the model's real context).
     """
-    if len(messages) <= max_messages:
-        return messages
+    if not text:
+        return 0
+    non_ascii = sum(1 for ch in text if ord(ch) > 0x7F)
+    ascii_chars = len(text) - non_ascii
+    return non_ascii + (ascii_chars + 3) // 4
+
+
+def _message_tokens(message: BaseMessage) -> int:
+    """Estimated tokens a message will cost the LLM context.
+
+    ToolMessage content is truncated before it is sent (see
+    ``_truncate_tool_content``), so the estimate uses the truncated length —
+    windowing must budget for what the LLM actually receives.
+    """
+    text = _message_text(message)
+    if isinstance(message, ToolMessage):
+        text = _truncate_tool_content(text)
+    return _estimate_tokens(text)
+
+
+def _context_budget() -> int:
+    """Token budget for the agent context window, from config."""
+    from backend.shared.config import config
+
+    return max(config.context_token_budget, 1)
+
+
+def _window_messages(
+    messages: list[BaseMessage], max_tokens: int | None = None
+) -> list[BaseMessage]:
+    """Keep the newest non-system messages that fit the *max_tokens* budget.
+
+    System prompts are pinned to the front; history is retained from the
+    newest message backwards until the token budget is exhausted.  Long
+    messages shrink the window and short ones widen it — the budget, not a
+    fixed message count, is what bounds context.  The newest message always
+    survives even if it alone exceeds the budget.  Only what gets *sent to
+    the LLM* is windowed — nodes that inspect the full state (plain-chat
+    shortcut, approval/conflict gates) use the raw list, so routing decisions
+    are unaffected.
+    """
+    if max_tokens is None:
+        max_tokens = _context_budget()
     system = [m for m in messages if isinstance(m, SystemMessage)]
     rest = [m for m in messages if not isinstance(m, SystemMessage)]
-    return system + rest[-max_messages:]
+    if not rest:
+        return messages
+
+    tail: list[BaseMessage] = []
+    used = 0
+    for m in reversed(rest):
+        t = _message_tokens(m)
+        if tail and used + t > max_tokens:
+            break
+        tail.append(m)
+        used += t
+    retained = list(reversed(tail))
+
+    if len(retained) == len(rest):
+        return messages  # everything fits — return the caller's list unchanged
+    return system + retained
 
 
 # ── Conversation compaction (B4) ─────────────────────────────────
@@ -201,28 +297,66 @@ def _window_messages(
 # and Anthropic providers see exactly one system message.  Default on.
 
 
-async def _summarize_overflow(messages: list[BaseMessage]) -> str:
+# Cap the compaction call's input: an oversized overflow (a long thread's
+# entire early history) must not blow past the compaction call's own budget.
+_COMPACTION_TRANSCRIPT_CHARS = 12000
+
+# ── Compaction memoization ───────────────────────────────────────────
+# A tool turn bounds the conversation twice — ``call_llm_node`` (for the
+# tool-selection call) and ``generate_final_node`` (for the synthesis call)
+# — over nearly identical message lists with the SAME overflow prefix.  Each
+# previously paid its own compaction LLM call and could produce a different,
+# non-deterministic summary.  Memoize the summary on the exact transcript
+# (the sole input the summarisation LLM sees, plus the prompt version) so the
+# second call reuses the first's output.  Bounded LRU; eviction drops the
+# oldest entry.  Failures are not cached — a transient LLM error retries next
+# turn instead of poisoning the cache with an empty summary.
+_compaction_cache: dict[tuple[str, str], str] = {}
+_COMPACTION_CACHE_MAX = 32
+
+
+def reset_compaction_cache() -> None:
+    """Drop cached compaction summaries (tests / debugging)."""
+    _compaction_cache.clear()
+
+
+def _overflow_transcript(messages: list[BaseMessage]) -> str:
+    """The exact transcript *messages* collapse to for the compaction prompt."""
+    transcript = "\n".join(
+        f"{'user' if isinstance(m, HumanMessage) else 'assistant'}: {_message_text(m)}"
+        for m in messages
+        if isinstance(m, (HumanMessage, AIMessage))
+    )
+    if len(transcript) > _COMPACTION_TRANSCRIPT_CHARS:
+        transcript = transcript[: _COMPACTION_TRANSCRIPT_CHARS] + "\n…[truncated]"
+    return transcript
+
+
+async def _summarize_overflow(
+    messages: list[BaseMessage], transcript: str | None = None
+) -> str:
     """Collapse *messages* into a one-line running summary (one LLM call).
 
-    Fails safe: any error returns ``""`` so the caller falls back to the
-    existing truncation behaviour.
+    The transcript is truncated before the call so a huge overflow can't
+    exceed the compaction call's own context budget.  Fails safe: any error
+    returns ``""`` so the caller falls back to the existing truncation
+    behaviour.
     """
     try:
         provider = get_llm_provider()
-        transcript = "\n".join(
-            f"{'user' if isinstance(m, HumanMessage) else 'assistant'}: {_message_text(m)}"
-            for m in messages
-            if isinstance(m, (HumanMessage, AIMessage))
-        )
+        if transcript is None:
+            transcript = _overflow_transcript(messages)
         version, prompt = get_prompt("agent.compaction")
         logger.info(
-            "Compacting %d early messages (prompt agent.compaction v%s)",
+            "Compacting %d early messages (%d chars) — prompt agent.compaction v%s",
             len(messages),
+            len(transcript),
             version,
         )
         summary = await provider.chat(
             [{"role": "user", "content": prompt.format(transcript=transcript)}],
             scenario="conversation_compaction",
+            temperature=0.3,
         )
         return summary.strip()
     except Exception:
@@ -230,30 +364,84 @@ async def _summarize_overflow(messages: list[BaseMessage]) -> str:
         return ""
 
 
+async def _memoized_summarize_overflow(messages: list[BaseMessage]) -> str:
+    """Summarise *messages*, reusing a cached summary for the same transcript.
+
+    See the module note above the cache — this makes the two bounds in a tool
+    turn agree on one summary and costs at most one compaction LLM call per
+    distinct overflow.
+    """
+    version, _ = get_prompt("agent.compaction")
+    transcript = _overflow_transcript(messages)
+    key = (version, transcript)
+    cached = _compaction_cache.get(key)
+    if cached is not None:
+        return cached
+    summary = await _summarize_overflow(messages, transcript=transcript)
+    if not summary:
+        return summary
+    _compaction_cache[key] = summary
+    if len(_compaction_cache) > _COMPACTION_CACHE_MAX:
+        _compaction_cache.popitem(last=False)
+    return summary
+
+
+def _split_overflow(
+    messages: list[BaseMessage], tail_budget: int
+) -> tuple[list[BaseMessage], list[BaseMessage]]:
+    """Split non-system history into (overflow, tail) by token budget.
+
+    The oldest messages become *overflow* (candidates for compaction); the
+    retained *tail* is the newest suffix that fits *tail_budget*.  At least
+    the newest message always stays in the tail, even if it alone exceeds
+    the budget.
+    """
+    tail: list[BaseMessage] = []
+    used = 0
+    for m in reversed(messages):
+        t = _message_tokens(m)
+        if tail and used + t > tail_budget:
+            break
+        tail.append(m)
+        used += t
+    tail = list(reversed(tail))
+    overflow = messages[: len(messages) - len(tail)]
+    return overflow, tail
+
+
 async def _maybe_compact(
-    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+    messages: list[BaseMessage], max_tokens: int | None = None
 ) -> list[BaseMessage]:
-    """Fold messages older than the window into a running-summary SystemMessage.
+    """Fold history older than the token budget into a running-summary SystemMessage.
 
     Only active when ``config.conversation_compaction_enabled`` is set
-    (default on).  When the non-system history exceeds *max_messages*, the
-    overflow prefix is summarised in one LLM call and prepended as a
-    ``SystemMessage`` so the retained tail keeps its conversational context.
-    On any failure it returns *messages* unchanged and the caller's windowing
-    still truncates — compaction never loses more context than the existing
-    behaviour.
+    (default on).  When the non-system history's estimated token count
+    exceeds *max_tokens*, the overflow prefix (the portion that can't fit
+    alongside a retained tail) is summarised in one LLM call and prepended
+    as a ``SystemMessage`` so the retained tail keeps its conversational
+    context.  The tail is budgeted to ~60% of the window so the summary fits
+    inside the same total budget.  On any failure it returns *messages*
+    unchanged and the caller's windowing still truncates — compaction never
+    loses more context than the existing behaviour.
     """
     from backend.shared.config import config
 
+    if max_tokens is None:
+        max_tokens = _context_budget()
     if not config.conversation_compaction_enabled:
-        return messages
-    if len(messages) <= max_messages:
         return messages
     system = [m for m in messages if isinstance(m, SystemMessage)]
     rest = [m for m in messages if not isinstance(m, SystemMessage)]
-    if len(rest) <= max_messages:
+    if sum(_message_tokens(m) for m in rest) <= max_tokens:
         return messages
-    summary = await _summarize_overflow(rest[:-max_messages])
+    # Reserve ~60% of the window for the retained tail; the running summary
+    # gets the rest.  If even the tail can't fit (a single oversized message),
+    # the split still keeps the newest message and compacts everything older.
+    tail_budget = max(int(max_tokens * 0.6), 1)
+    overflow, tail = _split_overflow(rest, tail_budget)
+    if not overflow:
+        return messages
+    summary = await _memoized_summarize_overflow(overflow)
     if not summary:
         return messages
     # Pinned system messages stay first, then the running summary, then the
@@ -261,7 +449,7 @@ async def _maybe_compact(
     # LangChain message list — ``call_llm_node`` coalesces all system messages
     # into one before serialization, so Anthropic's single-top-level-system
     # constraint is met (see ``_merge_system_messages``).
-    return system + [SystemMessage(content=summary)] + rest[-max_messages:]
+    return system + [SystemMessage(content=summary)] + tail
 
 
 def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -297,15 +485,15 @@ def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 
 async def _bounded_messages(
-    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+    messages: list[BaseMessage], max_tokens: int | None = None
 ) -> list[BaseMessage]:
     """Compact (when enabled) then window *messages* for the LLM.
 
     With compaction disabled this is exactly ``_window_messages`` — the
     default behaviour is unchanged.
     """
-    compacted = await _maybe_compact(messages, max_messages)
-    return _window_messages(compacted, max_messages)
+    compacted = await _maybe_compact(messages, max_tokens)
+    return _window_messages(compacted, max_tokens)
 
 
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
@@ -349,6 +537,107 @@ def _wrap_context_item(tool_name: str, content: str) -> str:
 # via write_memory_tool).  Set AUTO_MEMORY_ENABLED=false to restore explicit
 # write-on-request behaviour.
 _AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
+
+# Each capture costs 3 LLM extractions (summary + entities + relations) plus
+# embedding and a similarity scan, so a quality gate runs *before any LLM
+# call*: only declarative knowledge statements are captured — questions,
+# action requests, and chatty filler are skipped.  Deliberately conservative:
+# a missed capture is recoverable, a junk memory pollutes retrieval forever.
+_AUTO_MEMORY_MIN_CONTENT_LEN = 12  # raw user message must be this long
+_AUTO_MEMORY_QUESTION_SUFFIXES = ("？", "?", "吗", "呢", "吧", "啊")
+_AUTO_MEMORY_QUESTION_MARKERS = (
+    "什么", "怎么", "如何", "为什么", "哪些", "哪个", "能否", "能不能",
+    "是不是", "有没有", "是否", "请问",
+)
+_AUTO_MEMORY_REQUEST_PREFIXES = (
+    "帮我", "请帮我", "查一下", "搜索", "搜一下", "找一下", "找找",
+    "介绍一下", "解释", "讲讲", "看看", "分析一下", "评估一下",
+    "总结一下", "列出", "推荐", "对比一下",
+)
+_AUTO_MEMORY_CHATTY = frozenset({
+    "你好", "您好", "谢谢", "感谢", "辛苦了", "再见", "拜拜", "好的",
+    "嗯", "收到", "在吗", "hello", "hi", "ok", "okay",
+})
+
+
+def _is_auto_memory_worthy(content: str) -> bool:
+    """True when *content* reads like a declarative knowledge statement.
+
+    Filters out questions, action requests, and chatty filler before any LLM
+    call.  ``记住…`` requests are deliberately NOT filtered — they are the
+    explicit-remember path, normally handled by ``write_memory_tool``, and
+    capturing them here when the tool was not invoked is correct.
+    """
+    text = content.strip()
+    if len(text) < _AUTO_MEMORY_MIN_CONTENT_LEN:
+        return False
+    if text.lower() in _AUTO_MEMORY_CHATTY:
+        return False
+    if text.endswith(_AUTO_MEMORY_QUESTION_SUFFIXES):
+        return False
+    if any(marker in text for marker in _AUTO_MEMORY_QUESTION_MARKERS):
+        return False
+    lowered = text.lower()
+    if any(text.startswith(p) for p in _AUTO_MEMORY_REQUEST_PREFIXES):
+        return False
+    if any(lowered.startswith(p) for p in ("please ", "can you ", "could you ")):
+        return False
+    return True
+
+
+# ── Auto-memory frequency control ───────────────────────────────────
+# Capture is throttled before extraction runs (a throttled turn costs zero
+# LLM calls): a per-thread minimum interval, a per-thread lifetime cap, an
+# exact-repeat skip, and a process-wide rolling-window cap.  State is
+# in-memory (same as the circuit breaker / token-usage counters) and resets
+# on process restart.
+_AUTO_MEMORY_WINDOW_SECONDS = 3600  # rolling window for the process-wide cap
+
+_auto_memory_lock = threading.Lock()
+_auto_memory_last_write: dict[str, float] = {}  # thread_id -> monotonic ts
+_auto_memory_write_count: dict[str, int] = {}   # thread_id -> lifetime count
+_auto_memory_last_content: dict[str, str] = {}  # thread_id -> last content
+_auto_memory_recent_writes: deque = deque()     # monotonic ts, process-wide
+
+
+def reset_auto_memory_throttle() -> None:
+    """Drop all auto-memory throttle state — tests use this for isolation."""
+    with _auto_memory_lock:
+        _auto_memory_last_write.clear()
+        _auto_memory_write_count.clear()
+        _auto_memory_last_content.clear()
+        _auto_memory_recent_writes.clear()
+
+
+def _auto_memory_throttled(thread_id: str, content: str) -> bool:
+    """True when a new auto-memory capture should be skipped (throttled)."""
+    from backend.shared.config import config
+
+    now = time.monotonic()
+    with _auto_memory_lock:
+        if _auto_memory_last_content.get(thread_id) == content:
+            return True
+        last = _auto_memory_last_write.get(thread_id)
+        if last is not None and now - last < config.auto_memory_min_interval:
+            return True
+        if _auto_memory_write_count.get(thread_id, 0) >= config.auto_memory_max_per_thread:
+            return True
+        while (
+            _auto_memory_recent_writes
+            and now - _auto_memory_recent_writes[0] > _AUTO_MEMORY_WINDOW_SECONDS
+        ):
+            _auto_memory_recent_writes.popleft()
+        return len(_auto_memory_recent_writes) >= config.auto_memory_max_per_window
+
+
+def _record_auto_memory_write(thread_id: str, content: str) -> None:
+    """Note a completed auto-memory capture for the throttle windows."""
+    now = time.monotonic()
+    with _auto_memory_lock:
+        _auto_memory_last_write[thread_id] = now
+        _auto_memory_write_count[thread_id] = _auto_memory_write_count.get(thread_id, 0) + 1
+        _auto_memory_last_content[thread_id] = content
+        _auto_memory_recent_writes.append(now)
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -397,21 +686,39 @@ def _has_substance(extracted: dict) -> bool:
 async def _maybe_auto_memory(state: AgentState) -> None:
     """Best-effort automatic knowledge capture at the end of a turn.
 
-    Runs only when ``config.auto_memory_enabled`` is set.  If the user's
-    latest message carries substantive knowledge and the agent did not
-    already call ``write_memory_tool`` this turn, the message is extracted
-    and written to the memory store.  Any failure is logged and swallowed —
-    auto memory must never break the chat response.
+    Runs only when both ``auto_memory_enabled`` and ``memory_enabled`` are set
+    (the memory pipeline as a whole is opt-out via ``MEMORY_ENABLED=false`` —
+    with no memory tools the agent is pure chat, so it must not keep writing
+    memories behind the scenes).  A turn is captured only when (1) the user's
+    message reads like a declarative knowledge statement
+    (``_is_auto_memory_worthy``), (2) capture is not throttled
+    (``_auto_memory_throttled``), (3) the agent did not already call
+    ``write_memory_tool`` this turn, and (4) extraction yields substantive
+    content.  Any failure is logged and swallowed — auto memory must never
+    break the chat response.
     """
-    from backend.shared.config import config
+    from backend.shared.config import config, current_thread_id
 
-    if not config.auto_memory_enabled:
+    if not (config.auto_memory_enabled and config.memory_enabled):
         return
 
     user_content = _last_human_content(state["messages"])
     if not user_content:
         return
     if _write_tool_used_this_turn(state["messages"]):
+        return
+
+    # Quality gate — before any LLM call, so a question/request/filler turn
+    # never pays for extraction.
+    if not _is_auto_memory_worthy(user_content):
+        logger.info("Auto-memory: not a knowledge statement, skipping")
+        return
+
+    # Frequency control — before extraction, so a throttled turn costs zero
+    # LLM calls.
+    thread_id = current_thread_id.get("") or "_"
+    if _auto_memory_throttled(thread_id, user_content):
+        logger.info("Auto-memory: throttled (interval/cap/window), skipping")
         return
 
     try:
@@ -432,6 +739,7 @@ async def _maybe_auto_memory(state: AgentState) -> None:
             result.get("id"),
             result.get("action"),
         )
+        _record_auto_memory_write(thread_id, user_content)
     except Exception:
         logger.exception("Auto-memory write failed")
 
@@ -664,14 +972,25 @@ APPROVAL_REQUIRED_TOOLS: frozenset[str] = frozenset({
     "ingest_document_tool",
 })
 
+# The interactive chat path additionally gates the external-notification tool
+# (posting to the team's 飞书 group is a side effect an injected instruction
+# in retrieved content could otherwise trigger).  Automated flows (patrol,
+# scenarios) keep the default set so they can still notify the team
+# autonomously — see ``build_agent_graph(approval_required_tools=...)``.
+CHAT_APPROVAL_TOOLS: frozenset[str] = APPROVAL_REQUIRED_TOOLS | {"notify_feishu_tool"}
+
 
 async def check_approval_node(
     state: AgentState,
+    *,
+    approval_required_tools: frozenset[str] = APPROVAL_REQUIRED_TOOLS,
 ) -> Command[Literal["tools", "call_llm"]]:
     """Gate sensitive tool calls before they reach ``ToolNode``.
 
     Inspects the last AIMessage's ``tool_calls`` and classifies each as
-    *safe* (search / retrieval) or *sensitive* (write / ingest).
+    *safe* (search / retrieval) or *sensitive* (write / ingest, plus any
+    tool in ``approval_required_tools`` — default ``APPROVAL_REQUIRED_TOOLS``,
+    chat passes ``CHAT_APPROVAL_TOOLS`` to add the notification tool).
 
     - All-safe → passes through to ``tools`` directly (no interrupt).
     - Any sensitive → ``interrupt()`` pauses the graph, surfacing the
@@ -708,7 +1027,7 @@ async def check_approval_node(
     sensitive: list[dict] = []
     for tc in tool_calls:
         name = str(tc.get("name", tc.get("function", {}).get("name", "")))
-        if name in APPROVAL_REQUIRED_TOOLS:
+        if name in approval_required_tools:
             sensitive.append(dict(tc))
         else:
             safe.append(dict(tc))
