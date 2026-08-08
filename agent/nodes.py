@@ -203,6 +203,29 @@ def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> s
     return text[:limit] + "\n…[truncated]"
 
 
+# ── Retrieved-context tagging (B2) ───────────────────────────────
+# Tool results folded into the final system prompt come from the knowledge
+# base and must be framed as untrusted data.  Each item is wrapped in a
+# fixed marker tag so the LLM can distinguish retrieved content from its own
+# instructions (see the agent.system template's isolation declaration).
+_CONTEXT_DOC_TOOLS: frozenset[str] = frozenset({
+    "retrieve_chunks_tool",
+    "query_rewrite_and_search_tool",
+    "ingest_document_tool",
+})
+
+
+def _context_tag(tool_name: str) -> str:
+    """Retrieval-source marker: ``doc`` for document/chunk tools, else ``memory``."""
+    return "doc" if tool_name in _CONTEXT_DOC_TOOLS else "memory"
+
+
+def _wrap_context_item(tool_name: str, content: str) -> str:
+    """Wrap one retrieved context item in its fixed source marker tag."""
+    tag = _context_tag(tool_name)
+    return f'<{tag} source="{tool_name}">\n{content}\n</{tag}>'
+
+
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
@@ -347,7 +370,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         content = _truncate_tool_content(content)
         if not content.strip():
             continue
-        context_parts.append(f"### {tool_name}\n{content}")
+        context_parts.append(_wrap_context_item(tool_name, content))
 
     context_str = "\n\n".join(context_parts) if context_parts else ""
 
