@@ -584,4 +584,6 @@ class TestSerialization:
         cfg = EvalConfig(name="x", retriever="memory", top_k=10, use_llm_rerank=True)
         assert cfg.label == "memory:llm@k10"
         cfg2 = EvalConfig(name="y", retriever="chunk", top_k=3)
-        assert cfg2.label == "chunk:ce@k3"
+        assert cfg2.label == "chunk:norank@k3"
+        cfg3 = EvalConfig(name="z", retriever="memory", top_k=5, use_cross_encoder=True)
+        assert cfg3.label == "memory:ce@k5"

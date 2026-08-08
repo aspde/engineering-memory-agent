@@ -48,17 +48,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--retriever",
         choices=("memory", "chunk", "vector", "hybrid", "hybrid_norerank", "rewrite"),
         default="memory",
-        help="Retrieval path: 'memory' (memories table, with rerank), "
-        "'chunk' (chunks table, with rerank), 'vector' (chunks table, "
-        "NO rerank — fast baseline, ~200ms/query), 'hybrid' (dense+sparse "
-        "BM25 union + rerank), or 'rewrite' (LLM query rewrite + multi-query "
-        "union + rerank, ~700ms/query). Default: memory.",
+        help="Retrieval path: 'memory' (memories table), 'chunk' (chunks "
+        "table), 'vector' (chunks table, NO rerank — fast baseline, "
+        "~200ms/query), 'hybrid' (dense+sparse BM25 union), or 'rewrite' "
+        "(LLM query rewrite + multi-query union, ~700ms/query). The read "
+        "paths skip reranking by default. Default: memory.",
     )
     p.add_argument("--top-k", type=int, default=5, help="K for @K metrics. Default: 5.")
     p.add_argument(
         "--llm-rerank",
         action="store_true",
-        help="Use LLM rerank instead of cross-encoder. Costlier; needs LLM provider.",
+        help="Use LLM rerank instead of the default no-rerank path. "
+        "Costlier; needs LLM provider.",
+    )
+    p.add_argument(
+        "--cross-encoder",
+        action="store_true",
+        help="Use the local cross-encoder reranker instead of the default "
+        "no-rerank path.",
     )
     p.add_argument(
         "--threshold",
@@ -152,18 +159,29 @@ def _make_config(
     retriever: str,
     top_k: int,
     use_llm_rerank: bool,
+    use_cross_encoder: bool,
     threshold: float | None,
     categories: list[str] | None,
 ) -> EvalConfig:
     cfg = EvalConfig(
-        name=name or f"{retriever}:{'llm' if use_llm_rerank else 'ce'}@k{top_k}",
+        name=name or f"{retriever}:{_rerank_label(use_llm_rerank, use_cross_encoder)}@k{top_k}",
         retriever=retriever,
         top_k=top_k,
         use_llm_rerank=use_llm_rerank,
+        use_cross_encoder=use_cross_encoder,
         threshold=threshold,
         categories=categories,
     )
     return cfg
+
+
+def _rerank_label(use_llm_rerank: bool, use_cross_encoder: bool) -> str:
+    """Short label for report names: ``llm`` / ``ce`` / ``norank``."""
+    if use_llm_rerank:
+        return "llm"
+    if use_cross_encoder:
+        return "ce"
+    return "norank"
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -187,6 +205,7 @@ async def _run(args: argparse.Namespace) -> int:
             retriever=args.retriever,
             top_k=args.top_k,
             use_llm_rerank=False,
+            use_cross_encoder=True,
             threshold=args.threshold,
             categories=categories,
         )
@@ -195,6 +214,7 @@ async def _run(args: argparse.Namespace) -> int:
             retriever=args.retriever,
             top_k=args.top_k,
             use_llm_rerank=True,
+            use_cross_encoder=False,
             threshold=args.threshold,
             categories=categories,
         )
@@ -208,6 +228,7 @@ async def _run(args: argparse.Namespace) -> int:
             retriever=args.retriever,
             top_k=args.top_k,
             use_llm_rerank=args.llm_rerank,
+            use_cross_encoder=args.cross_encoder,
             threshold=args.threshold,
             categories=categories,
         )

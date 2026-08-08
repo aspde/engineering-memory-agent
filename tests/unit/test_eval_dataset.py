@@ -357,17 +357,25 @@ class TestSemanticMatching:
 class TestBuildAdapter:
     def test_chunk_adapter_name_and_field(self) -> None:
         adapter = build_adapter("chunk")
-        assert adapter.name == "chunk:ce"
+        assert adapter.name == "chunk:norank"
         assert adapter.match_field == "content"
 
     def test_chunk_adapter_llm_variant(self) -> None:
         adapter = build_adapter("chunk", use_llm_rerank=True)
         assert adapter.name == "chunk:llm"
 
+    def test_chunk_adapter_cross_encoder_variant(self) -> None:
+        adapter = build_adapter("chunk", use_cross_encoder=True)
+        assert adapter.name == "chunk:ce"
+
     def test_memory_adapter_name_and_field(self) -> None:
         adapter = build_adapter("memory")
-        assert adapter.name == "memory:ce"
+        assert adapter.name == "memory:norank"
         assert adapter.match_field == "summary"
+
+    def test_memory_adapter_cross_encoder_variant(self) -> None:
+        adapter = build_adapter("memory", use_cross_encoder=True)
+        assert adapter.name == "memory:ce"
 
     def test_memory_adapter_threshold_default(self) -> None:
         # Default threshold for memory path is 0.3 — just ensure it builds.
@@ -381,13 +389,21 @@ class TestBuildAdapter:
 
     def test_hybrid_adapter_name_and_field(self) -> None:
         adapter = build_adapter("hybrid")
-        assert adapter.name == "hybrid:ce"
+        assert adapter.name == "hybrid:norank"
         assert adapter.match_field == "content"
+
+    def test_hybrid_adapter_cross_encoder_variant(self) -> None:
+        adapter = build_adapter("hybrid", use_cross_encoder=True)
+        assert adapter.name == "hybrid:ce"
 
     def test_rewrite_adapter_name_and_field(self) -> None:
         adapter = build_adapter("rewrite")
-        assert adapter.name == "rewrite:ce"
+        assert adapter.name == "rewrite:norank"
         assert adapter.match_field == "content"
+
+    def test_rewrite_adapter_cross_encoder_variant(self) -> None:
+        adapter = build_adapter("rewrite", use_cross_encoder=True)
+        assert adapter.name == "rewrite:ce"
 
     def test_unknown_retriever_raises(self) -> None:
         with pytest.raises(ValueError, match="unknown retriever"):

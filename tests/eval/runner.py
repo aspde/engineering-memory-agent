@@ -58,6 +58,7 @@ class EvalConfig:
     retriever: str = "memory"  # "chunk" | "memory"
     top_k: int = 5
     use_llm_rerank: bool = False
+    use_cross_encoder: bool = False
     threshold: float | None = None
     categories: list[str] | None = None
 
@@ -65,13 +66,20 @@ class EvalConfig:
         return build_adapter(
             self.retriever,
             use_llm_rerank=self.use_llm_rerank,
+            use_cross_encoder=self.use_cross_encoder,
             threshold=self.threshold,
         )
 
     @property
     def label(self) -> str:
-        """Short human label, e.g. ``memory:ce@k5``."""
-        rerank = "llm" if self.use_llm_rerank else "ce"
+        """Short human label, e.g. ``memory:norank@k5``.
+
+        ``norank`` is the default read path (no cross-encoder); ``ce`` and
+        ``llm`` label the explicit opt-in rerankers.
+        """
+        rerank = "llm" if self.use_llm_rerank else (
+            "ce" if self.use_cross_encoder else "norank"
+        )
         return f"{self.retriever}:{rerank}@k{self.top_k}"
 
 
@@ -290,6 +298,7 @@ def config_from_dict(d: dict[str, Any]) -> EvalConfig:
         retriever=str(d.get("retriever", "memory")),
         top_k=int(d.get("top_k", 5)),
         use_llm_rerank=bool(d.get("use_llm_rerank", False)),
+        use_cross_encoder=bool(d.get("use_cross_encoder", False)),
         threshold=d.get("threshold"),
         categories=list(d["categories"]) if d.get("categories") else None,
     )

@@ -255,9 +255,23 @@ async def semantic_relevance_mask(
 # ── Retriever adapters ────────────────────────────────────────
 
 
+def _rerank_tag(use_llm_rerank: bool, use_cross_encoder: bool) -> str:
+    """Three-state rerank label for adapter names and eval report configs.
+
+    The default read path skips reranking entirely (``norank``); the
+    cross-encoder and LLM rerankers are explicit opt-ins (``ce`` / ``llm``).
+    """
+    if use_llm_rerank:
+        return "llm"
+    if use_cross_encoder:
+        return "ce"
+    return "norank"
+
+
 def make_chunk_retriever(
     *,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
     threshold: float = 0.0,
 ) -> RetrieverAdapter:
     """Adapter for ``retrieval.retrieve`` (chunks table).
@@ -269,7 +283,10 @@ def make_chunk_retriever(
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         results = await retrieve(
-            query, top_k=top_k, use_llm_rerank=use_llm_rerank
+            query,
+            top_k=top_k,
+            use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
         )
         # RetrievalResult dataclass → dict; threshold is applied upstream in
         # vector_search, kept here for API symmetry with the memory adapter.
@@ -279,13 +296,17 @@ def make_chunk_retriever(
             for r in results
         ]
 
-    rerank_tag = "llm" if use_llm_rerank else "ce"
-    return RetrieverAdapter(name=f"chunk:{rerank_tag}", fn=_fn, match_field="content")
+    return RetrieverAdapter(
+        name=f"chunk:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        fn=_fn,
+        match_field="content",
+    )
 
 
 def make_memory_retriever(
     *,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
     threshold: float = 0.3,
 ) -> RetrieverAdapter:
     """Adapter for ``retrieval.query_memories`` (memories table).
@@ -301,10 +322,14 @@ def make_memory_retriever(
             top_k=top_k,
             threshold=threshold,
             use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
         )
 
-    rerank_tag = "llm" if use_llm_rerank else "ce"
-    return RetrieverAdapter(name=f"memory:{rerank_tag}", fn=_fn, match_field="summary")
+    return RetrieverAdapter(
+        name=f"memory:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        fn=_fn,
+        match_field="summary",
+    )
 
 
 def make_vector_retriever(*, threshold: float = 0.0) -> RetrieverAdapter:
@@ -356,7 +381,11 @@ def make_hybrid_retriever(
     return RetrieverAdapter(name=f"hybrid:{rerank_tag}", fn=_fn, match_field="content")
 
 
-def make_rewrite_retriever(*, use_llm_rerank: bool = False) -> RetrieverAdapter:
+def make_rewrite_retriever(
+    *,
+    use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
+) -> RetrieverAdapter:
     """Adapter for ``retrieve_multi_query`` (LLM rewrite + multi-query union + rerank).
 
     Returns chunks-table rows (``content`` field).  Costs one extra LLM
@@ -366,15 +395,21 @@ def make_rewrite_retriever(*, use_llm_rerank: bool = False) -> RetrieverAdapter:
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         results = await retrieve_multi_query(
-            query, top_k=top_k, use_llm_rerank=use_llm_rerank
+            query,
+            top_k=top_k,
+            use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
         )
         return [
             {"content": r.content, "score": r.score, "meta": r.metadata}
             for r in results
         ]
 
-    rerank_tag = "llm" if use_llm_rerank else "ce"
-    return RetrieverAdapter(name=f"rewrite:{rerank_tag}", fn=_fn, match_field="content")
+    return RetrieverAdapter(
+        name=f"rewrite:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        fn=_fn,
+        match_field="content",
+    )
 
 
 # ── Convenience for the runner ────────────────────────────────
@@ -384,24 +419,29 @@ def build_adapter(
     retriever: str,
     *,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
     threshold: float | None = None,
 ) -> RetrieverAdapter:
     """Construct a RetrieverAdapter by name.
 
     Args:
         retriever: ``"chunk"`` or ``"memory"``.
-        use_llm_rerank: route to ``rerank_llm`` instead of cross-encoder.
+        use_llm_rerank: route to ``rerank_llm``.
+        use_cross_encoder: route to the local cross-encoder reranker.
+            Both default False → the no-rerank read path.
         threshold: similarity floor. ``None`` uses each path's default
             (0.0 for chunks, 0.3 for memories).
     """
     if retriever == "chunk":
         return make_chunk_retriever(
             use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
             threshold=threshold if threshold is not None else 0.0,
         )
     if retriever == "memory":
         return make_memory_retriever(
             use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
             threshold=threshold if threshold is not None else 0.3,
         )
     if retriever == "vector":
@@ -409,11 +449,17 @@ def build_adapter(
             threshold=threshold if threshold is not None else 0.0,
         )
     if retriever == "hybrid":
-        return make_hybrid_retriever(use_llm_rerank=use_llm_rerank)
+        return make_hybrid_retriever(
+            use_llm_rerank=use_llm_rerank,
+            skip_rerank=not use_cross_encoder,
+        )
     if retriever == "hybrid_norerank":
         return make_hybrid_retriever(skip_rerank=True)
     if retriever == "rewrite":
-        return make_rewrite_retriever(use_llm_rerank=use_llm_rerank)
+        return make_rewrite_retriever(
+            use_llm_rerank=use_llm_rerank,
+            use_cross_encoder=use_cross_encoder,
+        )
     raise ValueError(
         f"unknown retriever: {retriever!r} "
         "(expected 'chunk', 'memory', 'vector', 'hybrid', "
