@@ -192,6 +192,88 @@ def _window_messages(
     return system + rest[-max_messages:]
 
 
+# ── Conversation compaction (B4) ─────────────────────────────────
+# Long threads previously dropped everything outside the window.  When
+# CONVERSATION_COMPACTION_ENABLED=true, the overflow is folded into one
+# running-summary SystemMessage (a single LLM call) so the retained tail
+# keeps its conversational context.  Default off — the existing truncation
+# behaviour is unchanged.
+
+
+async def _summarize_overflow(messages: list[BaseMessage]) -> str:
+    """Collapse *messages* into a one-line running summary (one LLM call).
+
+    Fails safe: any error returns ``""`` so the caller falls back to the
+    existing truncation behaviour.
+    """
+    try:
+        provider = get_llm_provider()
+        transcript = "\n".join(
+            f"{'user' if isinstance(m, HumanMessage) else 'assistant'}: {_message_text(m)}"
+            for m in messages
+            if isinstance(m, (HumanMessage, AIMessage))
+        )
+        version, prompt = get_prompt("agent.compaction")
+        logger.info(
+            "Compacting %d early messages (prompt agent.compaction v%s)",
+            len(messages),
+            version,
+        )
+        summary = await provider.chat(
+            [{"role": "user", "content": prompt.format(transcript=transcript)}],
+            scenario="conversation_compaction",
+        )
+        return summary.strip()
+    except Exception:
+        logger.exception("Conversation compaction failed, falling back to truncation")
+        return ""
+
+
+async def _maybe_compact(
+    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+) -> list[BaseMessage]:
+    """Fold messages older than the window into a running-summary SystemMessage.
+
+    Only active when ``config.conversation_compaction_enabled`` is set
+    (default off).  When the non-system history exceeds *max_messages*, the
+    overflow prefix is summarised in one LLM call and prepended as a
+    ``SystemMessage`` so the retained tail keeps its conversational context.
+    On any failure it returns *messages* unchanged and the caller's windowing
+    still truncates — compaction never loses more context than the existing
+    behaviour.
+    """
+    from backend.shared.config import config
+
+    if not config.conversation_compaction_enabled:
+        return messages
+    if len(messages) <= max_messages:
+        return messages
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    rest = [m for m in messages if not isinstance(m, SystemMessage)]
+    if len(rest) <= max_messages:
+        return messages
+    summary = await _summarize_overflow(rest[:-max_messages])
+    if not summary:
+        return messages
+    # Pinned system messages stay first, then the running summary, then the
+    # retained tail.  (OpenAI-compatible providers accept multiple system
+    # messages; the Anthropic provider lifts only the first as ``system`` —
+    # a documented limitation of this opt-in feature.)
+    return system + [SystemMessage(content=summary)] + rest[-max_messages:]
+
+
+async def _bounded_messages(
+    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+) -> list[BaseMessage]:
+    """Compact (when enabled) then window *messages* for the LLM.
+
+    With compaction disabled this is exactly ``_window_messages`` — the
+    default behaviour is unchanged.
+    """
+    compacted = await _maybe_compact(messages, max_messages)
+    return _window_messages(compacted, max_messages)
+
+
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
     """Cap a ToolMessage's content before it is resent to the LLM.
 
@@ -338,10 +420,11 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     provider = get_llm_provider()
 
     # Prepend the system prompt if this is the first call, then bound the
-    # history sent to the LLM (recent window + pinned system prompts).
+    # history sent to the LLM (compact when enabled, then window to the
+    # recent tail + pinned system prompts).
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
-    messages = _window_messages(messages)
+    messages = await _bounded_messages(messages)
     if not has_system:
         version, system_text = get_prompt("agent.system")
         logger.info("call_llm_node: using agent.system prompt v%s", version)
@@ -433,11 +516,17 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         return {"final_prompt": None, "final_response": str(last.content)}
 
     # ── Harvest context from ToolMessages in the recent conversation ──
-    # Both this loop and the role loop below walk the *windowed* history so
-    # a long thread doesn't resend unbounded tool results into the synthesis
-    # prompt on every turn.
-    windowed = _window_messages(state["messages"])
+    # Both this loop and the role loop below walk the *bounded* history so a
+    # long thread doesn't resend unbounded tool results into the synthesis
+    # prompt on every turn.  When compaction is enabled the overflow is folded
+    # into a running-summary SystemMessage, which is folded into the context
+    # block below so the synthesis LLM still sees the compressed history.
+    windowed = await _bounded_messages(state["messages"])
     context_parts: list[str] = []
+    # Compaction summaries (SystemMessages) become <summary> context items.
+    for m in windowed:
+        if isinstance(m, SystemMessage) and (m.content or "").strip():
+            context_parts.append(f"<summary>\n{str(m.content).strip()}\n</summary>")
     for m in windowed:
         if not isinstance(m, ToolMessage):
             continue

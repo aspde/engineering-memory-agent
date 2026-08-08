@@ -150,6 +150,14 @@ class AppConfig:
     auto_memory_enabled: bool = field(
         default_factory=lambda: os.getenv("AUTO_MEMORY_ENABLED", "false").lower() == "true"
     )
+    # When enabled, messages older than the context window are folded into a
+    # running-summary SystemMessage instead of being dropped.  Default off —
+    # long history is truncated as before.
+    conversation_compaction_enabled: bool = field(
+        default_factory=lambda: os.getenv(
+            "CONVERSATION_COMPACTION_ENABLED", "false"
+        ).lower() == "true"
+    )
     # ── Phase 3: proactive agent ───────────────────────────────────
     patrol_enabled: bool = field(
         default_factory=lambda: os.getenv("PATROL_ENABLED", "true").lower() == "true"
