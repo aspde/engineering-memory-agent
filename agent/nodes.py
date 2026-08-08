@@ -16,8 +16,9 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from agent.state import AgentState
+from backend.service.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
-from backend.service.memory import resolve_conflict
+from backend.service.memory import resolve_conflict, write_memory
 from backend.service.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
@@ -226,6 +227,98 @@ def _wrap_context_item(tool_name: str, content: str) -> str:
     return f'<{tag} source="{tool_name}">\n{content}\n</{tag}>'
 
 
+# ── Automatic knowledge capture (B3) ──────────────────────────────
+# When AUTO_MEMORY_ENABLED=true, substantive user turns are written to the
+# memory store automatically (unless the agent already wrote this turn via
+# write_memory_tool).  Default off — the existing behaviour is unchanged.
+_AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
+
+
+def _message_text(message: BaseMessage) -> str:
+    """Plain-text content of a message (falls back to str for block content)."""
+    content = message.content
+    return content if isinstance(content, str) else str(content)
+
+
+def _last_human_content(messages: list[BaseMessage]) -> str:
+    """Return the most recent HumanMessage's non-empty text, or ``""``."""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return _message_text(m).strip()
+    return ""
+
+
+def _write_tool_used_this_turn(messages: list[BaseMessage]) -> bool:
+    """True if ``write_memory_tool`` was invoked or executed this turn.
+
+    Scans from the latest HumanMessage forward for either an assistant
+    tool_call naming the tool or a ToolMessage it produced.  Only the
+    current turn counts — earlier turns' writes don't suppress auto memory.
+    """
+    start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            start = i
+            break
+    for m in messages[start:]:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "write_memory_tool":
+            return True
+        if isinstance(m, AIMessage) and any(
+            str(tc.get("name", "")) == "write_memory_tool"
+            for tc in getattr(m, "tool_calls", None) or []
+        ):
+            return True
+    return False
+
+
+def _has_substance(extracted: dict) -> bool:
+    """Heuristic: does the extracted memory carry real knowledge?"""
+    summary = str(extracted.get("summary") or "").strip()
+    return len(summary) >= _AUTO_MEMORY_MIN_SUMMARY_LEN or bool(extracted.get("entities"))
+
+
+async def _maybe_auto_memory(state: AgentState) -> None:
+    """Best-effort automatic knowledge capture at the end of a turn.
+
+    Runs only when ``config.auto_memory_enabled`` is set.  If the user's
+    latest message carries substantive knowledge and the agent did not
+    already call ``write_memory_tool`` this turn, the message is extracted
+    and written to the memory store.  Any failure is logged and swallowed —
+    auto memory must never break the chat response.
+    """
+    from backend.shared.config import config
+
+    if not config.auto_memory_enabled:
+        return
+
+    user_content = _last_human_content(state["messages"])
+    if not user_content:
+        return
+    if _write_tool_used_this_turn(state["messages"]):
+        return
+
+    try:
+        extracted = await extract_memory(user_content)
+    except Exception:
+        logger.exception("Auto-memory extraction failed for user message")
+        return
+    if not _has_substance(extracted):
+        logger.info(
+            "Auto-memory: user message carries no substantive knowledge, skipping"
+        )
+        return
+
+    try:
+        result = await write_memory(user_content, source_type="conversation")
+        logger.info(
+            "Auto-memory: wrote memory %s (action=%s)",
+            result.get("id"),
+            result.get("action"),
+        )
+    except Exception:
+        logger.exception("Auto-memory write failed")
+
+
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
@@ -336,6 +429,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         logger.info(
             "Reusing call_llm output as final answer (no tool results this turn)"
         )
+        await _maybe_auto_memory(state)
         return {"final_prompt": None, "final_response": str(last.content)}
 
     # ── Harvest context from ToolMessages in the recent conversation ──
@@ -420,6 +514,8 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         writer({"type": "token", "content": response})
 
     aimessage = AIMessage(content=response)
+
+    await _maybe_auto_memory(state)
 
     return {
         "final_prompt": messages,
