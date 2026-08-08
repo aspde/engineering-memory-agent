@@ -10,6 +10,7 @@ from backend.api.routes.entity_routes import router as entity_router
 from backend.api.routes.memory_routes import router as memory_router
 from backend.api.routes.patrol_routes import router as patrol_router
 from backend.api.routes.scenario_routes import router as scenario_router
+from backend.api.routes.usage_routes import router as usage_router
 from backend.api.routes.webhook_routes import router as webhook_router
 
 # Router-level dependency: every route aggregated below (and, transitively,
@@ -24,3 +25,4 @@ api_router.include_router(connector_router)
 api_router.include_router(patrol_router)
 api_router.include_router(scenario_router)
 api_router.include_router(conflict_router)
+api_router.include_router(usage_router)

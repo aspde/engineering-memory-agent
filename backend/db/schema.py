@@ -173,10 +173,30 @@ def build_schema_statements(dimension: int) -> list[str]:
             trigger           TEXT NOT NULL,
             status            TEXT NOT NULL DEFAULT 'running',
             findings          JSONB,
-            dismissed_findings UUID[],
+            dismissed_findings TEXT[],
             started_at        TIMESTAMPTZ DEFAULT now(),
             completed_at      TIMESTAMPTZ
         )
+        """,
+        # Dismissed-finding keys are *finding identifiers*, not memory UUIDs —
+        # the LLM's finding JSON carries no per-finding ``id``, so the frontend
+        # keys dismissals by ``<group>-<index>`` (and contradiction findings by
+        # their memory pair).  Migrate any pre-existing UUID[] column (which
+        # every real dismiss failed to populate, so it is empty in practice).
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'patrol_logs'
+                  AND column_name = 'dismissed_findings'
+                  AND udt_name = '_uuid'
+            ) THEN
+                ALTER TABLE patrol_logs
+                    ALTER COLUMN dismissed_findings TYPE TEXT[]
+                    USING dismissed_findings::text[];
+            END IF;
+        END $$;
         """,
         """
         CREATE INDEX IF NOT EXISTS idx_patrol_logs_type_time
@@ -307,6 +327,76 @@ def build_schema_statements(dimension: int) -> list[str]:
                 END IF;
             END LOOP;
         END $$;
+        """,
+        # ── LLM usage tracing (observability) ────────────────────────────
+        # One row per LLM call, written by the provider layer into an
+        # in-memory buffer and flushed to this table in batches (see
+        # ``backend/service/usage.py``).  ``trace_id`` links the calls of one
+        # agent run end-to-end; ``thread_id`` links across requests in one
+        # conversation.  ``scenario`` is the cost-observability tag from the
+        # metrics module.  Rows are append-only; retention is an operational
+        # concern (delete via SQL / a later job), not a schema concern.
+        """
+        CREATE TABLE IF NOT EXISTS llm_usage (
+            id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            seq            BIGSERIAL,
+            trace_id       TEXT,
+            thread_id      TEXT,
+            scenario       TEXT NOT NULL,
+            provider       TEXT NOT NULL,
+            model          TEXT NOT NULL,
+            input_tokens   INT,
+            output_tokens  INT,
+            total_tokens   INT,
+            latency_ms     INT,
+            status         TEXT NOT NULL DEFAULT 'success',
+            error          TEXT,
+            prompt_chars   INT,
+            response_chars INT,
+            created_at     TIMESTAMPTZ DEFAULT now()
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_created
+            ON llm_usage (created_at DESC)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_trace
+            ON llm_usage (trace_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_llm_usage_thread
+            ON llm_usage (thread_id, created_at DESC)
+        """,
+        # ── Pending-conflict queue: patrol (inspection) conflicts ─────────
+        # Patrol contradictions are two *already-stored* memories (A, B), unlike
+        # ingestion conflicts (existing in store + new not yet written).  The
+        # ``conflict_type`` column routes resolution to the patrol pipeline; the
+        # ``peer_id`` column names the memory that loses the arbitration (B) so
+        # ``resolve_patrol_conflict`` can soft-delete it.
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE pending_conflicts ADD COLUMN conflict_type TEXT NOT NULL DEFAULT 'ingestion';
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE pending_conflicts ADD COLUMN peer_id UUID;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        # An unordered pair (A,B) or (B,A) is queued at most once while pending.
+        # Resolved rows leave this partial index, so a *fresh* occurrence of the
+        # same pair can re-queue — but keep_both's "arbitrated" record is a
+        # resolved row, and re-queueing after it is suppressed in the service
+        # layer (persist_patrol_conflict checks resolved pairs explicitly).
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_pending_conflicts_patrol_pair
+            ON pending_conflicts (LEAST(existing_id, peer_id), GREATEST(existing_id, peer_id))
+            WHERE status = 'pending' AND conflict_type = 'patrol'
         """,
     ]
     return statements

@@ -62,7 +62,12 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/entities/search?q=&type=` | 按名称搜索实体，支持类型过滤 |
 | GET | `/api/conflicts` | 列出待人工解决的记忆冲突（webhook/连接器 HITL 队列） |
 | POST | `/api/conflicts/{id}/resolve` | 以 keep_existing/overwrite/merge/keep_both 之一解决冲突 |
-| GET | `/health` | 存活探活：含数据库连通性检查（DB 不可达返回 503 degraded） |
+| GET | `/api/usage/summary?days=7` | LLM 调用按天汇总：调用数 / tokens / 错误数 / 平均延迟 / 估算成本 |
+| GET | `/api/usage/scenarios?days=7` | LLM 调用按 scenario 汇总（各调用点的成本拆分） |
+| GET | `/api/usage/models?days=7` | 按 provider/model 汇总 + 估算成本 |
+| GET | `/api/usage/threads/{thread_id}` | 单个会话的 LLM 调用记录 |
+| GET | `/api/usage/trace/{trace_id}` | 单次 trace 的 LLM 调用链（回放一次 agent 运行） |
+| GET | `/health` | 存活探活：数据库连通性 + LLM/Embedding provider 配置与熔断器状态（DB 不可达返回 503 degraded） |
 
 ## Technology Stack
 
@@ -96,6 +101,17 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - `chat` / `chat_raw` / `chat_sync` / `embed` / `embed_sync` 带 tenacity 指数退避重试（只重试瞬时错误：HTTP 429 / 5xx / 超时 / 连接错误，4xx 不重试），外加按 provider 命名的 in-memory 熔断器（连续失败达阈值后打开，冷却窗口内快速失败，冷却结束自动恢复探测）。
 - `chat_json` 只挂熔断、不挂 tenacity 重试——该路径的传输重试由 `chat_structured` 的语义重试负责，避免两层重试嵌套（3×3）。
 - 配置项：`LLM_RETRY_MAX_ATTEMPTS`、`LLM_RETRY_BACKOFF_BASE`、`LLM_RETRY_BACKOFF_MAX`、`LLM_CIRCUIT_BREAKER_THRESHOLD`、`LLM_CIRCUIT_BREAKER_COOLDOWN`。
+
+### Observability (LLM usage tracing)
+
+每次 LLM 调用都通过 provider 层（唯一咽喉点）记录一行观测，落 `llm_usage` 表（`backend/service/usage.py`）：
+
+- **数据流**：provider 方法内同步、轻量地把观测值 append 进内存缓冲（线程安全、有界，溢出丢最旧并告警）→ 后台 flusher（`backend/main.py` lifespan 启动）每 `USAGE_FLUSH_INTERVAL_SECONDS`（默认 10s）批量 INSERT；进程优雅退出时再 flush 一次。观测代码绝不阻塞/拖垮 LLM 热路径，落库失败仅告警。同时为每次调用打一条带 trace_id 的结构化 `llm_call ...` 日志。
+- **trace 链路**：入口处设置 `current_trace_id` contextvar（agent 的 `/chat`、`/chat/stream` 每请求一个新 uuid；patrol 用 `patrol_id`），provider 读取后为每条记录盖上 trace_id，`/api/usage/trace/{id}` 可端到端回放一次 agent 运行。会话维度由 `thread_id` 关联（webhook/连接器等未设 trace 的后台任务仍按 scenario 记录）。
+- **字段**：trace_id / thread_id / scenario / provider / model / input|output|total_tokens / latency_ms / status(success|error) / error / prompt|response_chars / created_at（`seq` BIGSERIAL 保证插入顺序，trace 回放按它排序）。
+- **成本估算**：`estimate_cost` 按模型内置价格表（deepseek / openai / claude 家族，$ 每 1M tokens）估算，未知模型用保守默认值——仅用于报告，真实账单以 provider 为准。
+- **与进程内计数器关系**：`/api/agent/usage` 的内存计数器（重启清零）保留，是即时快照；`/api/usage/*` 读持久化 `llm_usage` 表，是历史查询。两者由同一批 provider 打点驱动，互不依赖。
+- 配置项：`USAGE_ENABLED`（默认 true）、`USAGE_FLUSH_INTERVAL_SECONDS`（默认 10）、`USAGE_BUFFER_MAX`（默认 5000）。
 
 ### Embedding
 

@@ -69,6 +69,16 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
+    # ── LLM usage tracing flusher ───────────────────────────────────
+    # Drains the in-memory usage buffer into ``llm_usage`` every
+    # USAGE_FLUSH_INTERVAL_SECONDS; flushed once more on shutdown so no
+    # buffered rows are lost on a clean exit.
+    _usage_task: asyncio.Task[None] | None = None
+    if config.usage_enabled:
+        from backend.service.usage import usage_flusher_loop
+
+        _usage_task = asyncio.create_task(usage_flusher_loop())
+
     # Register connectors at startup.  Connectors missing required
     # configuration (API keys, etc.) are still registered but flagged
     # as "pending" so the frontend can show their status.
@@ -274,6 +284,21 @@ async def lifespan(app: FastAPI):
     if pending_catchup:
         await asyncio.gather(*pending_catchup, return_exceptions=True)
 
+    # Stop the usage flusher and drain the buffer one last time.
+    if _usage_task is not None:
+        _usage_task.cancel()
+        await asyncio.gather(_usage_task, return_exceptions=True)
+        try:
+            from backend.service.usage import flush_usage_buffer
+
+            await flush_usage_buffer()
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Failed to flush usage buffer on shutdown", exc_info=True
+            )
+
     await close_db()
 
     # Close checkpointer pool on shutdown
@@ -299,23 +324,58 @@ app.include_router(api_router, prefix="/api")
 
 @app.get("/health", include_in_schema=False)
 async def health_check() -> JSONResponse:
-    """Liveness probe with a database connectivity check.
+    """Liveness probe: DB reachability + AI provider configuration/health.
 
-    Returns 200 ``{"status": "ok", "database": "ok"}`` when the API is up
-    and PostgreSQL is reachable; 503 ``{"status": "degraded",
-    "database": "unreachable"}`` otherwise (e.g. DB down, network partition).
+    Returns 200 ``{"status": "ok", ...}`` when the API is up and PostgreSQL
+    is reachable; 503 ``{"status": "degraded", ...}`` otherwise (e.g. DB
+    down, network partition).  Provider liveness is reported cheaply — config
+    presence and circuit-breaker state — without issuing a real LLM/embedding
+    call on every probe (that would burn tokens and latency on a frequently
+    polled endpoint).
     Registered before the SPA catch-all so the route is actually reachable.
     """
+    db_ok = True
     try:
         async with get_session_factory()() as session:
             await session.execute(text("SELECT 1"))
     except Exception:
+        db_ok = False
         logging.getLogger(__name__).warning("Health check: database unreachable")
-        return JSONResponse(
-            status_code=503,
-            content={"status": "degraded", "database": "unreachable"},
-        )
-    return JSONResponse(status_code=200, content={"status": "ok", "database": "ok"})
+
+    from backend.shared.resilience import get_circuit_breaker
+
+    # The provider classes key their circuit breaker per endpoint|model (see
+    # ``primary_breaker_name``), so the health probe reads the *same* breaker
+    # the primary provider guards with.
+    from backend.service.llm_service import primary_breaker_name
+
+    llm_breaker = get_circuit_breaker(primary_breaker_name())
+    # Local BGE embeddings make no remote calls and have no breaker; only the
+    # remote OpenAI-compatible embedder participates in resilience.
+    if config.embedding.provider == "openai":
+        embed_breaker = get_circuit_breaker("embedding:openai")
+        embed_circuit = "open" if embed_breaker.is_open else "closed"
+    else:
+        embed_circuit = "n/a"
+
+    payload = {
+        "status": "ok" if db_ok else "degraded",
+        "database": "ok" if db_ok else "unreachable",
+        "llm": {
+            "provider": config.llm.provider,
+            "configured": bool(config.llm.api_key),
+            "circuit": "open" if llm_breaker.is_open else "closed",
+        },
+        "embedding": {
+            "provider": config.embedding.provider,
+            "configured": config.embedding.provider == "local" or bool(config.embedding.api_key),
+            "circuit": embed_circuit,
+        },
+    }
+    return JSONResponse(
+        status_code=200 if db_ok else 503,
+        content=payload,
+    )
 
 # ── SPA static files & fallback ──
 # Mount asset directories so the browser can load JS/CSS/images.

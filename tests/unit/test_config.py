@@ -76,3 +76,26 @@ class TestValidateConfig:
 
         problems = config_mod.validate_config()
         assert any("LLM_RERANK_CONCURRENCY" in p for p in problems)
+
+    def test_fallback_requires_model_and_key(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_provider", "deepseek")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_model", "")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_api_key", "")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_base_url", "")
+
+        problems = config_mod.validate_config()
+        assert any("LLM_FALLBACK_MODEL" in p for p in problems)
+        assert any("LLM_FALLBACK_API_KEY" in p for p in problems)
+        assert any("LLM_FALLBACK_BASE_URL" in p for p in problems)
+
+    def test_fallback_anthropic_needs_no_base_url(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_provider", "anthropic")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_model", "claude-haiku")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_api_key", "k")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_base_url", "")
+
+        assert config_mod.validate_config() == []

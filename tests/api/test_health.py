@@ -14,7 +14,15 @@ class TestHealthCheck:
         resp = await async_client.get("/health")
 
         assert resp.status_code == 200
-        assert resp.json() == {"status": "ok", "database": "ok"}
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert data["database"] == "ok"
+        # Provider health is reported cheaply: config presence + breaker state.
+        assert "llm" in data and "embedding" in data
+        assert data["llm"]["circuit"] in ("closed", "open")
+        assert data["embedding"]["circuit"] in ("closed", "open", "n/a")
+        assert "configured" in data["llm"]
+        assert "configured" in data["embedding"]
 
     @pytest.mark.asyncio
     async def test_health_degraded_when_db_down(self, async_client, monkeypatch) -> None:
@@ -31,3 +39,5 @@ class TestHealthCheck:
         assert resp.status_code == 503
         assert resp.json()["status"] == "degraded"
         assert resp.json()["database"] == "unreachable"
+        # Provider fields are still reported on the degraded path.
+        assert "llm" in resp.json() and "embedding" in resp.json()
