@@ -335,12 +335,36 @@ async def _rerank_and_filter(
     candidates: list[dict[str, Any]],
     top_k: int,
     use_llm_rerank: bool,
+    use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
     """Rerank chunk candidates, drop below-floor results.
 
     Shared by ``retrieve`` / ``retrieve_hybrid`` / ``retrieve_multi_query``
     — the rerank + floor + assemble tail was copy-pasted in all three.
+
+    Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
+    report (``docs/interview/eval-report.md``) shows it costs ~90x latency
+    while *lowering* recall@5 on the current corpus, so the default read
+    path ranks candidates by their raw recall similarity and never loads the
+    568M model.  ``use_llm_rerank=True`` selects the LLM pointwise variant
+    (most nuanced, slowest).  ``_RERANK_FLOOR`` only applies on an explicit
+    rerank path — the default branch trusts the retriever's own recall.
     """
+    if not use_llm_rerank and not use_cross_encoder:
+        top = sorted(
+            candidates,
+            key=lambda c: float(c.get("similarity", 0.0)),
+            reverse=True,
+        )[:top_k]
+        return [
+            RetrievalResult(
+                content=c["content"],
+                score=float(c.get("similarity", 0.0)),
+                metadata=_attach_document_id(c),
+            )
+            for c in top
+        ]
+
     from backend.service.rerank import rerank_cross_encoder, rerank_llm
 
     reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
@@ -363,15 +387,24 @@ async def retrieve(
     top_k: int = 5,
     *,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
-    """Full read pipeline: embed → vector search → rerank.
+    """Full read pipeline: embed → vector search → (optional) rerank.
+
+    By default candidates are ranked by raw cosine similarity with no
+    cross-encoder pass — the eval report shows the 568M reranker costs
+    ~90x latency while lowering recall@5 on the current corpus, so it is
+    opt-in.  Pass ``use_cross_encoder=True`` for the cross-encoder path, or
+    ``use_llm_rerank=True`` for the LLM pointwise variant (slower, costs API
+    tokens, but can produce more nuanced relevance judgments).
 
     Args:
         query: User query string.
         top_k: Final number of results to return after reranking.
         use_llm_rerank: If True, use LLM-based reranking instead of the
-            default cross-encoder.  Slower and costs API tokens, but can
-            produce more nuanced relevance judgments.
+            default cross-encoder.
+        use_cross_encoder: If True, run the local cross-encoder reranker
+            and drop results below the relevance floor.
     """
     query_vec = await embed_query(query)
     candidates = await vector_search(query_vec, top_k=max(top_k * 4, 20))
@@ -379,7 +412,9 @@ async def retrieve(
     if not candidates:
         return []
 
-    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
+    return await _rerank_and_filter(
+        query, candidates, top_k, use_llm_rerank, use_cross_encoder
+    )
 
 
 async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
@@ -528,7 +563,12 @@ async def retrieve_hybrid(
             for c in candidates[:top_k]
         ]
 
-    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
+    # ``skip_rerank=False`` explicitly requests the cross-encoder path —
+    # flipped to ``use_cross_encoder=True`` so the shared tail reranks instead
+    # of falling through to the no-rerank default.
+    return await _rerank_and_filter(
+        query, candidates, top_k, use_llm_rerank, use_cross_encoder=True
+    )
 
 
 async def retrieve_multi_query(
@@ -536,14 +576,17 @@ async def retrieve_multi_query(
     top_k: int = 5,
     *,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
-    """Multi-query retrieval: LLM rewrite → union → dedup → rerank.
+    """Multi-query retrieval: LLM rewrite → union → dedup → (optional) rerank.
 
     1. ``rewrite_query`` expands the query into N concrete-term variations.
     2. Variations are embedded in one batched call, then each is searched
        via ``vector_search``.
     3. Results are unioned and deduplicated by chunk id.
-    4. The union is reranked (cross-encoder by default) and trimmed.
+    4. The union is ranked — by raw recall similarity by default, or by the
+       cross-encoder (``use_cross_encoder=True``) / LLM
+       (``use_llm_rerank=True``) reranker when explicitly requested.
 
     Use this for conceptual queries (e.g. "之前出过什么问题") where the
     user's wording won't surface-match stored memories.  Costs one extra
@@ -572,7 +615,9 @@ async def retrieve_multi_query(
         return []
 
     candidates = list(seen.values())[: max(top_k * 4, 20)]
-    return await _rerank_and_filter(query, candidates, top_k, use_llm_rerank)
+    return await _rerank_and_filter(
+        query, candidates, top_k, use_llm_rerank, use_cross_encoder
+    )
 
 
 async def query_memories(
@@ -581,11 +626,22 @@ async def query_memories(
     *,
     threshold: float = 0.3,
     use_llm_rerank: bool = False,
+    use_cross_encoder: bool = False,
 ) -> list[dict]:
     """Search memories with decay-weighted ranking.
 
-    Full pipeline: embed → decay-weighted vector search → rerank →
-    update_decay_batch → return as-ranked list of memory dicts.
+    Full pipeline: embed → decay-weighted vector search → (optional rerank)
+    → update_decay_batch → return as-ranked list of memory dicts.
+
+    Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
+    report (``docs/interview/eval-report.md``) shows it costs ~90x latency
+    while lowering recall@5 on the current corpus, so the default path ranks
+    candidates by ``search_memories``' decay-weighted similarity
+    (``weighted_score``) and never loads the 568M model.  The memory layer's
+    decay semantics are preserved on *both* paths — decay-weighted retrieval
+    and the single batch decay update are memory semantics, not rerank.
+    ``_RERANK_FLOOR`` filtering applies only on an explicit rerank path; the
+    default path trusts ``threshold`` (which already gated recall).
     """
     from backend.service.rerank import rerank_cross_encoder, rerank_llm
 
@@ -608,11 +664,37 @@ async def query_memories(
         )
         return []
 
-    reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
-    ranked = await reranker(
-        query, [c["summary"] for c in candidates], top_k=top_k
-    )
-    t_rerank = time.perf_counter()
+    if use_llm_rerank or use_cross_encoder:
+        reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
+        ranked = await reranker(
+            query, [c["summary"] for c in candidates], top_k=top_k
+        )
+        t_rerank = time.perf_counter()
+
+        # Drop results where the reranker score is below the minimum threshold —
+        # this prevents irrelevant results from appearing when no real match exists.
+        surviving: list[tuple[int, float]] = [
+            (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
+        ]
+    else:
+        # Default path: no rerank.  ``search_memories`` already returns rows
+        # ordered by decay-weighted similarity (weighted_score DESC), so the
+        # top-k candidates *are* the rank order.  The reported score is the
+        # weighted_score the retriever produced (falling back to the stored
+        # decay_factor for rows without one, e.g. legacy mocks).
+        t_rerank = t_search
+        surviving = [
+            (
+                idx,
+                float(
+                    candidates[idx].get(
+                        "weighted_score",
+                        candidates[idx].get("decay_factor", 0.0),
+                    )
+                ),
+            )
+            for idx in range(min(len(candidates), top_k))
+        ]
 
     # Re-attach full memory rows in ranked order, and update decay in a
     # single batch (one UPDATE ... RETURNING) instead of N sequential
@@ -620,11 +702,6 @@ async def query_memories(
     # factors are returned instead.
     from backend.service.decay import update_decay_batch
 
-    # Drop results where the reranker score is below the minimum threshold —
-    # this prevents irrelevant results from appearing when no real match exists.
-    surviving: list[tuple[int, float]] = [
-        (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
-    ]
     try:
         decay_by_id = await update_decay_batch(
             [candidates[idx]["id"] for idx, _ in surviving]
