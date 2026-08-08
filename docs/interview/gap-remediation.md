@@ -176,12 +176,20 @@ if __name__ == "__main__":
 >
 > 这个评估集不大，但能让我量化验证每个改动。比如调 chunk_size 从 512 到 256，Recall@5 [升/降] 了 [Y]，我就知道方向对不对。」
 
-### 2.3 LLM-as-judge（生成质量评估，可选）
+### 2.3 LLM-as-judge 与 Agent 行为评测（已实现）
 
-检索质量用 Recall@K，生成质量用 LLM-as-judge：
+> 状态：✅ 已交付。工具选择 / 知识抽取 / 最终答案三套 LLM 行为评测见
+> [llm-eval.md](./llm-eval.md)，CLI 为 `python -m tests.eval.run_llm_eval`。
+> 下方是最初的最小草案，实际实现有三处演进：
+> 1. 评测面从"答案质量"扩到**工具选择 + 知识抽取 + 最终答案**三个维度；
+> 2. 裁判输出改用 `chat_structured`（JSON Schema 校验 + 语义重试），放弃裸
+>    `json.loads` + 解析失败归零的脆弱写法；
+> 3. 裁判 prompt 刻意让 LLM 输出**结构化的 covered_facts / grounded /
+>    ungrounded_claims**，而不是 1-5 分——覆盖率与忠实度可从判决直接算指标，
+>    幻觉论断还能进报告的 per-query 明细。
 
 ```python
-# tests/eval/llm_judge.py
+# tests/eval/llm_judge.py — 当前实现
 """LLM-as-judge：让 LLM 评估答案质量"""
 
 import json

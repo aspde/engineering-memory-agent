@@ -48,6 +48,12 @@ jobs:
       - name: Validate eval dataset
         run: python -m tests.eval.run_eval --validate-only
 
+      # Zero-cost gate: LLM-eval labeled sets (tool selection / extraction /
+      # answer) — internal consistency only, no LLM / DB required.  The real
+      # LLM behavior eval runs on a schedule in eval.yml.
+      - name: Validate LLM eval datasets
+        run: python -m tests.eval.run_llm_eval --validate-only
+
       # Unit + API tests are hermetic: unit tests mock LLM/embedding/DB; the
       # pytest session wipes & recreates ema_test (and creates it if missing,
       # which is why the service only needs to provision ema_dev).
