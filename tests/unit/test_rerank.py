@@ -42,6 +42,8 @@ class TestRerankLlmConcurrency:
         # Without the semaphore, all 6 would be in flight at once (peak=6).
         assert peak <= 2
         assert provider.chat.await_count == 6
+        # Scoring must be deterministic — every call uses temperature 0.0.
+        assert provider.chat.call_args.kwargs["temperature"] == 0.0
 
     @pytest.mark.asyncio
     async def test_empty_candidates(self) -> None:
@@ -100,3 +102,58 @@ class TestCrossEncoderFirstLoad:
         from backend.service import rerank as mod
 
         assert await mod.rerank_cross_encoder("q", [], top_k=5) == []
+
+
+class TestRerankScoreParsing:
+    """LLM pointwise scoring must tolerate prose-wrapped / noisy replies.
+
+    The prompt asks for a bare decimal, but models sometimes wrap it in text
+    ("Relevance: 0.85") or emit extra tokens — a naive ``float()`` would
+    score such candidates 0.0 and silently reorder them below irrelevant ones.
+    """
+
+    def test_bare_float(self) -> None:
+        from backend.service.rerank import _parse_score
+
+        assert _parse_score("0.85") == 0.85
+
+    def test_prose_wrapped(self) -> None:
+        from backend.service.rerank import _parse_score
+
+        assert _parse_score("Relevance: 0.85") == 0.85
+
+    def test_first_number_wins(self) -> None:
+        from backend.service.rerank import _parse_score
+
+        assert _parse_score("0.3 0.4") == 0.3
+
+    def test_garbage_scores_zero(self) -> None:
+        from backend.service.rerank import _parse_score
+
+        assert _parse_score("not a number") == 0.0
+        assert _parse_score("") == 0.0
+        assert _parse_score(None) == 0.0  # type: ignore[arg-type]
+
+    def test_out_of_range_clamped(self) -> None:
+        from backend.service.rerank import _parse_score
+
+        assert _parse_score("1.5") == 1.0
+        assert _parse_score("-0.2") == 0.0
+
+    @pytest.mark.asyncio
+    async def test_rerank_llm_tolerates_wrapped_score(self, monkeypatch) -> None:
+        """A prose-wrapped score flows through rerank_llm unpunished."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from backend.service import rerank as mod
+
+        provider = MagicMock()
+        provider.chat = AsyncMock(return_value="Relevance: 0.9")
+        monkeypatch.setattr(
+            "backend.service.llm_service.get_llm_provider", lambda: provider
+        )
+
+        ranked = await mod.rerank_llm("query", ["candidate"], top_k=5)
+
+        assert ranked == [(0, 0.9)]
+

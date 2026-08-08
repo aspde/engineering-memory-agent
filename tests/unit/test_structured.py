@@ -110,3 +110,21 @@ class TestChatStructured:
         kwargs = mock_llm.chat_json.await_args.kwargs
         assert kwargs["scenario"] == "my_scenario"
         assert kwargs["json_schema"] == SCHEMA
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_structured_temperature(self, mock_llm) -> None:
+        """Structured output defaults to a low, deterministic temperature."""
+        from backend.shared.config import config
+
+        mock_llm.chat_json.return_value = json.dumps({"ok": True})
+        await chat_structured(_messages(), json_schema=SCHEMA, scenario="test")
+        kwargs = mock_llm.chat_json.await_args.kwargs
+        assert kwargs["temperature"] == config.llm.structured_temperature
+
+    @pytest.mark.asyncio
+    async def test_caller_temperature_overrides_default(self, mock_llm) -> None:
+        mock_llm.chat_json.return_value = json.dumps({"ok": True})
+        await chat_structured(
+            _messages(), json_schema=SCHEMA, scenario="test", temperature=0.7
+        )
+        assert mock_llm.chat_json.await_args.kwargs["temperature"] == 0.7

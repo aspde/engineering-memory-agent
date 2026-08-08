@@ -8,10 +8,31 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
+
+# A bare relevance score is the expected reply, but models sometimes wrap it
+# in prose ("Relevance: 0.85") or emit extra tokens.  Extract the first
+# numeric token defensively instead of failing the whole candidate to 0.0.
+_NUMBER_RE = re.compile(r"[-+]?\d*\.?\d+")
+
+
+def _parse_score(raw: str) -> float:
+    """Extract a relevance score from a model response, clamped to [0, 1]."""
+    if raw is None:
+        return 0.0
+    try:
+        score = float(raw.strip())
+    except (ValueError, TypeError):
+        match = _NUMBER_RE.search(raw)
+        try:
+            score = float(match.group())
+        except (AttributeError, ValueError, TypeError):
+            return 0.0
+    return max(0.0, min(1.0, score))
 
 # Lazy-loaded cross-encoder model — loaded once on first call
 _cross_encoder = None
@@ -102,14 +123,15 @@ async def rerank_llm(
         async with semaphore:
             prompt = _RERANK_PROMPT.format(query=query, text=text)
             try:
-                response = await llm.chat([{"role": "user", "content": prompt}], scenario="rerank_llm")
+                # Scoring must be deterministic — temperature 0.0.
+                response = await llm.chat(
+                    [{"role": "user", "content": prompt}],
+                    scenario="rerank_llm",
+                    temperature=0.0,
+                )
             except Exception:
                 return idx, 0.0
-            try:
-                score = float(response.strip())
-                return idx, max(0.0, min(1.0, score))
-            except (ValueError, TypeError):
-                return idx, 0.0
+            return idx, _parse_score(str(response))
 
     tasks = [_score_one(i, c) for i, c in enumerate(candidates)]
     results = await asyncio.gather(*tasks)

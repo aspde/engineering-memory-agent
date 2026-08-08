@@ -261,7 +261,11 @@ class TestAnthropicChatRaw:
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
 
-        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+        # prompt_caching=False keeps this test focused on the tool/message
+        # translation; cache breakpoints are covered by TestAnthropicPromptCaching.
+        provider = AnthropicProvider(
+            api_key="test-key", model="claude-test", prompt_caching=False
+        )
 
         openai_tools: list[dict[str, object]] = [
             {
@@ -448,6 +452,138 @@ class TestAnthropicChatRaw:
             {"name": "t", "description": "d", "input_schema": {"type": "object"}}
         ]
         assert AnthropicProvider._to_anthropic_tools(already) == already
+
+
+class TestAnthropicPromptCaching:
+    """Prompt caching — cache_control breakpoints on the system block and the
+    last tool schema.  OpenAI-compatible providers cache server-side
+    automatically, so this is an Anthropic-only mechanism."""
+
+    @pytest.mark.asyncio
+    async def test_system_block_and_last_tool_cached_by_default(
+        self, monkeypatch
+    ) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = []
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+
+        openai_tools: list[dict[str, object]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search_memories_tool",
+                    "description": "Search",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_memory_tool",
+                    "description": "Write",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            },
+        ]
+        await provider.chat_raw(
+            [
+                {"role": "system", "content": "You are EMA."},
+                {"role": "user", "content": "hi"},
+            ],
+            tools=openai_tools,
+        )
+
+        # system promoted to a cached content block
+        assert captured["system"] == [
+            {
+                "type": "text",
+                "text": "You are EMA.",
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        # cache breakpoint sits on the LAST tool only (Anthropic caches the
+        # whole prefix up to the marker)
+        assert captured["tools"][0].get("cache_control") is None
+        assert captured["tools"][1]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_caching_disabled_keeps_bare_string_system(
+        self, monkeypatch
+    ) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [SimpleNamespace(type="text", text="ok")]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(
+            api_key="test-key", model="claude-test", prompt_caching=False
+        )
+        await provider.chat(
+            [
+                {"role": "system", "content": "You are EMA."},
+                {"role": "user", "content": "hi"},
+            ]
+        )
+        assert captured["system"] == "You are EMA."
+
+    @pytest.mark.asyncio
+    async def test_empty_system_stays_empty_string(self, monkeypatch) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [SimpleNamespace(type="text", text="ok")]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        provider = AnthropicProvider(api_key="test-key", model="claude-test")
+        await provider.chat([{"role": "user", "content": "hi"}])
+        assert captured["system"] == ""
 
 
 # ── Streaming token accounting ─────────────────────────────────────────

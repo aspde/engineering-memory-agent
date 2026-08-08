@@ -43,6 +43,7 @@ async def rewrite_query(query: str, n_variations: int = 3) -> list[str]:
         llm = get_llm_provider()
         resp = await llm.chat_raw(
             messages=[{"role": "user", "content": prompt}],
+            scenario="query_rewrite",
         )
         text_out = str(resp.get("content", "")).strip()
         variations = [

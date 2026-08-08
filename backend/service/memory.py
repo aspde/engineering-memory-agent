@@ -182,6 +182,42 @@ _CONFLICT_SCHEMA = {
 }
 
 
+def _merge_entities(existing_entities, new_entities) -> list[dict]:
+    """Deduplicate entities by name, preferring the new side on name conflict.
+
+    Shared by the ingestion merge path and conflict resolution (ingestion and
+    patrol pipelines) so both produce the same entity-merge semantics.
+    """
+    seen: dict[str, dict] = {}
+    for e in existing_entities or []:
+        name = e.get("name", "")
+        if name:
+            seen[name] = e
+    for e in new_entities or []:
+        name = e.get("name", "")
+        if name:
+            seen[name] = e
+    return list(seen.values())
+
+
+def _merge_relations(existing_relations, new_relations) -> list[dict]:
+    """Deduplicate relations by (from, to, type).
+
+    Extraction emits these keys (see extraction.extract_relations); a
+    subject/predicate/object key would collapse every relation to the first.
+    Shared by the ingestion merge path and conflict resolution so both
+    pipelines deduplicate relations identically.
+    """
+    seen: set[tuple[str, str, str]] = set()
+    merged: list[dict] = []
+    for r in (existing_relations or []) + (new_relations or []):
+        key = (r.get("from", ""), r.get("to", ""), r.get("type", ""))
+        if key not in seen:
+            seen.add(key)
+            merged.append(r)
+    return merged
+
+
 async def _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Merge new memory into existing one — update summary and entities.
 
@@ -198,30 +234,19 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata, c
             existing_summary=existing["summary"],
             new_summary=extracted["summary"],
         )
-        merged_summary = await llm.chat([{"role": "user", "content": prompt}], scenario="memory_merge")
+        merged_summary = await llm.chat(
+            [{"role": "user", "content": prompt}], scenario="memory_merge", temperature=0.3
+        )
         merged_summary = merged_summary.strip()
     except Exception:
         logger.warning("LLM merge failed, keeping existing summary for %s", existing["id"])
         merged_summary = existing["summary"]
 
     # Merge entities — deduplicate by name, output as a list (not dict)
-    seen: dict[str, dict] = {e["name"]: e for e in (existing.get("entities") or [])}
-    for e in (extracted.get("entities") or []):
-        name = e.get("name", "")
-        if name not in seen:
-            seen[name] = e
-    merged_entities = list(seen.values())
+    merged_entities = _merge_entities(existing.get("entities"), extracted.get("entities"))
 
-    # Merge relations — deduplicate by (from, to, type).  Extraction emits
-    # these keys (see extraction.extract_relations); a subject/predicate/object
-    # key would collapse every relation to the first one.
-    rel_seen: set[tuple[str, str, str]] = set()
-    merged_relations: list[dict] = []
-    for r in (existing.get("relations") or []) + (extracted.get("relations") or []):
-        key = (r.get("from", ""), r.get("to", ""), r.get("type", ""))
-        if key not in rel_seen:
-            rel_seen.add(key)
-            merged_relations.append(r)
+    # Merge relations — deduplicate by (from, to, type).
+    merged_relations = _merge_relations(existing.get("relations"), extracted.get("relations"))
 
     # Re-embed the merged summary.  The incoming ``embedding`` was computed
     # over the *new* content's summary; storing it against the merged text
@@ -541,32 +566,19 @@ async def resolve_conflict(
                 existing_summary=existing_summary,
                 new_summary=extracted["summary"],
             )
-            merged_summary = (await llm.chat([{"role": "user", "content": prompt}], scenario="memory_merge")).strip()
+            merged_summary = (await llm.chat(
+                [{"role": "user", "content": prompt}],
+                scenario="memory_merge",
+                temperature=0.3,
+            )).strip()
         except Exception:
             merged_summary = extracted["summary"]
 
         # Merge entities from both sides, preferring new on name conflict
-        seen: dict[str, dict] = {}
-        for e in existing_entities:
-            name = e.get("name", "")
-            if name:
-                seen[name] = e
-        for e in (extracted.get("entities") or []):
-            name = e.get("name", "")
-            if name:
-                seen[name] = e
-        merged_entities = list(seen.values())
+        merged_entities = _merge_entities(existing_entities, extracted.get("entities"))
 
-        # Merge relations — deduplicate by (from, to, type).  Extraction emits
-        # these keys; the old (subject, predicate, object) key was always
-        # ("", "", ""), so every relation after the first was dropped.
-        rel_seen: set[tuple[str, str, str]] = set()
-        merged_relations: list[dict] = []
-        for r in existing_relations + (extracted.get("relations") or []):
-            key = (r.get("from", ""), r.get("to", ""), r.get("type", ""))
-            if key not in rel_seen:
-                rel_seen.add(key)
-                merged_relations.append(r)
+        # Merge relations — deduplicate by (from, to, type).
+        merged_relations = _merge_relations(existing_relations, extracted.get("relations"))
 
         # Re-embed the merged summary (same reasoning as _merge_memory): the
         # stored vector must match the stored text.

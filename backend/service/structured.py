@@ -68,6 +68,9 @@ async def chat_structured(
     llm = get_llm_provider()
     attempts = max_attempts if max_attempts is not None else config.llm.structured_max_attempts
     delay = backoff if backoff is not None else config.llm.structured_backoff
+    # Structured output should be deterministic — default to the low
+    # structured temperature unless the caller overrides per-call.
+    kwargs.setdefault("temperature", config.llm.structured_temperature)
 
     last_error: Exception | None = None
     raw: str | None = None

@@ -32,7 +32,12 @@ async def extract_summary(content: str) -> str:
         version, prompt = get_prompt("extraction.summary")
         logger.debug("extract_summary: using prompt extraction.summary v%s", version)
         msg = prompt.format(content=content)
-        summary = await llm.chat([{"role": "user", "content": msg}], scenario="extraction_summary")
+        # Summarisation should stay faithful to the source — low temperature.
+        summary = await llm.chat(
+            [{"role": "user", "content": msg}],
+            scenario="extraction_summary",
+            temperature=0.3,
+        )
         return summary.strip()
     except Exception:
         logger.exception("LLM summary extraction failed, using raw content fallback")

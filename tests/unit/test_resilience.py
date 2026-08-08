@@ -51,6 +51,8 @@ def _openai_provider() -> OpenAICompatibleProvider:
     p._model = "m"
     p._temperature = 0.7
     p._max_tokens = 4096
+    p._base_url = "https://test"
+    p._breaker_name = f"llm:openai:{p._base_url}|{p._model}"
     p._async_client = MagicMock()
     p._sync_client = MagicMock()
     return p
@@ -60,6 +62,8 @@ def _anthropic_provider() -> AnthropicProvider:
     p = object.__new__(AnthropicProvider)
     p._model = "claude-test"
     p._max_tokens = 4096
+    p._prompt_caching = False  # retry tests exercise transport, not caching
+    p._breaker_name = f"llm:anthropic:{p._model}"
     p._async_client = MagicMock()
     p._sync_client = MagicMock()
     return p
@@ -308,7 +312,7 @@ class TestCircuitBreakerWiring:
         create.return_value = _chat_response("recovered")
         result = await provider.chat([{"role": "user", "content": "hi"}])
         assert result == "recovered"
-        assert not resilience.get_circuit_breaker("llm:openai").is_open
+        assert not resilience.get_circuit_breaker(provider._breaker_name).is_open
 
     @pytest.mark.asyncio
     async def test_chat_json_fails_fast_when_breaker_open(self, monkeypatch) -> None:
@@ -361,3 +365,261 @@ class TestUsageOnRetry:
         await provider.chat([{"role": "user", "content": "hi"}], scenario="agent_final")
         # One successful response → tokens counted once, despite 2 SDK calls.
         assert metrics.get_token_usage() == {"agent_final": 7}
+
+
+# ── Streaming connection retry ──────────────────────────────────────
+# chat_raw_stream now routes connection establishment through the same
+# tenacity retry as the non-streaming paths (a 429/5xx at create time is
+# retried before any token is consumed).
+
+
+class _FakeStreamChunk:
+    def __init__(self, text: str) -> None:
+        self.choices = [
+            SimpleNamespace(delta=SimpleNamespace(content=text, tool_calls=None))
+        ]
+        self.usage = None
+
+
+class _FakeStream:
+    def __init__(self, chunks: list) -> None:
+        self._chunks = list(chunks)
+        self.usage = None
+
+    def __aiter__(self):
+        async def _iter():
+            for c in self._chunks:
+                yield c
+
+        return _iter()
+
+
+class TestStreamingConnectionRetry:
+    @pytest.mark.asyncio
+    async def test_openai_stream_retries_connection_429(self) -> None:
+        provider = _openai_provider()
+        create = AsyncMock(
+            side_effect=[
+                _api_error(openai.RateLimitError, 429),
+                _FakeStream([_FakeStreamChunk("hello")]),
+            ]
+        )
+        provider._async_client.chat.completions.create = create
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "hello"}]
+        # 429 at connection time was retried, then the stream succeeded.
+        assert create.await_count == 2
+
+
+# ── Cross-provider failover ─────────────────────────────────────────
+# FallbackLLMProvider: retryable primary failures (or an open breaker) are
+# retried once against the fallback; non-retryable 4xx propagate untouched.
+
+
+def _fake_llm_provider(name: str):
+    """A duck-typed provider surface for failover tests."""
+    return SimpleNamespace(
+        model=name,
+        PROVIDER_NAME=name,
+        chat=AsyncMock(),
+        chat_raw=AsyncMock(),
+        chat_sync=MagicMock(),
+        chat_json=AsyncMock(),
+        chat_raw_stream=AsyncMock(),
+        chat_stream=AsyncMock(),
+    )
+
+
+class TestProviderFailover:
+    @pytest.mark.asyncio
+    async def test_fallback_used_when_primary_raises_retryable(self) -> None:
+        from backend.service.llm_service import FallbackLLMProvider
+
+        primary = _fake_llm_provider("primary")
+        fallback = _fake_llm_provider("fallback")
+        fallback.chat.return_value = "fallback-ok"
+        primary.chat.side_effect = _api_error(openai.RateLimitError, 429)
+        wrapped = FallbackLLMProvider(primary, fallback)
+
+        result = await wrapped.chat(
+            [{"role": "user", "content": "hi"}], scenario="agent_chat"
+        )
+
+        assert result == "fallback-ok"
+        primary.chat.assert_awaited_once()
+        fallback.chat.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_fallback_not_used_for_non_retryable(self) -> None:
+        from backend.service.llm_service import FallbackLLMProvider
+
+        primary = _fake_llm_provider("primary")
+        fallback = _fake_llm_provider("fallback")
+        primary.chat.side_effect = _api_error(openai.BadRequestError, 400)
+        wrapped = FallbackLLMProvider(primary, fallback)
+
+        with pytest.raises(openai.BadRequestError):
+            await wrapped.chat([{"role": "user", "content": "hi"}])
+        fallback.chat.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_fallback_used_when_primary_breaker_open(self) -> None:
+        from backend.service.llm_service import FallbackLLMProvider
+
+        primary = _fake_llm_provider("primary")
+        fallback = _fake_llm_provider("fallback")
+        fallback.chat.return_value = "fallback-ok"
+        primary.chat.side_effect = CircuitOpenError("breaker open")
+        wrapped = FallbackLLMProvider(primary, fallback)
+
+        result = await wrapped.chat([{"role": "user", "content": "hi"}])
+
+        assert result == "fallback-ok"
+        fallback.chat.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_same_family_fallback_uses_distinct_breakers(
+        self, monkeypatch
+    ) -> None:
+        """A deepseek→openai failover must not share one circuit breaker.
+
+        Regression: OpenAICompatibleProvider hard-coded a single ``llm:openai``
+        breaker, so the primary and its fallback hit the *same* process-wide
+        breaker.  Tripping the primary (which is exactly when failover is
+        supposed to engage) opened the breaker for the fallback too, fast-
+        failing every failover call during the cooldown window.
+        """
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
+        monkeypatch.setattr(config.resilience, "circuit_breaker_cooldown", 30)
+
+        primary = object.__new__(OpenAICompatibleProvider)
+        primary._model = "deepseek-chat"
+        primary._temperature = 0.7
+        primary._max_tokens = 4096
+        primary._base_url = "https://api.deepseek.com"
+        primary._breaker_name = f"llm:openai:{primary._base_url}|{primary._model}"
+        primary._async_client = MagicMock()
+        primary._sync_client = MagicMock()
+
+        fallback = object.__new__(OpenAICompatibleProvider)
+        fallback._model = "gpt-4o-mini"
+        fallback._temperature = 0.7
+        fallback._max_tokens = 4096
+        fallback._base_url = "https://api.openai.com/v1"
+        fallback._breaker_name = f"llm:openai:{fallback._base_url}|{fallback._model}"
+        fallback._async_client = MagicMock()
+        fallback._sync_client = MagicMock()
+
+        assert primary._breaker_name != fallback._breaker_name
+
+        # Trip the primary's breaker…
+        primary._async_client.chat.completions.create = AsyncMock(
+            side_effect=_api_error(openai.RateLimitError, 429)
+        )
+        with pytest.raises(openai.RateLimitError):
+            await primary.chat([{"role": "user", "content": "hi"}])
+        assert resilience.get_circuit_breaker(primary._breaker_name).is_open
+
+        # …and the fallback's breaker stays closed, so a failover call (which
+        # consults the fallback's breaker before routing) is admitted.
+        assert not resilience.get_circuit_breaker(fallback._breaker_name).is_open
+
+    @pytest.mark.asyncio
+    async def test_stream_falls_back_before_first_token(self) -> None:
+        from backend.service.llm_service import FallbackLLMProvider
+
+        primary = _fake_llm_provider("primary")
+        fallback = _fake_llm_provider("fallback")
+
+        async def _primary_stream(*args, **kwargs):
+            raise openai.APIConnectionError(request=MagicMock())
+            yield  # pragma: no cover
+
+        async def _fallback_stream(*args, **kwargs):
+            yield {"type": "content", "text": "fb"}
+
+        primary.chat_raw_stream = _primary_stream
+        fallback.chat_raw_stream = _fallback_stream
+        wrapped = FallbackLLMProvider(primary, fallback)
+
+        events = [
+            event
+            async for event in wrapped.chat_raw_stream(
+                [{"role": "user", "content": "hi"}]
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "fb"}]
+
+    @pytest.mark.asyncio
+    async def test_stream_does_not_fail_over_mid_stream(self) -> None:
+        from backend.service.llm_service import FallbackLLMProvider
+
+        primary = _fake_llm_provider("primary")
+        fallback = _fake_llm_provider("fallback")
+
+        async def _primary_stream(*args, **kwargs):
+            yield {"type": "content", "text": "prefix"}
+            raise openai.APIConnectionError(request=MagicMock())
+
+        def _should_not_be_called(*args, **kwargs):
+            raise AssertionError("fallback must not be used mid-stream")
+
+        primary.chat_raw_stream = _primary_stream
+        fallback.chat_raw_stream = _should_not_be_called
+        wrapped = FallbackLLMProvider(primary, fallback)
+
+        collected: list = []
+        with pytest.raises(openai.APIConnectionError):
+            async for event in wrapped.chat_raw_stream(
+                [{"role": "user", "content": "hi"}]
+            ):
+                collected.append(event)
+        # The prefix was already delivered; the failure propagates untouched.
+        assert collected == [{"type": "content", "text": "prefix"}]
+
+
+class TestProviderFailoverFactory:
+    """``get_llm_provider`` wires the fallback wrapper only when configured."""
+
+    def test_no_fallback_by_default(self, monkeypatch) -> None:
+        import backend.service.llm_service as mod
+
+        monkeypatch.setattr(mod, "_provider", None)
+        monkeypatch.setattr(config.llm, "fallback_provider", "")
+        fake_primary = SimpleNamespace(model="primary", PROVIDER_NAME="primary")
+        monkeypatch.setattr(mod, "_build_provider", lambda *a, **k: fake_primary)
+
+        assert mod.get_llm_provider() is fake_primary
+
+    def test_wraps_fallback_when_configured(self, monkeypatch) -> None:
+        import backend.service.llm_service as mod
+
+        monkeypatch.setattr(mod, "_provider", None)
+        monkeypatch.setattr(config.llm, "fallback_provider", "deepseek")
+        fake_primary = SimpleNamespace(model="primary", PROVIDER_NAME="primary")
+        fake_fallback = SimpleNamespace(model="fb", PROVIDER_NAME="fallback")
+
+        def _build(provider, api_key, base_url, model, **kwargs):
+            # The primary build passes temperature/prompt_caching; the
+            # fallback build passes only max_tokens/timeout.  (Both may carry
+            # the same provider name, e.g. deepseek → deepseek.)
+            if "temperature" in kwargs or "prompt_caching" in kwargs:
+                return fake_primary
+            return fake_fallback
+
+        monkeypatch.setattr(mod, "_build_provider", _build)
+
+        provider = mod.get_llm_provider()
+        assert isinstance(provider, mod.FallbackLLMProvider)
+        assert provider._primary is fake_primary
+        assert provider._fallback is fake_fallback
