@@ -78,11 +78,21 @@ jobs:
       - name: Run retrieval eval
         run: |
           # `|| 'memory'` covers the cron path where `inputs` is empty.
-          python -m tests.eval.run_eval --retriever ${{ inputs.retriever || 'memory' }} \
+          RETRIEVER="${{ inputs.retriever || 'memory' }}"
+          # Regression gate: for the production-default memory config, fail
+          # this step (run_eval exits non-zero) when overall quality drops
+          # below the thresholds.  Manually dispatched non-memory retrievers
+          # (experiments/baselines) are not gated.
+          GATE_ARGS=""
+          if [ "$RETRIEVER" = "memory" ]; then
+            GATE_ARGS="--min-recall@5 0.95 --min-mrr 0.90"
+          fi
+          python -m tests.eval.run_eval --retriever "$RETRIEVER" \
             --report-md docs/interview/eval-report.md \
-            --report-json eval-report.json
+            --report-json eval-report.json $GATE_ARGS
 
       - name: Upload eval report
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: eval-report
