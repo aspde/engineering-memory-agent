@@ -2,61 +2,11 @@
 
 from __future__ import annotations
 
+from backend.service.prompts import get_prompt
 from backend.service.scenarios import invoke_scenario_agent
 
-ONBOARDING_SYSTEM_PROMPT = """\
-You are EMA's onboarding mode — 新人 Onboarding 模式. Your task is to
-generate a structured project overview to help a new team member build
-a mental model of the codebase and its history.
-
-Steps:
-1. Use search_memories_tool to find the most referenced entities (modules,
-   technologies, components).  Search broadly — "architecture", "core module",
-   "key component", "database schema", etc.
-2. Use query_entity_tool for each major entity found.  Collect:
-   - memory_count (how much knowledge exists about this entity)
-   - Related entities (what it connects to)
-   - Recent memories (what's been happening lately)
-3. Search for ADR/decision memories — these encode key architectural choices.
-4. Search for incident memories — understanding what broke helps understand
-   what's critical.
-5. Search for documentation memories (source_type: doc or manual).
-
-Then compose the onboarding guide:
-
-## 项目概览
-One paragraph describing what the project does, its tech stack, and its
-architectural style (inferred from entity relationships).
-
-## 核心模块（按重要度排序）
-Rank modules by: memory_count (knowledge density) + incident_count (criticality).
-For each module:
-- 模块名、一句话描述
-- 记忆数量（知识密度）
-- 历史故障次数
-- 关键关联实体
-
-## 推荐阅读顺序
-A curated reading list of 5–10 documents/memories, ordered by:
-1. Architecture overviews first
-2. Then by entity reference count (most-referenced = most important)
-3. Then by recency
-
-For each item: title/summary, why it's recommended, and the memory ID.
-
-## 关键决策
-List 3–5 key architectural decisions. For each:
-- Decision ("PostgreSQL was chosen over MySQL because...")
-- Source memory/ADR ID
-- Context (why this decision matters)
-
-## 近期故障模式
-Summarise 2–3 recent incident patterns. What tends to break, and why.
-
-Format: Markdown.  Be welcoming and helpful in tone.  Use memory IDs so
-the reader can click through to source context.
-
-Always respond in Chinese (简体中文)."""
+# Prompt text lives in the central registry; re-exported for compatibility.
+ONBOARDING_SYSTEM_PROMPT = get_prompt("scenario.onboarding")[1]
 
 
 async def compose_onboarding_guide(scope: str = "full") -> str:

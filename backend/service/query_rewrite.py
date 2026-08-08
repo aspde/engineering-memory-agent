@@ -16,18 +16,9 @@ from __future__ import annotations
 
 import logging
 
+from backend.service.prompts import get_prompt
+
 logger = logging.getLogger(__name__)
-
-_REWRITE_PROMPT = """\
-Rewrite the following query into {n_variations} semantically equivalent
-variations that might appear in a technical knowledge base. Focus on concrete
-terms, component names, and error types that the query implies but does not
-state.
-
-Query: {query}
-
-Output one variation per line, no numbering, no preamble:
-"""
 
 
 async def rewrite_query(query: str, n_variations: int = 3) -> list[str]:
@@ -41,10 +32,12 @@ async def rewrite_query(query: str, n_variations: int = 3) -> list[str]:
     try:
         from backend.service.llm_service import get_llm_provider
 
+        version, prompt = get_prompt("query_rewrite")
+        logger.debug("rewrite_query: using prompt query_rewrite v%s", version)
         # ``replace`` (not ``format``) so a user query containing ``{…}``
         # can't raise KeyError; unknown placeholders are left verbatim.
         prompt = (
-            _REWRITE_PROMPT.replace("{n_variations}", str(n_variations))
+            prompt.replace("{n_variations}", str(n_variations))
             .replace("{query}", query)
         )
         llm = get_llm_provider()

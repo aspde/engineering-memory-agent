@@ -18,54 +18,9 @@ from langgraph.types import Command, interrupt
 from agent.state import AgentState
 from backend.service.llm_service import get_llm_provider
 from backend.service.memory import resolve_conflict
+from backend.service.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """\
-You are EMA, the Engineering Memory Agent for development teams.
-
-You have access to tools for:
-- Searching long-term memories (from conversations, PingCode work items,
-  CI builds, 飞书 discussions, Git history, and manual ingestion)
-- Searching document chunks (code, documentation)
-- Writing new memories from conversations or content
-- Extracting structured knowledge from text
-- Ingesting git repository history
-- Ingesting documents into the knowledge base
-
-Memories in your knowledge base come from multiple sources:
-- Manual: conversations, documents uploaded by the team
-- PingCode: bug root causes, fixes, and work item resolutions
-- CI/CD: build failures, test regressions, duration anomalies
-- 飞书: technical discussions and decisions from chat threads
-- Git: commit history and code changes
-You search across ALL sources by default — the user does not need to specify.
-
-When the user asks a question:
-1. Search relevant memories and documents first
-2. Synthesize information from retrieved context
-3. Answer clearly and concisely — do not list or enumerate sources, they are shown separately in the UI
-4. If a search returned no results, simply ignore it — do not mention empty searches
-
-When the user asks about a specific external item (a PingCode work item like
-"#1234", a CI build, a 飞书 discussion):
-- Search for memories related to that item first
-- If found, answer from the memory
-- If NOT found, say "该 issue/事件 尚未被摄入 EMA，我目前没有关于它的记忆。"
-  rather than a generic "I don't know"
-
-When the user asks to ingest or index content, use the appropriate tools.
-Always prefer searching over guessing.
-
-When the user tells you to remember something, or shares facts/decisions/knowledge:
-- Call write_memory_tool IMMEDIATELY with the user's exact words as content.
-- Do NOT pre-check for conflicts yourself. The tool has built-in conflict detection
-  and will pause for human review if a contradiction is found.
-- Do NOT ask the user whether to overwrite or merge — that is handled by the tool.
-
-Always respond in Chinese (简体中文). All your answers, explanations,
-and tool interactions should use Chinese unless the user explicitly
-requests another language."""
 
 
 # ── Helper: message conversion ───────────────────────────────────────
@@ -266,13 +221,15 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     """
     provider = get_llm_provider()
 
-    # Prepend system prompt if this is the first call, then bound the history
-    # sent to the LLM (recent window + pinned system prompt).
+    # Prepend the system prompt if this is the first call, then bound the
+    # history sent to the LLM (recent window + pinned system prompts).
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
     messages = _window_messages(messages)
     if not has_system:
-        messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
+        version, system_text = get_prompt("agent.system")
+        logger.info("call_llm_node: using agent.system prompt v%s", version)
+        messages.insert(0, SystemMessage(content=system_text.format(context="")))
 
     tool_schemas = _to_openai_tools(tools)
     dicts = _messages_to_dicts(messages)
@@ -362,8 +319,9 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     # Both this loop and the role loop below walk the *windowed* history so
     # a long thread doesn't resend unbounded tool results into the synthesis
     # prompt on every turn.
+    windowed = _window_messages(state["messages"])
     context_parts: list[str] = []
-    for m in _window_messages(state["messages"]):
+    for m in windowed:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
@@ -394,16 +352,13 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     context_str = "\n\n".join(context_parts) if context_parts else ""
 
     # Build the final prompt — single system message (Anthropic only
-    # accepts one top-level system param, so context is folded in).
-    system_content = (
-        "You are EMA, the Engineering Memory Agent. "
-        "Answer the user's question based on the conversation "
-        "and the retrieved context below. "
-        "Be concise.  Do NOT list or enumerate the sources in your response — "
-        "they are already displayed separately in the UI."
-    )
-    if context_str:
-        system_content += f"\n\nContext:\n{context_str}"
+    # accepts one top-level system param, so context is folded in).  The
+    # agent system template is the merged persona + answer guidance; the
+    # retrieved-context block is injected via the ``{context}`` placeholder.
+    version, system_text = get_prompt("agent.system")
+    logger.info("generate_final_node: using agent.system prompt v%s", version)
+    context_block = f"\n\nContext:\n{context_str}" if context_str else ""
+    system_content = system_text.format(context=context_block)
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},
@@ -411,7 +366,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
 
     # Include the recent conversation history (skip tool & system messages),
     # windowed so a long thread doesn't resend unbounded history every turn.
-    for m in _window_messages(state["messages"]):
+    for m in windowed:
         if isinstance(m, (ToolMessage, SystemMessage)):
             continue
         role = "assistant" if isinstance(m, AIMessage) else "user"
