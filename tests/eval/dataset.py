@@ -255,7 +255,7 @@ async def semantic_relevance_mask(
 # ── Retriever adapters ────────────────────────────────────────
 
 
-def _rerank_tag(use_llm_rerank: bool, use_cross_encoder: bool) -> str:
+def rerank_tag(use_llm_rerank: bool, use_cross_encoder: bool) -> str:
     """Three-state rerank label for adapter names and eval report configs.
 
     The default read path skips reranking entirely (``norank``); the
@@ -297,7 +297,7 @@ def make_chunk_retriever(
         ]
 
     return RetrieverAdapter(
-        name=f"chunk:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        name=f"chunk:{rerank_tag(use_llm_rerank, use_cross_encoder)}",
         fn=_fn,
         match_field="content",
     )
@@ -326,7 +326,7 @@ def make_memory_retriever(
         )
 
     return RetrieverAdapter(
-        name=f"memory:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        name=f"memory:{rerank_tag(use_llm_rerank, use_cross_encoder)}",
         fn=_fn,
         match_field="summary",
     )
@@ -375,10 +375,10 @@ def make_hybrid_retriever(
         ]
 
     if skip_rerank:
-        rerank_tag = "norank"
+        label = "norank"
     else:
-        rerank_tag = "llm" if use_llm_rerank else "ce"
-    return RetrieverAdapter(name=f"hybrid:{rerank_tag}", fn=_fn, match_field="content")
+        label = "llm" if use_llm_rerank else "ce"
+    return RetrieverAdapter(name=f"hybrid:{label}", fn=_fn, match_field="content")
 
 
 def make_rewrite_retriever(
@@ -406,7 +406,7 @@ def make_rewrite_retriever(
         ]
 
     return RetrieverAdapter(
-        name=f"rewrite:{_rerank_tag(use_llm_rerank, use_cross_encoder)}",
+        name=f"rewrite:{rerank_tag(use_llm_rerank, use_cross_encoder)}",
         fn=_fn,
         match_field="content",
     )
@@ -451,7 +451,10 @@ def build_adapter(
     if retriever == "hybrid":
         return make_hybrid_retriever(
             use_llm_rerank=use_llm_rerank,
-            skip_rerank=not use_cross_encoder,
+            # Either explicit reranker disables the skip: the old
+            # ``skip_rerank=not use_cross_encoder`` silently dropped an
+            # ``--llm-rerank`` request (hybrid:llm config ran RRF/no-rerank).
+            skip_rerank=not (use_cross_encoder or use_llm_rerank),
         )
     if retriever == "hybrid_norerank":
         return make_hybrid_retriever(skip_rerank=True)

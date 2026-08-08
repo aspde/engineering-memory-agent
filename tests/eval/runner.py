@@ -26,6 +26,7 @@ from tests.eval.dataset import (
     load_ground_truth,
     load_seed_memories,
     relevance_mask,
+    rerank_tag,
     semantic_relevance_mask,
 )
 from tests.eval.ground_truth import CATEGORIES, DIFFICULTIES, GroundTruthItem
@@ -77,10 +78,7 @@ class EvalConfig:
         ``norank`` is the default read path (no cross-encoder); ``ce`` and
         ``llm`` label the explicit opt-in rerankers.
         """
-        rerank = "llm" if self.use_llm_rerank else (
-            "ce" if self.use_cross_encoder else "norank"
-        )
-        return f"{self.retriever}:{rerank}@k{self.top_k}"
+        return f"{self.retriever}:{rerank_tag(self.use_llm_rerank, self.use_cross_encoder)}@k{self.top_k}"
 
 
 @dataclass

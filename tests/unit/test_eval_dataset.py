@@ -396,6 +396,12 @@ class TestBuildAdapter:
         adapter = build_adapter("hybrid", use_cross_encoder=True)
         assert adapter.name == "hybrid:ce"
 
+    def test_hybrid_adapter_llm_variant(self) -> None:
+        """Regression: --llm-rerank on hybrid must actually select the LLM
+        reranker, not fall through to the no-rerank path."""
+        adapter = build_adapter("hybrid", use_llm_rerank=True)
+        assert adapter.name == "hybrid:llm"
+
     def test_rewrite_adapter_name_and_field(self) -> None:
         adapter = build_adapter("rewrite")
         assert adapter.name == "rewrite:norank"

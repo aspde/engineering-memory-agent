@@ -29,7 +29,7 @@ import argparse
 import asyncio
 import sys
 
-from tests.eval.dataset import validate_dataset
+from tests.eval.dataset import rerank_tag, validate_dataset
 from tests.eval.report import (
     summarize,
     write_json,
@@ -164,7 +164,7 @@ def _make_config(
     categories: list[str] | None,
 ) -> EvalConfig:
     cfg = EvalConfig(
-        name=name or f"{retriever}:{_rerank_label(use_llm_rerank, use_cross_encoder)}@k{top_k}",
+        name=name or f"{retriever}:{rerank_tag(use_llm_rerank, use_cross_encoder)}@k{top_k}",
         retriever=retriever,
         top_k=top_k,
         use_llm_rerank=use_llm_rerank,
@@ -173,15 +173,6 @@ def _make_config(
         categories=categories,
     )
     return cfg
-
-
-def _rerank_label(use_llm_rerank: bool, use_cross_encoder: bool) -> str:
-    """Short label for report names: ``llm`` / ``ce`` / ``norank``."""
-    if use_llm_rerank:
-        return "llm"
-    if use_cross_encoder:
-        return "ce"
-    return "norank"
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -201,7 +192,9 @@ async def _run(args: argparse.Namespace) -> int:
 
     if args.compare:
         cfg_a = _make_config(
-            name=f"{args.retriever}:ce@k{args.top_k}",
+            # name=None → "{retriever}:{rerank_tag}@k{n}" derived from the flags,
+            # so the report label matches the reranker actually wired up.
+            name=None,
             retriever=args.retriever,
             top_k=args.top_k,
             use_llm_rerank=False,
@@ -210,7 +203,7 @@ async def _run(args: argparse.Namespace) -> int:
             categories=categories,
         )
         cfg_b = _make_config(
-            name=f"{args.retriever}:llm@k{args.top_k}",
+            name=None,
             retriever=args.retriever,
             top_k=args.top_k,
             use_llm_rerank=True,
