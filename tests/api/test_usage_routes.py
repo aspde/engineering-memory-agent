@@ -100,3 +100,58 @@ async def test_empty_trace_returns_empty(async_client) -> None:
     resp = await async_client.get("/api/usage/trace/does-not-exist")
     assert resp.status_code == 200
     assert resp.json()["calls"] == []
+
+
+@pytest.mark.asyncio
+async def test_samples_endpoint_returns_sampled_calls(monkeypatch, async_client) -> None:
+    from backend.service import usage
+
+    monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
+    t_trace = current_trace_id.set("trace-sample")
+    try:
+        ctx = begin_call([{"role": "user", "content": "hello"}])
+        record_call(
+            ctx,
+            model="deepseek-chat",
+            provider="openai-compatible",
+            scenario="agent_chat",
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+            response_text="answer body",
+        )
+    finally:
+        current_trace_id.reset(t_trace)
+    await flush_usage_buffer()
+
+    resp = await async_client.get("/api/usage/samples")
+    assert resp.status_code == 200
+    samples = resp.json()["samples"]
+    assert len(samples) == 1
+    assert samples[0]["response_sample"] == "answer body"
+    assert samples[0]["prompt_sample"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_samples_endpoint_filters_by_status(monkeypatch, async_client) -> None:
+    from backend.service import usage
+
+    # rate 0 → only error calls carry samples
+    monkeypatch.setattr(usage.config, "usage_sample_rate", 0.0)
+    ctx = begin_call([{"role": "user", "content": "hi"}])
+    record_call(
+        ctx,
+        model="m",
+        provider="p",
+        scenario="agent_chat",
+        status="error",
+        error="boom",
+        response_text="err body",
+    )
+    await flush_usage_buffer()
+
+    err_resp = await async_client.get("/api/usage/samples?status=error")
+    assert err_resp.status_code == 200
+    assert len(err_resp.json()["samples"]) == 1
+
+    ok_resp = await async_client.get("/api/usage/samples?status=success")
+    assert ok_resp.status_code == 200
+    assert ok_resp.json()["samples"] == []

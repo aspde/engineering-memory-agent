@@ -106,13 +106,19 @@ def _per_query_detail(result: LlmEvalResult) -> str:
                     f"completeness={_fmt(q.get('summary_completeness', 0.0))}"
                 )
         if "fact_coverage" in q:
+            citation = q.get("citation_rate")
             lines.append(
                 f"- coverage={_fmt(q.get('fact_coverage', 0.0))} "
                 f"grounded={_fmt(q.get('groundedness', 0.0))} "
+                f"citation={_fmt(citation)} "
                 f"(answer len={q.get('answer_len', '?')})"
             )
             if q.get("answer_preview"):
                 lines.append(f"- answer: `{q['answer_preview']}…`")
+            if citation is not None and citation == 0.0:
+                lines.append(
+                    "- ⚠ no source cited — candidate for prompt/eval iteration"
+                )
             if q.get("ungrounded_claims"):
                 lines.append(f"- ⚠ ungrounded: {q['ungrounded_claims']}")
         if q.get("judge_error"):
@@ -233,5 +239,6 @@ def summarize(result: LlmEvalResult) -> str:
         f"[answer] coverage={_fmt(result.metric('fact_coverage'))} "
         f"groundedness={_fmt(result.metric('groundedness'))} "
         f"hallucination={_fmt(result.metric('hallucination_rate'))} "
+        f"citation={_fmt(result.metric('citation_rate'))} "
         f"items={result.n_items} errors={len(result.errors)}"
     )

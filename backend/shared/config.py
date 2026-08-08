@@ -62,6 +62,31 @@ class EmbeddingConfig:
     hf_endpoint: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_HF_ENDPOINT", "https://hf-mirror.com")
     )
+    # Optional cross-provider failover: when ``EMBEDDING_FALLBACK_PROVIDER`` is
+    # set and the primary's call fails (a retryable error after its retries,
+    # an open circuit breaker, or a local-model failure such as a corrupt BGE
+    # checkpoint), the call is retried once against the fallback.  The fallback
+    # model's vector dimension must match the primary's (== the pgvector schema
+    # dimension) or failover writes will be rejected — see
+    # ``FallbackEmbeddingProvider`` in ``embedding_service.py``.
+    fallback_provider: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_FALLBACK_PROVIDER", "")
+    )
+    fallback_api_key: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_FALLBACK_API_KEY", "")
+    )
+    fallback_base_url: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_FALLBACK_BASE_URL", "")
+    )
+    fallback_model: str = field(
+        default_factory=lambda: os.getenv("EMBEDDING_FALLBACK_MODEL", "")
+    )
+    fallback_batch_size: int = field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_FALLBACK_BATCH_SIZE", "32"))
+    )
+    fallback_timeout: int = field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_FALLBACK_TIMEOUT", "60"))
+    )
 
     @property
     def dimension(self) -> int:
@@ -181,6 +206,15 @@ class AppConfig:
     agent_timeout: int = field(
         default_factory=lambda: int(os.getenv("AGENT_TIMEOUT", "180"))
     )
+    # Max simultaneous interactive agent runs (chat / chat-stream).  Each run
+    # holds LLM slots for its whole ReAct loop (up to AGENT_TIMEOUT), so an
+    # unbounded number of concurrent sessions would together saturate the
+    # provider rate limit and trip the circuit breaker for everyone.  Beyond
+    # this cap the chat endpoint answers 503 (refuse, not queue) — see
+    # ``agent_service``'s slot counter.
+    max_agent_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("MAX_AGENT_CONCURRENCY", "4"))
+    )
     # Patrol runs are background tasks that scan the whole memory store, so
     # they get their own (longer) deadline rather than borrowing the
     # interactive AGENT_TIMEOUT.  A patrol that exceeds it is marked failed.
@@ -210,6 +244,13 @@ class AppConfig:
     )
     auto_memory_max_per_window: int = field(
         default_factory=lambda: int(os.getenv("AUTO_MEMORY_MAX_PER_WINDOW", "30"))
+    )
+    # When enabled, a turn that passes the keyword heuristic is additionally
+    # judged by one cheap LLM call ("is this durable knowledge?") before
+    # extraction runs.  Off by default — the heuristic is free; the gate
+    # costs one structured call per candidate turn.
+    auto_memory_llm_gate: bool = field(
+        default_factory=lambda: os.getenv("AUTO_MEMORY_LLM_GATE", "false").lower() == "true"
     )
     # When enabled, messages older than the context window are folded into a
     # running-summary SystemMessage instead of being dropped.  Enabled by
@@ -243,6 +284,37 @@ class AppConfig:
     # (observability must never back-pressure the LLM hot path).
     usage_buffer_max: int = field(
         default_factory=lambda: int(os.getenv("USAGE_BUFFER_MAX", "5000"))
+    )
+    # Fraction of successful LLM calls whose prompt/response text is sampled
+    # into llm_usage (for post-hoc quality analysis).  Error calls are always
+    # sampled regardless of this rate.  0 disables success-path sampling.
+    usage_sample_rate: float = field(
+        default_factory=lambda: float(os.getenv("USAGE_SAMPLE_RATE", "0.05"))
+    )
+    # Sampled prompt/response text is kept this many days, then nulled by the
+    # usage flusher (metadata rows stay for summaries; only the text columns
+    # are released).  Bounds the sample columns so they don't accumulate
+    # unboundedly on a long-running deployment.
+    usage_sample_retention_days: int = field(
+        default_factory=lambda: int(os.getenv("USAGE_SAMPLE_RETENTION_DAYS", "30"))
+    )
+    # ── LLM health alerting ──────────────────────────────────────────
+    # A periodic loop inspects a recent window of llm_usage for a high error
+    # rate, the in-memory structured-failure counters, and the primary LLM
+    # circuit breaker.  Crossing a threshold logs a WARNING; sending the alert
+    # to the team's 飞书 group is opt-in (ALERT_FEISHU_ENABLED=true reuses
+    # FEISHU_WEBHOOK_URL) — external notifications are never on by default.
+    alerts_enabled: bool = field(
+        default_factory=lambda: os.getenv("ALERTS_ENABLED", "true").lower() == "true"
+    )
+    alert_error_rate_threshold: float = field(
+        default_factory=lambda: float(os.getenv("ALERT_ERROR_RATE_THRESHOLD", "0.3"))
+    )
+    alert_check_interval_seconds: int = field(
+        default_factory=lambda: int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
+    )
+    alert_feishu_enabled: bool = field(
+        default_factory=lambda: os.getenv("ALERT_FEISHU_ENABLED", "false").lower() == "true"
     )
     # ── Phase 3: proactive agent ───────────────────────────────────
     patrol_enabled: bool = field(
@@ -322,11 +394,35 @@ def validate_config() -> list[str]:
         )
     if config.agent_timeout <= 0:
         problems.append(f"AGENT_TIMEOUT={config.agent_timeout} must be > 0")
+    if config.max_agent_concurrency < 1:
+        problems.append(
+            f"MAX_AGENT_CONCURRENCY={config.max_agent_concurrency} must be >= 1"
+        )
     if config.patrol_timeout <= 0:
         problems.append(f"PATROL_TIMEOUT={config.patrol_timeout} must be > 0")
     if config.context_token_budget < 1:
         problems.append(
             f"CONTEXT_TOKEN_BUDGET={config.context_token_budget} must be >= 1"
+        )
+
+    # Sampling rate and alert thresholds are ratios — out-of-range values
+    # would silently disable sampling or trip alerts on every cycle.
+    if not 0 <= config.usage_sample_rate <= 1:
+        problems.append(
+            f"USAGE_SAMPLE_RATE={config.usage_sample_rate} must be in 0..1"
+        )
+    if config.usage_sample_retention_days < 1:
+        problems.append(
+            f"USAGE_SAMPLE_RETENTION_DAYS={config.usage_sample_retention_days} "
+            "must be >= 1"
+        )
+    if not 0 <= config.alert_error_rate_threshold <= 1:
+        problems.append(
+            f"ALERT_ERROR_RATE_THRESHOLD={config.alert_error_rate_threshold} must be in 0..1"
+        )
+    if config.alert_check_interval_seconds < 1:
+        problems.append(
+            f"ALERT_CHECK_INTERVAL_SECONDS={config.alert_check_interval_seconds} must be >= 1"
         )
 
     # LLM failover: an incomplete fallback config only fails on the first
@@ -348,6 +444,23 @@ def validate_config() -> list[str]:
             problems.append(
                 "LLM_FALLBACK_BASE_URL is required when LLM_FALLBACK_PROVIDER "
                 "is an OpenAI-compatible provider"
+            )
+
+    # Embedding failover: same fail-fast policy — an incomplete fallback
+    # config only surfaces on the first embedding call otherwise.
+    if config.embedding.fallback_provider:
+        if not config.embedding.fallback_model:
+            problems.append(
+                "EMBEDDING_FALLBACK_MODEL is required when "
+                "EMBEDDING_FALLBACK_PROVIDER is set"
+            )
+        if (
+            config.embedding.fallback_provider == "openai"
+            and not config.embedding.fallback_api_key
+        ):
+            problems.append(
+                "EMBEDDING_FALLBACK_API_KEY is required for an openai "
+                "embedding fallback"
             )
 
     # LLM API key — real providers all need one; only tests are exempt.

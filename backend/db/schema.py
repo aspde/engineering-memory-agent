@@ -368,6 +368,24 @@ def build_schema_statements(dimension: int) -> list[str]:
         CREATE INDEX IF NOT EXISTS idx_llm_usage_thread
             ON llm_usage (thread_id, created_at DESC)
         """,
+        # Sampled prompt/response text for post-hoc quality analysis (see
+        # ``backend/service/usage.py``).  NULL = not sampled; error calls are
+        # always sampled, success calls at ``USAGE_SAMPLE_RATE``.  Added via
+        # ALTER so databases created before the columns existed stay valid.
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE llm_usage ADD COLUMN prompt_sample TEXT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE llm_usage ADD COLUMN response_sample TEXT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
         # ── Pending-conflict queue: patrol (inspection) conflicts ─────────
         # Patrol contradictions are two *already-stored* memories (A, B), unlike
         # ingestion conflicts (existing in store + new not yet written).  The

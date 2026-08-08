@@ -8,6 +8,11 @@ import type { Message, Source, ToolCall } from '../types';
 vi.mock('../components/SourcesPanel', () => ({
   default: () => <div data-testid="sources-panel">mock sources panel</div>,
 }));
+// CitationText likewise depends on React Router + AppContext — mock it so the
+// bubble tests stay focused on layout, not citation resolution.
+vi.mock('../components/CitationText', () => ({
+  default: ({ text }: { text: string }) => <span>{text}</span>,
+}));
 
 function makeMessage(overrides: Partial<Message> = {}): Message {
   return { role: 'assistant', content: '你好', ...overrides };

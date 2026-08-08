@@ -99,3 +99,71 @@ class TestValidateConfig:
         monkeypatch.setattr(config_mod.config.llm, "fallback_base_url", "")
 
         assert config_mod.validate_config() == []
+
+    def test_usage_sample_rate_out_of_range(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "usage_sample_rate", 1.5)
+
+        problems = config_mod.validate_config()
+        assert any("USAGE_SAMPLE_RATE" in p for p in problems)
+
+    def test_usage_sample_retention_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "usage_sample_retention_days", 0)
+
+        problems = config_mod.validate_config()
+        assert any("USAGE_SAMPLE_RETENTION_DAYS" in p for p in problems)
+
+    def test_alert_error_rate_threshold_out_of_range(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "alert_error_rate_threshold", -0.1)
+
+        problems = config_mod.validate_config()
+        assert any("ALERT_ERROR_RATE_THRESHOLD" in p for p in problems)
+
+    def test_alert_check_interval_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "alert_check_interval_seconds", 0)
+
+        problems = config_mod.validate_config()
+        assert any("ALERT_CHECK_INTERVAL_SECONDS" in p for p in problems)
+
+    def test_agent_concurrency_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 0)
+
+        problems = config_mod.validate_config()
+        assert any("MAX_AGENT_CONCURRENCY" in p for p in problems)
+
+    def test_embedding_fallback_requires_model(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_provider", "openai")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_model", "")
+
+        problems = config_mod.validate_config()
+        assert any("EMBEDDING_FALLBACK_MODEL" in p for p in problems)
+
+    def test_embedding_openai_fallback_requires_key(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_provider", "openai")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_model", "text-embedding-3-small")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_api_key", "")
+
+        problems = config_mod.validate_config()
+        assert any("EMBEDDING_FALLBACK_API_KEY" in p for p in problems)
+
+    def test_embedding_fallback_complete_is_valid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_provider", "openai")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_model", "text-embedding-3-small")
+        monkeypatch.setattr(config_mod.config.embedding, "fallback_api_key", "k")
+
+        assert config_mod.validate_config() == []

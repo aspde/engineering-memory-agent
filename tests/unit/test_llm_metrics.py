@@ -14,6 +14,7 @@ import pytest
 from tests.eval.llm_metrics import (
     answer_deterministic_metrics,
     answer_judge_metrics,
+    citation_presence,
     entity_metrics,
     names_match,
     normalize_name,
@@ -253,3 +254,27 @@ class TestAnswerMetrics:
         assert m["groundedness"] == 0.0
         assert m["hallucination_rate"] == 1.0
         assert m["ungrounded_claims"] == 1.0
+
+
+class TestCitationPresence:
+    def test_full_id_cited(self) -> None:
+        assert citation_presence("选型是 pgvector（记忆 a1b2c3d4）", ["a1b2c3d4"]) == 1.0
+
+    def test_short_tail_cited(self) -> None:
+        # The model may cite only the 8-char tail of a longer id.
+        assert citation_presence("（文档 a1b2c3d4）", ["mem-a1b2c3d4"]) == 1.0
+
+    def test_prefix_stripped(self) -> None:
+        assert citation_presence("pgvector（a1b2c3d4）", ["mem-a1b2c3d4"]) == 1.0
+
+    def test_no_citation(self) -> None:
+        assert citation_presence("选型是 pgvector", ["a1b2c3d4"]) == 0.0
+
+    def test_wrong_id_does_not_count(self) -> None:
+        assert citation_presence("（记忆 e5f6a7b8）", ["a1b2c3d4"]) == 0.0
+
+    def test_empty_source_ids_is_vacuously_passing(self) -> None:
+        assert citation_presence("没有任何引用", []) == 1.0
+
+    def test_empty_answer(self) -> None:
+        assert citation_presence("", ["a1b2c3d4"]) == 0.0

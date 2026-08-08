@@ -180,8 +180,105 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return self._dimension
 
 
+class FallbackEmbeddingProvider(EmbeddingProvider):
+    """Route embedding calls to a secondary provider when the primary fails.
+
+    Mirrors ``FallbackLLMProvider`` for LLMs.  The primary already retries
+    and circuit-breaks internally (``resilience.py``); this wrapper adds
+    cross-provider failover.  Any exception out of the primary — a retryable
+    error after its retries are exhausted, an open circuit breaker, or a
+    local-model failure such as a corrupt BGE checkpoint — retries the call
+    once against the fallback.
+
+    Dimension constraint: the pgvector columns are built for
+    ``config.embedding.dimension`` (== the primary's dimension, checked in
+    ``get_embedding_provider``).  A fallback whose dimension differs produces
+    vectors the schema rejects on every failover write, so a mismatch is
+    warned at construction rather than silently stored.
+    """
+
+    def __init__(
+        self, primary: EmbeddingProvider, fallback: EmbeddingProvider
+    ) -> None:
+        self._primary = primary
+        self._fallback = fallback
+        if fallback.dimension != primary.dimension:
+            logger.warning(
+                "Embedding failover dimension mismatch: primary=%d fallback=%d — "
+                "a failover write will produce vectors the pgvector schema rejects. "
+                "Align EMBEDDING_FALLBACK_MODEL with EMBEDDING_MODEL (or re-embed "
+                "and resize the columns before enabling failover).",
+                primary.dimension,
+                fallback.dimension,
+            )
+        logger.info(
+            "Embedding failover active: primary=%s (dim %d) -> fallback=%s (dim %d)",
+            getattr(primary, "_model", None) or type(primary).__name__,
+            primary.dimension,
+            getattr(fallback, "_model", None) or type(fallback).__name__,
+            fallback.dimension,
+        )
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return await self._primary.embed(texts)
+        except Exception as exc:
+            logger.warning(
+                "Primary embedding failed (%s) — failing over to %s",
+                exc,
+                getattr(self._fallback, "_model", None) or type(self._fallback).__name__,
+            )
+            return await self._fallback.embed(texts)
+
+    def embed_sync(self, texts: list[str]) -> list[list[float]]:
+        try:
+            return self._primary.embed_sync(texts)
+        except Exception as exc:
+            logger.warning(
+                "Primary embedding failed (%s) — failing over to %s",
+                exc,
+                getattr(self._fallback, "_model", None) or type(self._fallback).__name__,
+            )
+            return self._fallback.embed_sync(texts)
+
+    @property
+    def dimension(self) -> int:
+        """Report the primary's dimension — the schema dimension."""
+        return self._primary.dimension
+
+
 _provider: EmbeddingProvider | None = None
 _lock: threading.Lock = threading.Lock()
+
+
+def _build_embedding_provider(
+    provider_name: str,
+    *,
+    api_key: str,
+    base_url: str,
+    model: str,
+    batch_size: int,
+    timeout: int,
+    normalize: bool = True,
+    hf_endpoint: str = "https://hf-mirror.com",
+) -> EmbeddingProvider:
+    """Construct one embedding provider from explicit settings (primary or fallback)."""
+    if provider_name == "local":
+        return BGEEmbeddingProvider(
+            model_name=model,
+            normalize=normalize,
+            batch_size=batch_size,
+            hf_endpoint=hf_endpoint,
+        )
+    if provider_name == "openai":
+        return OpenAIEmbeddingProvider(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            batch_size=batch_size,
+            timeout=timeout,
+        )
+    raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
 
 
 def get_embedding_provider() -> EmbeddingProvider:
@@ -189,6 +286,10 @@ def get_embedding_provider() -> EmbeddingProvider:
 
     Thread-safe: the lock prevents the background warmup and the first
     real request from racing to initialise the provider.
+
+    When ``EMBEDDING_FALLBACK_PROVIDER`` is set, returns a
+    :class:`FallbackEmbeddingProvider` wrapping the primary and the configured
+    fallback; otherwise the primary provider alone (default).
     """
     global _provider
     if _provider is not None:
@@ -198,26 +299,19 @@ def get_embedding_provider() -> EmbeddingProvider:
         if _provider is not None:  # double-check after acquiring lock
             return _provider
 
-        provider_name = config.embedding.provider
-        if provider_name == "local":
-            _provider = BGEEmbeddingProvider(
-                model_name=config.embedding.model,
-                normalize=config.embedding.normalize,
-                batch_size=config.embedding.batch_size,
-                hf_endpoint=config.embedding.hf_endpoint,
-            )
-        elif provider_name == "openai":
-            _provider = OpenAIEmbeddingProvider(
-                api_key=config.embedding.api_key,
-                base_url=config.embedding.base_url,
-                model=config.embedding.model,
-                batch_size=config.embedding.batch_size,
-                timeout=config.embedding.timeout,
-            )
-        else:
-            raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
+        embedding = config.embedding
+        _provider = _build_embedding_provider(
+            embedding.provider,
+            api_key=embedding.api_key,
+            base_url=embedding.base_url,
+            model=embedding.model,
+            batch_size=embedding.batch_size,
+            timeout=embedding.timeout,
+            normalize=embedding.normalize,
+            hf_endpoint=embedding.hf_endpoint,
+        )
 
-        if _provider.dimension != config.embedding.dimension:
+        if _provider.dimension != embedding.dimension:
             logger.warning(
                 "Embedding provider reports dimension %d but config/schema "
                 "assumes %d (model=%r) — the pgvector columns were built as "
@@ -226,9 +320,22 @@ def get_embedding_provider() -> EmbeddingProvider:
                 "init_db resize the columns, then re-embed with "
                 "`python reembed_embeddings.py`.",
                 _provider.dimension,
-                config.embedding.dimension,
-                config.embedding.model,
-                config.embedding.dimension,
+                embedding.dimension,
+                embedding.model,
+                embedding.dimension,
             )
+
+        if embedding.fallback_provider:
+            fallback = _build_embedding_provider(
+                embedding.fallback_provider,
+                api_key=embedding.fallback_api_key,
+                base_url=embedding.fallback_base_url,
+                model=embedding.fallback_model,
+                batch_size=embedding.fallback_batch_size,
+                timeout=embedding.fallback_timeout,
+                normalize=embedding.normalize,
+                hf_endpoint=embedding.hf_endpoint,
+            )
+            _provider = FallbackEmbeddingProvider(_provider, fallback)
 
         return _provider

@@ -18,7 +18,7 @@ Examples:
     # Regression gate: fail (exit 2) if headline metrics drop below thresholds
     python -m tests.eval.run_llm_eval --suite all \
         --min-tool-accuracy 0.70 --min-entity-f1 0.60 --min-relation-f1 0.50 \
-        --min-fact-coverage 0.60 --min-groundedness 0.80
+        --min-fact-coverage 0.60 --min-groundedness 0.80 --min-citation-rate 0.80
 """
 
 from __future__ import annotations
@@ -93,6 +93,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ("--min-relation-f1", "relation_f1"),
         ("--min-fact-coverage", "fact_coverage"),
         ("--min-groundedness", "groundedness"),
+        ("--min-citation-rate", "citation_rate"),
     ):
         p.add_argument(
             flag,
@@ -115,6 +116,7 @@ def _build_thresholds(args: argparse.Namespace) -> dict[str, float]:
         "relation_f1",
         "fact_coverage",
         "groundedness",
+        "citation_rate",
     ):
         value = getattr(args, f"min_{metric}", None)
         if value is not None:

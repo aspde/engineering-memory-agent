@@ -19,7 +19,11 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from agent.nodes import CHAT_APPROVAL_TOOLS
-from backend.service.agent_service import get_agent_for_thread
+from backend.service.agent_service import (
+    _release_agent_slot,
+    _try_acquire_agent_slot,
+    get_agent_for_thread,
+)
 from backend.shared.config import config, current_thread_id, current_trace_id
 from backend.service.llm_service import get_llm_provider
 
@@ -106,6 +110,7 @@ async def _mark_interrupted_thread(agent, thread_id: str) -> None:
 _READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "search_memories_tool",
     "retrieve_chunks_tool",
+    "query_rewrite_and_search_tool",
 })
 
 # Write tools whose output is already confirmed by the approval flow —
@@ -137,10 +142,6 @@ def _extract_tool_traces(
         if tool_name in _SILENT_TOOLS:
             continue
 
-        # Chunk retrieval sources have no stable IDs — skip entirely.
-        if tool_name == "retrieve_chunks_tool":
-            continue
-
         raw = str(m.content) if m.content else ""
 
         # Try to extract structured sources from JSON envelope
@@ -156,7 +157,10 @@ def _extract_tool_traces(
             display = raw
 
         # Only write / ingest tools go to the tool-call panel.  Read
-        # results (search_memories_tool) are shown as clickable sources.
+        # results (search_memories_tool / retrieve_chunks_tool /
+        # query_rewrite_and_search_tool) are shown as sources — chunk
+        # results carry document_id so the answer's inline citations are
+        # verifiable in the sources panel.
         if tool_name not in _READ_ONLY_TOOLS:
             tool_call_traces.append({
                 "tool": tool_name,
@@ -171,10 +175,12 @@ def _extract_tool_traces(
         elif tool_name not in _READ_ONLY_TOOLS and raw.strip():
             sources.append({"type": "unknown", "snippet": raw[:200]})
 
-    # Deduplicate sources by id (same memory may be returned by multiple
-    # search calls in a single ReAct loop).  Sources without an id are
-    # kept as-is (legacy / fallback entries).
+    # Deduplicate sources: memories by id (same memory returned by multiple
+    # search calls in a single ReAct loop), chunks by (document_id,
+    # chunk_index) since they carry no stable id.  Sources with neither key
+    # are kept as-is (legacy / fallback entries).
     seen_ids: set[str] = set()
+    seen_chunks: set[tuple[str, int]] = set()
     unique_sources: list[dict[str, Any]] = []
     for s in sources:
         sid = s.get("id")
@@ -182,6 +188,18 @@ def _extract_tool_traces(
             if sid in seen_ids:
                 continue
             seen_ids.add(sid)
+        if s.get("type") == "chunk":
+            doc = s.get("document_id")
+            cidx = s.get("chunk_index")
+            if doc is not None and cidx is not None:
+                try:
+                    key = (str(doc), int(cidx))
+                except (TypeError, ValueError):
+                    key = None
+                if key is not None:
+                    if key in seen_chunks:
+                        continue
+                    seen_chunks.add(key)
         unique_sources.append(s)
     return tool_call_traces, unique_sources
 
@@ -384,6 +402,21 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
+    # Concurrency cap: beyond MAX_AGENT_CONCURRENCY simultaneous runs the
+    # request is refused (503), not queued — a queued run would sit behind
+    # long ReAct loops that each hold LLM slots for up to AGENT_TIMEOUT.
+    # Checked before any contextvar/DB setup so a refused request costs
+    # nothing (no conversation upsert, no trace/thread stamps).
+    if not _try_acquire_agent_slot():
+        logger.warning(
+            "agent_chat refused — concurrency cap reached (max=%d) thread_id=%s",
+            config.max_agent_concurrency, req.thread_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="系统繁忙，当前同时处理的会话数已达上限，请稍后重试。",
+        )
+
     current_thread_id.set(req.thread_id)
 
     # Link every LLM call in this run to one trace id (usage observability).
@@ -442,6 +475,11 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
             status_code=502,
             detail="Agent 处理出错，请稍后重试或简化问题。",
         )
+    finally:
+        # Release the concurrency slot on every exit path — success, timeout,
+        # or internal error.  The graph run is complete at this point; the
+        # interrupt/response processing below is pure CPU and holds no slot.
+        _release_agent_slot()
 
     # Check for interrupt first
     interrupts = result.get("__interrupt__")
@@ -516,6 +554,22 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
+    # Concurrency cap (same policy as the non-streaming /chat): acquire a slot
+    # before the stream starts so the 503 is a plain HTTP error, not an SSE
+    # event.  The slot is held for the whole stream and released in _stream's
+    # finally — a disconnected client closes the generator, which runs it.
+    # Checked before any contextvar/DB setup so a refused request costs
+    # nothing (no conversation upsert, no trace/thread stamps).
+    if not _try_acquire_agent_slot():
+        logger.warning(
+            "agent_chat_stream refused — concurrency cap reached (max=%d) thread_id=%s",
+            config.max_agent_concurrency, req.thread_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="系统繁忙，当前同时处理的会话数已达上限，请稍后重试。",
+        )
+
     current_thread_id.set(req.thread_id)
 
     # Link every LLM call in this run to one trace id (usage observability).
@@ -606,6 +660,11 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
             # the traceback and emit a generic error event.
             logger.exception("Streaming error")
             yield f"data: {json.dumps({'type': 'error', 'message': '流式响应出错，请稍后重试。'}, ensure_ascii=False)}\n\n"
+        finally:
+            # Release the concurrency slot when the stream ends — completion,
+            # timeout, client disconnect (generator close), or error all land
+            # here exactly once.
+            _release_agent_slot()
 
     return StreamingResponse(
         _stream(),

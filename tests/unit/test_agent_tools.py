@@ -40,6 +40,8 @@ class TestSearchMemoriesTool:
         assert "sources" in data
         assert "PostgreSQL" in data["display"]
         assert "0.95" in data["display"]
+        # The display exposes the memory short ID so the LLM can cite it inline.
+        assert "memory: mem-001" in data["display"]
         assert len(data["sources"]) == 1
         assert data["sources"][0]["id"] == "mem-001"
 

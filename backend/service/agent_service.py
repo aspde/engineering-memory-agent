@@ -19,6 +19,7 @@ because psycopg 3 is incompatible with ``ProactorEventLoop``.
 from __future__ import annotations
 
 import logging
+import threading
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
@@ -46,6 +47,34 @@ def _active_tools() -> list:
 
 _checkpointer: InMemorySaver | object | None = None
 _pool = None  # psycopg AsyncConnectionPool, closed on shutdown
+
+
+# ── Interactive agent-run concurrency cap ─────────────────────────────
+# Each chat run holds LLM slots for its whole ReAct loop (up to
+# AGENT_TIMEOUT), so an unbounded number of concurrent sessions would
+# together saturate the provider rate limit and trip the circuit breaker
+# for everyone.  Backed by a plain counter (not an ``asyncio.Semaphore``)
+# so it stays event-loop-agnostic like the webhook extraction cap — safe
+# across pytest's function-scoped event loops.
+_agent_active = 0
+_agent_slots_lock = threading.Lock()
+
+
+def _try_acquire_agent_slot() -> bool:
+    """Reserve one in-flight agent run; False when the cap is hit."""
+    global _agent_active
+    with _agent_slots_lock:
+        if _agent_active >= config.max_agent_concurrency:
+            return False
+        _agent_active += 1
+        return True
+
+
+def _release_agent_slot() -> None:
+    """Release an agent run slot acquired by :func:`_try_acquire_agent_slot`."""
+    global _agent_active
+    with _agent_slots_lock:
+        _agent_active = max(_agent_active - 1, 0)
 
 
 # ── Trigger offline flags before SentenceTransformer sees them ──────

@@ -379,6 +379,44 @@ class TestWebhookLogging:
         assert after == before
 
 
+# ── Trace linkage ─────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_background_processing_sets_trace_id(async_client) -> None:
+    """Every LLM call in a webhook intake is linked to one delivery trace.
+
+    The agent chat and patrol paths already stamp ``current_trace_id``; the
+    webhook ingestion pipeline must too, so ``GET /api/usage/trace/{id}`` can
+    replay a whole intake (extraction → grading → merge) end-to-end.
+    """
+    from backend.shared.config import current_trace_id
+
+    captured: list[str] = []
+
+    async def _capture(content, source_type="conversation", metadata=None):
+        captured.append(current_trace_id.get())
+        return {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "action": "inserted",
+            "summary": "x",
+            "entity_ids": [],
+        }
+
+    with patch(
+        "backend.service.memory.write_memory",
+        new_callable=AsyncMock,
+        side_effect=_capture,
+    ):
+        raw, headers = _signed_post({"job_name": "trace-job"})
+        resp = await async_client.post("/api/webhook/fake_ci", content=raw, headers=headers)
+        assert resp.status_code == 202
+        delivery_id = resp.json()["delivery_id"]
+        await _wait_for_status(delivery_id, "processed")
+
+    assert captured == [f"webhook:{delivery_id}"]
+
+
 # ── Conflict handling ─────────────────────────────────────────────────
 
 

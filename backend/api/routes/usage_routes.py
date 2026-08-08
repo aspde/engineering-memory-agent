@@ -18,6 +18,7 @@ from fastapi import APIRouter, Query
 from backend.service.usage import (
     get_daily_summary,
     get_model_summary,
+    get_samples,
     get_scenario_summary,
     get_thread_usage,
     get_trace,
@@ -70,3 +71,27 @@ async def usage_thread(thread_id: str) -> dict[str, Any]:
 async def usage_trace(trace_id: str) -> dict[str, Any]:
     """All LLM calls in one trace — replay a single agent run end-to-end."""
     return {"trace_id": trace_id, "calls": await get_trace(trace_id)}
+
+
+@router.get("/samples")
+async def usage_samples(
+    scenario: str | None = Query(None, description="Filter by scenario tag"),
+    status: str | None = Query(None, description="Filter by status (success/error)"),
+    trace_id: str | None = Query(None, description="Filter by trace id"),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Sampled prompt/response text for post-hoc quality analysis.
+
+    Only calls where a sample was stored (error calls always, success calls
+    at ``USAGE_SAMPLE_RATE``) are returned.  This is the surface for "which
+    prompt produced that hallucinated answer" or "which tool call had
+    malformed JSON" — the metadata summaries can't answer those.
+    """
+    return {
+        "samples": await get_samples(
+            scenario=scenario,
+            status=status,
+            trace_id=trace_id,
+            limit=limit,
+        )
+    }

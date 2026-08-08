@@ -20,6 +20,7 @@ from backend.service.usage import (
     flush_usage_buffer,
     get_daily_summary,
     get_model_summary,
+    get_samples,
     get_scenario_summary,
     get_thread_usage,
     get_trace,
@@ -305,6 +306,142 @@ class TestFlushAndQuery:
         assert models["openai-compatible/deepseek-chat"]["est_cost"] == pytest.approx(
             0.27, abs=0.001
         )
+
+
+# ── Sampled prompt/response text ───────────────────────────────────────
+
+
+class TestSampleColumns:
+    """prompt/response sampling: error calls always, success at the rate."""
+
+    def test_success_sampled_at_rate_one(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
+        record_call(
+            _ctx("t", "th"), model="m", provider="p", scenario="s",
+            response_text="answer text",
+        )
+        row = pending_rows()[0]
+        assert row["prompt_sample"] == "hello world"
+        assert row["response_sample"] == "answer text"
+
+    def test_success_not_sampled_at_rate_zero(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 0.0)
+        record_call(
+            _ctx("t", "th"), model="m", provider="p", scenario="s",
+            response_text="answer text",
+        )
+        row = pending_rows()[0]
+        assert row["prompt_sample"] is None
+        assert row["response_sample"] is None
+
+    def test_error_always_sampled_even_at_rate_zero(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 0.0)
+        record_call(
+            _ctx("t", "th"), model="m", provider="p", scenario="s",
+            status="error", error="boom", response_text="partial",
+        )
+        row = pending_rows()[0]
+        assert row["prompt_sample"] == "hello world"
+        assert row["response_sample"] == "partial"
+
+    def test_prompt_text_truncated_to_sample_cap(self) -> None:
+        long_text = "x" * (usage._SAMPLE_MAX_CHARS + 500)
+        ctx = begin_call([{"role": "user", "content": long_text}])
+        assert len(ctx["prompt_text"]) == usage._SAMPLE_MAX_CHARS
+        # prompt_chars still reflects the full transcript, not the cap
+        assert ctx["prompt_chars"] == len(long_text)
+
+    def test_response_sample_truncated(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
+        long_resp = "y" * (usage._SAMPLE_MAX_CHARS + 100)
+        record_call(_ctx("t", "th"), model="m", provider="p", scenario="s", response_text=long_resp)
+        row = pending_rows()[0]
+        assert len(row["response_sample"]) == usage._SAMPLE_MAX_CHARS
+
+
+class TestSamplesQuery:
+    """get_samples returns only calls that carried sampled text."""
+
+    @pytest.mark.asyncio
+    async def test_returns_sampled_calls_and_filters(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
+        t = current_trace_id.set("trace-samples")
+        record_call(
+            begin_call([{"role": "user", "content": "prompt A"}]),
+            model="m", provider="p", scenario="agent_chat", response_text="resp A",
+        )
+        current_trace_id.reset(t)
+        record_call(
+            _ctx("", ""),
+            model="m", provider="p", scenario="conflict_detection",
+            status="error", error="boom", response_text="err resp",
+        )
+        await flush_usage_buffer()
+
+        samples = await get_samples()
+        assert len(samples) == 2
+        assert any(s["response_sample"] == "resp A" for s in samples)
+        assert any(s["response_sample"] == "err resp" for s in samples)
+
+        errs = await get_samples(status="error")
+        assert len(errs) == 1 and errs[0]["status"] == "error"
+
+        by_scenario = await get_samples(scenario="agent_chat")
+        assert len(by_scenario) == 1 and by_scenario[0]["scenario"] == "agent_chat"
+
+        by_trace = await get_samples(trace_id="trace-samples")
+        assert len(by_trace) == 1
+        assert by_trace[0]["prompt_sample"] == "prompt A"
+
+    @pytest.mark.asyncio
+    async def test_excludes_unsampled_calls(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 0.0)
+        record_call(
+            _ctx("t", "th"), model="m", provider="p", scenario="s",
+            response_text="not sampled",
+        )
+        await flush_usage_buffer()
+        assert await get_samples() == []
+
+
+class TestSamplePurge:
+    """Sampled text older than the retention window is nulled; the metadata
+    row (tokens / latency / status) stays for usage summaries."""
+
+    @pytest.mark.asyncio
+    async def test_purges_expired_keeps_fresh(self, monkeypatch) -> None:
+        from sqlalchemy import text
+
+        from backend.db import get_session_factory
+
+        monkeypatch.setattr(usage.config, "usage_sample_retention_days", 30)
+        async with get_session_factory()() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO llm_usage (scenario, provider, model, status, "
+                    "prompt_sample, response_sample, created_at) VALUES "
+                    "('s','p','m','success','OLD_PROMPT','OLD_RESP', "
+                    "now() - make_interval(days => 60)), "
+                    "('s','p','m','success','NEW_PROMPT','NEW_RESP', now())"
+                )
+            )
+            await session.commit()
+
+        purged = await usage._purge_expired_samples()
+        assert purged == 1  # exactly the expired row, not the fresh one
+
+        async with get_session_factory()() as session:
+            result = await session.execute(
+                text(
+                    "SELECT prompt_sample, response_sample FROM llm_usage "
+                    "ORDER BY created_at DESC"
+                )
+            )
+            rows = [tuple(r) for r in result]
+        # Fresh row keeps its sample; the expired row has both columns nulled
+        # but is still present (metadata survives).
+        assert rows[0] == ("NEW_PROMPT", "NEW_RESP")
+        assert rows[1] == (None, None)
 
 
 # ── Provider instrumentation ───────────────────────────────────────────

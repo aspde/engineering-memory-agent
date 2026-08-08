@@ -77,6 +77,7 @@ export interface Source {
   summary?: string;
   snippet?: string;
   document_id?: string;
+  chunk_index?: number;
   relevance?: number;
   entities?: EntityRef[];
 }

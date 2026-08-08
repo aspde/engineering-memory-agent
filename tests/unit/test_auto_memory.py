@@ -412,6 +412,35 @@ class TestAutoMemoryQualityGate:
         mock_write.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_symbol_noise_is_not_extracted(self, monkeypatch) -> None:
+        """Emoji/symbol runs pass the raw-length gate but carry zero knowledge."""
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="🎉" * 12)])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_long_acknowledgement_is_not_extracted(self, monkeypatch) -> None:
+        """A longer polite acknowledgement exceeds the raw length gate but has
+        no informative content after stripping chatty words."""
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="好的，明白了，收到，谢谢！")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_declarative_statement_is_extracted(self, monkeypatch) -> None:
         import agent.nodes as mod
 
@@ -423,6 +452,97 @@ class TestAutoMemoryQualityGate:
         )
         mock_extract.assert_awaited_once()
         mock_write.assert_awaited_once()
+
+
+class TestAutoMemoryLlmGate:
+    """AUTO_MEMORY_LLM_GATE=true adds one LLM call to the quality gate —
+    a turn that passes the keyword heuristic is judged again before extraction."""
+
+    def test_gate_off_by_default(self) -> None:
+        assert config_mod.config.auto_memory_llm_gate is False
+
+    @pytest.mark.asyncio
+    async def test_gate_worthy_true_still_extracts(self, monkeypatch) -> None:
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": true}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gate_worthy_false_skips(self, monkeypatch) -> None:
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_gate_failure_allows_through(self, monkeypatch) -> None:
+        """A gate outage must not drop a heuristic-passing turn — the later
+        substance check still guards the write."""
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.side_effect = RuntimeError("LLM down")
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
+        )
+        mock_extract.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_gate_escapes_braces_in_content(self, monkeypatch) -> None:
+        """A message containing braces (code snippets) must not crash the
+        gate — .format() interpolates them as literal text, so the gate still
+        judges instead of failing open on a KeyError."""
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="用 {ctx} 变量会导致泄漏")])
+        )
+        # The gate actually judged (one chat_json call) and returned false —
+        # extraction is skipped.  A KeyError from .format() would instead have
+        # failed the gate open and reached extraction.
+        mock_provider.chat_json.assert_awaited_once()
+        sent = mock_provider.chat_json.call_args.args[0][0]["content"]
+        assert "{{ctx}}" in sent  # content braces escaped for .format()
+        assert '{"worthy": true}' in sent  # template's JSON example stays intact
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
 
 
 class TestAutoMemoryThrottle:

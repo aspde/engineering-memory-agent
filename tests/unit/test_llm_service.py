@@ -184,6 +184,72 @@ class TestOpenAICompatibleChatJson:
         assert kwargs["response_format"] == {"type": "json_object"}
 
 
+class TestOpenAICompatibleChatRaw:
+    """OpenAI-compatible chat_raw must surface tool_calls as
+    {"id", "name", "args"} — and degrade malformed or empty arguments
+    instead of crashing the call, mirroring the streaming path."""
+
+    @staticmethod
+    def _make_provider(messages_with_tool_calls: list) -> "OpenAICompatibleProvider":
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        msg = MagicMock()
+        msg.content = ""
+        msg.tool_calls = messages_with_tool_calls
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=msg)]
+        resp.usage = None
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.return_value = resp
+        provider._async_client = mock_client  # type: ignore[assignment]
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_parses_valid_tool_arguments(self) -> None:
+        tc = MagicMock()
+        tc.id = "call_1"
+        tc.function.name = "search_memories_tool"
+        tc.function.arguments = '{"query": "pgvector"}'
+        provider = self._make_provider([tc])
+
+        result = await provider.chat_raw(
+            [{"role": "user", "content": "hi"}],
+            tools=[{"type": "function", "function": {"name": "search_memories_tool"}}],
+        )
+        assert result["tool_calls"] == [
+            {"id": "call_1", "name": "search_memories_tool", "args": {"query": "pgvector"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_malformed_arguments_degrades_to_raw(self) -> None:
+        tc = MagicMock()
+        tc.id = "call_2"
+        tc.function.name = "search_memories_tool"
+        tc.function.arguments = "{not json"
+        provider = self._make_provider([tc])
+
+        result = await provider.chat_raw([{"role": "user", "content": "hi"}])
+        assert result["tool_calls"] == [
+            {"id": "call_2", "name": "search_memories_tool", "args": {"raw": "{not json"}}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_empty_arguments_become_empty_dict(self) -> None:
+        tc = MagicMock()
+        tc.id = "call_3"
+        tc.function.name = "extract_memory_tool"
+        tc.function.arguments = ""
+        provider = self._make_provider([tc])
+
+        result = await provider.chat_raw([{"role": "user", "content": "hi"}])
+        assert result["tool_calls"] == [
+            {"id": "call_3", "name": "extract_memory_tool", "args": {}}
+        ]
+
+
 class TestAnthropicChatJson:
     """Anthropic has no response_format; chat_json must drive a forced
     tool_use whose input_schema wraps the caller schema in an envelope,

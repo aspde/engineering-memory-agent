@@ -26,11 +26,14 @@ services:
 通过 `.env` 文件管理环境变量：
 
 - `LLM_*` — LLM provider 配置（含传输韧性 `LLM_RETRY_*` / `LLM_CIRCUIT_BREAKER_*`、结构化重试 `LLM_STRUCTURED_*`、可选故障转移 `LLM_FALLBACK_*`——设置 `LLM_FALLBACK_PROVIDER` 后，主 provider 的可重试失败或熔断会在该次调用上改走备用 provider，留空则关闭）
-- `EMBEDDING_*` — Embedding 模型配置
+- `EMBEDDING_*` — Embedding 模型配置（含可选故障转移 `EMBEDDING_FALLBACK_*`——设置 `EMBEDDING_FALLBACK_PROVIDER` 后，主 provider 失败（重试耗尽/熔断/本地模型损坏）会在该次调用上改走备用 provider，留空则关闭；备用模型维度必须与主模型一致）
 - `DATABASE_URL` — PostgreSQL 连接
 - `MAX_AGENT_STEPS` — Agent 最大工具调用次数
+- `MAX_AGENT_CONCURRENCY` — 同时运行的交互式 Agent 会话上限（默认 4；超过的 chat 请求返回 503，防止并发 ReAct 循环一起打满 provider 限流）
 - `AGENT_TIMEOUT` — Agent 单回合总超时（秒）
 - `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` / `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
+- `USAGE_*` — LLM 用量追踪（`USAGE_ENABLED` / `USAGE_FLUSH_INTERVAL_SECONDS` / `USAGE_BUFFER_MAX` / `USAGE_SAMPLE_RATE`——采样率决定多少成功调用把 prompt/response 文本存入 `llm_usage` 供事后质量分析，error 调用一律采样；`/api/usage/samples` 查询。`USAGE_SAMPLE_RETENTION_DAYS`——采样文本保留天数，到期由 flusher 清空文本列、元数据保留，默认 30）
+- `ALERT_*` — LLM 健康告警（`ALERTS_ENABLED` / `ALERT_ERROR_RATE_THRESHOLD` / `ALERT_CHECK_INTERVAL_SECONDS` / `ALERT_FEISHU_ENABLED`——错误率/结构化失败/熔断超阈值写日志；飞书推送需显式开启）
 - `LOG_LEVEL` — 日志级别（DEBUG / INFO / WARNING / ERROR）
 - `APP_ENV` — 运行环境 (development / test / production)
 

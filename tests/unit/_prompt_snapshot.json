@@ -1,0 +1,70 @@
+{
+  "agent.auto_memory_gate": {
+    "version": "1",
+    "sha256": "18f41b058d1cdd9a3a476e789de65a0c38a35e0ee60135b7cf7c902ab25d14a4"
+  },
+  "agent.compaction": {
+    "version": "1",
+    "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b"
+  },
+  "agent.system": {
+    "version": "3",
+    "sha256": "a7520b68895232af41fe26a3e5b8bdcd4c7ea2d456d67589b3eb85640dfac448"
+  },
+  "extraction.entities": {
+    "version": "1",
+    "sha256": "75c9092730dd03cbfd90687020c8a1420f922e9cb9472b4f80de4c74542a5d0d"
+  },
+  "extraction.relations": {
+    "version": "1",
+    "sha256": "76930ea962f5b11f0fe0c4cef7f97fed1312dee577763ad79a0abe25bfaf7823"
+  },
+  "extraction.summary": {
+    "version": "1",
+    "sha256": "b4fc57f648171ddc560ef8cb3f0d5b9e1ff6631d95ed32f87c77d4fd3a70077e"
+  },
+  "memory.conflict": {
+    "version": "1",
+    "sha256": "fbf0f189582e48d0d3f45b35d4067efa659071892e5b6b78a77fa99cd71b485c"
+  },
+  "memory.merge": {
+    "version": "1",
+    "sha256": "879bcc0e26baddfefb07efc4e99ab4aedece8d2d3976c9cc2cdf80c1eb9664e5"
+  },
+  "patrol.ci_failure": {
+    "version": "1",
+    "sha256": "c59453b7d4660a426fddcafb498954aa11eccbd99738d278f7bd24803adb14dd"
+  },
+  "patrol.daily": {
+    "version": "1",
+    "sha256": "14920da666875adef7975d634a57a2cf17eeb708028fd8a7655f288d70d69d21"
+  },
+  "patrol.jira_resolved": {
+    "version": "1",
+    "sha256": "7d31ec666862cdf7679e26498fe623c8d0a28af025bc0ac0ee083fb6e07eea76"
+  },
+  "patrol.weekly": {
+    "version": "1",
+    "sha256": "8a43b8519f6f978eb1da3e7569ebea968e064e26391aadb94efa7174eaa6dd9b"
+  },
+  "query_rewrite": {
+    "version": "1",
+    "sha256": "9969cc4e3006b01310a6cf2416a64913910086d2fae1baeba24f25574bede9a1"
+  },
+  "scenario.code_review": {
+    "version": "1",
+    "sha256": "0168ee825bcd072fd8ee1344b1d9b94753d2c292e26e1e73060f055296f5bf6a"
+  },
+  "scenario.onboarding": {
+    "version": "1",
+    "sha256": "6510f19152c3667cc54078a9e7cfaf9629756b2dac41952eee97628973a8bbca"
+  },
+  "scenario.postmortem": {
+    "version": "1",
+    "sha256": "4b3461cf885503da36c5f70d6e3207786dd91bda7ab426ec68b211e0768e58a9"
+  },
+  "scenario.tech_debt": {
+    "version": "1",
+    "sha256": "f2856899a916c817d4a5e0d677aa3d2ac7e8b0ea8f08bf7da6451ca3b50679d3"
+  }
+}

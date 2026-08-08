@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -214,3 +215,88 @@ class TestOpenAIEmbeddingProvider:
         )
         assert mock_async.call_args.kwargs["timeout"] == 42
         assert mock_sync.call_args.kwargs["timeout"] == 42
+
+
+# ── Fallback embedding provider tests ────────────────────────────────
+
+
+class _FailingProvider(FakeEmbeddingProvider):
+    """A primary that always raises — simulates a down/corrupt provider."""
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("model checkpoint corrupt")
+
+    def embed_sync(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("model checkpoint corrupt")
+
+
+class TestFallbackEmbeddingProvider:
+    """Cross-provider failover — primary failure delegates to the fallback."""
+
+    def test_fallback_used_on_primary_failure(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        primary = _FailingProvider(dimension=4)
+        fallback = FakeEmbeddingProvider(dimension=4)
+        provider = FallbackEmbeddingProvider(primary, fallback)
+
+        result = asyncio.run(provider.embed(["a", "b"]))
+        assert result == [[0.1] * 4, [0.1] * 4]
+
+    def test_fallback_not_called_on_primary_success(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        primary = FakeEmbeddingProvider(dimension=4)
+        fallback = FakeEmbeddingProvider(dimension=4)
+        # Track whether the fallback is ever touched.
+        fallback.embed = AsyncMock(side_effect=AssertionError("fallback used on success"))
+        provider = FallbackEmbeddingProvider(primary, fallback)
+
+        result = asyncio.run(provider.embed(["a"]))
+        assert result == [[0.1] * 4]
+
+    def test_primary_success_sync(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        primary = FakeEmbeddingProvider(dimension=4)
+        fallback = FakeEmbeddingProvider(dimension=4)
+        fallback.embed_sync = MagicMock(side_effect=AssertionError("fallback used on success"))
+        provider = FallbackEmbeddingProvider(primary, fallback)
+
+        assert provider.embed_sync(["a"]) == [[0.1] * 4]
+
+    def test_fallback_used_on_primary_failure_sync(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        provider = FallbackEmbeddingProvider(
+            _FailingProvider(dimension=4), FakeEmbeddingProvider(dimension=4)
+        )
+        assert provider.embed_sync(["a"]) == [[0.1] * 4]
+
+    def test_fallback_failure_propagates(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        provider = FallbackEmbeddingProvider(
+            _FailingProvider(dimension=4), _FailingProvider(dimension=4)
+        )
+        with pytest.raises(RuntimeError):
+            asyncio.run(provider.embed(["a"]))
+
+    def test_dimension_reports_primary(self) -> None:
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        provider = FallbackEmbeddingProvider(
+            FakeEmbeddingProvider(dimension=8), FakeEmbeddingProvider(dimension=8)
+        )
+        assert provider.dimension == 8
+
+    def test_dimension_mismatch_warns(self, caplog) -> None:
+        """A fallback whose dimension differs from the primary is warned —
+        its vectors would be rejected by the pgvector schema."""
+        from backend.service.embedding_service import FallbackEmbeddingProvider
+
+        with caplog.at_level("WARNING"):
+            FallbackEmbeddingProvider(
+                FakeEmbeddingProvider(dimension=4), FakeEmbeddingProvider(dimension=8)
+            )
+        assert "dimension mismatch" in caplog.text

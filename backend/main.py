@@ -79,6 +79,17 @@ async def lifespan(app: FastAPI):
 
         _usage_task = asyncio.create_task(usage_flusher_loop())
 
+    # ── LLM health alerting loop ────────────────────────────────────
+    # Periodically inspects a recent llm_usage window for a high error rate,
+    # the structured-failure counters, and the primary LLM circuit breaker
+    # (see backend/service/alerts.py).  Log-only by default; the 飞书 push is
+    # opt-in via ALERT_FEISHU_ENABLED.
+    _alerts_task: asyncio.Task[None] | None = None
+    if config.alerts_enabled:
+        from backend.service.alerts import alerts_loop
+
+        _alerts_task = asyncio.create_task(alerts_loop())
+
     # Register connectors at startup.  Connectors missing required
     # configuration (API keys, etc.) are still registered but flagged
     # as "pending" so the frontend can show their status.
@@ -298,6 +309,11 @@ async def lifespan(app: FastAPI):
             logging.getLogger(__name__).warning(
                 "Failed to flush usage buffer on shutdown", exc_info=True
             )
+
+    # Stop the alerting loop.
+    if _alerts_task is not None:
+        _alerts_task.cancel()
+        await asyncio.gather(_alerts_task, return_exceptions=True)
 
     await close_db()
 

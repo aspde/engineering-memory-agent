@@ -44,6 +44,7 @@ from tests.eval.llm_metrics import (
     TOOL_SELECTION_METRIC_KEYS,
     answer_deterministic_metrics,
     answer_judge_metrics,
+    citation_presence,
     entity_metrics,
     relation_metrics,
     summary_keyword_coverage,
@@ -54,7 +55,7 @@ from tests.eval.llm_metrics import (
 # Executor signatures (see llm_executors for the default implementations).
 ToolSelector = Callable[[str], Any]
 Extractor = Callable[[str], Any]
-AnswerGenerator = Callable[[str, str], Any]
+AnswerGenerator = Callable[[str, str, list[str] | None], Any]
 
 
 @dataclass
@@ -248,9 +249,12 @@ async def run_answer(
             "query": it.query[:100],
         }
         try:
-            answer = await generate(it.query, it.context)
+            answer = await generate(it.query, it.context, list(it.source_ids) or None)
             row["answer_len"] = len(answer)
             row["answer_preview"] = answer[:120]
+            # Traceability is deterministic and always measured: did the answer
+            # cite at least one of the golden source ids?
+            row["citation_rate"] = citation_presence(answer, it.source_ids)
 
             det = answer_deterministic_metrics(
                 answer, it.required_facts, it.prohibited_claims

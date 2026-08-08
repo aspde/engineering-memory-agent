@@ -37,8 +37,8 @@ from agent.tools import ALL_TOOLS
 ToolSelector = Callable[[str], Awaitable[list[dict[str, Any]]]]
 # content → {"summary": str, "entities": list, "relations": list}
 Extractor = Callable[[str], Awaitable[dict[str, Any]]]
-# (query, context) → answer text
-AnswerGenerator = Callable[[str, str], Awaitable[str]]
+# (query, context, source_ids) → answer text
+AnswerGenerator = Callable[[str, str, list[str] | None], Awaitable[str]]
 
 
 def make_tool_selector(tools: list | None = None) -> ToolSelector:
@@ -83,19 +83,27 @@ def make_answer_generator(provider: Any | None = None) -> AnswerGenerator:
     placeholder, wrapped in the same ``<memory source=...>`` framing a real
     retrieval ToolMessage would produce, and the answer is streamed via the
     provider's ``chat_stream``.
+
+    ``source_ids`` are rendered in the context block the way a real
+    ``search_memories_tool`` display exposes the memory short ID
+    (``memory: <id>``), so the model has the same citation material the
+    production path provides.
     """
     from backend.service.llm_service import get_llm_provider
     from backend.service.prompts import get_prompt
 
-    async def _generate(query: str, context: str) -> str:
+    async def _generate(query: str, context: str, source_ids: list[str] | None = None) -> str:
         llm = provider if provider is not None else get_llm_provider()
         version, system_text = get_prompt("agent.system")
-        block = (
-            f"\n\nContext:\n<memory source=\"search_memories_tool\">\n"
-            f"{context}\n</memory>"
-            if context
-            else ""
-        )
+        if context:
+            ids = [str(s) for s in (source_ids or []) if str(s).strip()]
+            label = ", ".join(f"memory: {sid}" for sid in ids) if ids else "memory"
+            block = (
+                f"\n\nContext:\n<memory source=\"search_memories_tool\">\n"
+                f"[{label}]\n{context}\n</memory>"
+            )
+        else:
+            block = ""
         system_content = system_text.format(context=block)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": system_content},

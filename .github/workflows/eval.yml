@@ -83,9 +83,16 @@ jobs:
           # this step (run_eval exits non-zero) when overall quality drops
           # below the thresholds.  Manually dispatched non-memory retrievers
           # (experiments/baselines) are not gated.
+          #
+          # Calibrated 2026-08-08 on the seeded 30-query memory corpus
+          # (recall@5=1.000, mrr≈0.94 across two runs).  recall@5 0.95 keeps
+          # the core recall gate strict — 30 queries means at most one miss
+          # passes.  mrr 0.87 leaves headroom for single-run noise (~±0.005
+          # observed) and a rank-2/3 query or two, while still tripping on a
+          # real ranking regression (2+ targets dropping out of the top).
           GATE_ARGS=""
           if [ "$RETRIEVER" = "memory" ]; then
-            GATE_ARGS="--min-recall@5 0.95 --min-mrr 0.90"
+            GATE_ARGS="--min-recall@5 0.95 --min-mrr 0.87"
           fi
           python -m tests.eval.run_eval --retriever "$RETRIEVER" \
             --report-md docs/interview/eval-report.md \
@@ -106,9 +113,13 @@ jobs:
   # provider.  Requires the LLM_API_KEY secret (plus LLM_BASE_URL when not
   # the provider default).
   #
-  # Gate thresholds below are conservative starting points.  After the first
-  # report lands in docs/interview/llm-eval-report.md, calibrate them to the
-  # measured baselines (raise them so a regression actually trips the job).
+  # Gate thresholds below are conservative starting points, NOT yet
+  # calibrated: as of 2026-08-08 no baseline report exists in
+  # docs/interview/llm-eval-report.md (each run needs a valid LLM_API_KEY,
+  # and the 2026-08-08 local probe key was invalid).  Until one lands, keep
+  # these floors low enough that a healthy run passes.  After the first
+  # report, calibrate them to the measured baselines (raise them so a
+  # regression actually trips the job).
   llm-eval:
     name: LLM behavior eval
     runs-on: ubuntu-latest
@@ -139,7 +150,8 @@ jobs:
             --min-entity-f1 0.60 \
             --min-relation-f1 0.50 \
             --min-fact-coverage 0.60 \
-            --min-groundedness 0.80
+            --min-groundedness 0.80 \
+            --min-citation-rate 0.80
 
       - name: Upload LLM eval report
         if: ${{ !cancelled() }}

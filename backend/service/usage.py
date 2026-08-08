@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import threading
 import time
 from typing import Any
@@ -70,6 +71,12 @@ def reset_usage_buffer() -> None:
 
 # ── Call observation helpers (used by the provider layer) ─────────────
 
+# Prompt/response text is sampled (not always stored) for post-hoc quality
+# analysis, so the persisted columns stay bounded.  Error calls are always
+# sampled — failures are what analysis needs most; success calls sample at
+# ``USAGE_SAMPLE_RATE``.  Columns are NULL for calls not sampled.
+_SAMPLE_MAX_CHARS = 2000
+
 
 def begin_call(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Snapshot the context of an upcoming LLM call.
@@ -78,15 +85,20 @@ def begin_call(messages: list[dict[str, Any]]) -> dict[str, Any]:
     current trace/thread from their context variables, so the provider layer
     does not need them threaded through its signatures.
     """
+    prompt_parts: list[str] = []
     prompt_chars = 0
     for m in messages:
-        content = m.get("content", "")
-        prompt_chars += len(str(content))
+        text = str(m.get("content", ""))
+        prompt_chars += len(text)
+        prompt_parts.append(text)
     return {
         "t0": time.perf_counter(),
         "trace_id": current_trace_id.get(),
         "thread_id": current_thread_id.get(),
         "prompt_chars": prompt_chars,
+        # Truncated prompt text for the sampling path — a full transcript of
+        # a long tool turn would exceed the sample cap anyway.
+        "prompt_text": "\n".join(prompt_parts)[:_SAMPLE_MAX_CHARS],
     }
 
 
@@ -114,6 +126,16 @@ def record_call(
         input_tokens, output_tokens, total_tokens = _extract_tokens(usage)
         latency_ms = round((time.perf_counter() - ctx["t0"]) * 1000)
 
+        # Sample prompt/response text for post-hoc quality analysis (see the
+        # module note above _SAMPLE_MAX_CHARS).  NULL columns mean "not
+        # sampled" — no separate flag needed.
+        prompt_sample = response_sample = None
+        if status == "error" or random.random() < config.usage_sample_rate:
+            prompt_text = (ctx.get("prompt_text") or "").strip()
+            resp_text = str(response_text or "").strip()
+            prompt_sample = prompt_text[:_SAMPLE_MAX_CHARS] or None
+            response_sample = resp_text[:_SAMPLE_MAX_CHARS] or None
+
         row: dict[str, Any] = {
             "trace_id": ctx.get("trace_id") or None,
             "thread_id": ctx.get("thread_id") or None,
@@ -128,6 +150,8 @@ def record_call(
             "error": (error or "")[:500] if error else None,
             "prompt_chars": ctx.get("prompt_chars", 0),
             "response_chars": len(str(response_text)),
+            "prompt_sample": prompt_sample,
+            "response_sample": response_sample,
         }
 
         with _pending_lock:
@@ -204,11 +228,13 @@ async def flush_usage_buffer() -> int:
         INSERT INTO llm_usage (
             trace_id, thread_id, scenario, provider, model,
             input_tokens, output_tokens, total_tokens, latency_ms,
-            status, error, prompt_chars, response_chars
+            status, error, prompt_chars, response_chars,
+            prompt_sample, response_sample
         ) VALUES (
             :trace_id, :thread_id, :scenario, :provider, :model,
             :input_tokens, :output_tokens, :total_tokens, :latency_ms,
-            :status, :error, :prompt_chars, :response_chars
+            :status, :error, :prompt_chars, :response_chars,
+            :prompt_sample, :response_sample
         )"""
     )
     try:
@@ -224,11 +250,59 @@ async def flush_usage_buffer() -> int:
     return len(rows)
 
 
+# Sampled prompt/response text is released after ``usage_sample_retention_days``
+# (default 30): the metadata row stays for usage summaries and cost reporting,
+# only the two large text columns are nulled.  The purge runs at most once a
+# day inside the flusher loop (cheap UPDATE, hit by idx_llm_usage_created).
+_last_sample_purge: float = 0.0
+_SAMPLE_PURGE_INTERVAL_SECONDS = 24 * 3600
+
+
+async def _purge_expired_samples() -> int:
+    """Null out sampled prompt/response text older than the retention window.
+
+    Returns the number of rows whose samples were released.  The row itself is
+    kept — token/latency/status metadata still feeds the usage summaries and
+    error-rate alerts; only the sampled text (bounded at ``_SAMPLE_MAX_CHARS``
+    per column but unbounded in row count over time) is discarded.
+    """
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            text(
+                """\
+                UPDATE llm_usage
+                SET prompt_sample = NULL, response_sample = NULL
+                WHERE created_at < now() - make_interval(days => :days)
+                  AND (prompt_sample IS NOT NULL OR response_sample IS NOT NULL)
+                """
+            ),
+            {"days": config.usage_sample_retention_days},
+        )
+        await session.commit()
+        return result.rowcount or 0
+
+
 async def usage_flusher_loop() -> None:
-    """Background task: periodically drain the buffer into the DB."""
+    """Background task: periodically drain the buffer into the DB.
+
+    Also purges expired sample text at most once a day (see
+    ``_purge_expired_samples``) — the metadata rows stay for usage summaries,
+    only the sampled prompt/response columns are released.
+    """
+    global _last_sample_purge
     while True:
         await asyncio.sleep(config.usage_flush_interval_seconds)
         await flush_usage_buffer()
+        if time.monotonic() - _last_sample_purge >= _SAMPLE_PURGE_INTERVAL_SECONDS:
+            _last_sample_purge = time.monotonic()
+            try:
+                purged = await _purge_expired_samples()
+                if purged:
+                    logger.info("Purged sampled text from %d expired usage rows", purged)
+            except Exception:
+                # Purging is best-effort — a failure must not break the flush
+                # loop; it retries on the next daily tick.
+                logger.exception("Sample purge failed")
 
 
 # ── Cost estimation ──────────────────────────────────────────────────
@@ -425,5 +499,54 @@ async def get_trace(trace_id: str) -> list[dict[str, Any]]:
                 """
             ),
             {"tid": trace_id},
+        )
+        return [dict(r._mapping) for r in result]
+
+
+async def get_samples(
+    *,
+    scenario: str | None = None,
+    status: str | None = None,
+    trace_id: str | None = None,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    """Return calls that carried sampled prompt/response text, newest first.
+
+    The ``llm_usage`` sample columns feed post-hoc quality analysis — "what
+    prompt produced this hallucinated answer", "which tool call had malformed
+    JSON".  Only rows where a sample was stored (``prompt_sample`` or
+    ``response_sample`` non-NULL) are returned, optionally narrowed by
+    *scenario* / *status* / *trace_id*.
+    """
+    conditions = [
+        "(prompt_sample IS NOT NULL OR response_sample IS NOT NULL)"
+    ]
+    params: dict[str, Any] = {"limit": limit}
+    if scenario:
+        conditions.append("scenario = :scenario")
+        params["scenario"] = scenario
+    if status:
+        conditions.append("status = :status")
+        params["status"] = status
+    if trace_id:
+        conditions.append("trace_id = :trace_id")
+        params["trace_id"] = trace_id
+    where_clause = " AND ".join(conditions)
+
+    async with get_session_factory()() as session:
+        result = await session.execute(
+            text(
+                f"""\
+                SELECT trace_id, thread_id, scenario, provider, model,
+                       input_tokens, output_tokens, total_tokens, latency_ms,
+                       status, error, prompt_chars, response_chars,
+                       prompt_sample, response_sample, created_at
+                FROM llm_usage
+                WHERE {where_clause}
+                ORDER BY created_at DESC
+                LIMIT :limit
+                """
+            ),
+            params,
         )
         return [dict(r._mapping) for r in result]

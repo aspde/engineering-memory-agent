@@ -7,6 +7,7 @@ returns a partial state dict or ``Command`` for dynamic routing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -220,16 +221,26 @@ _MAX_TOOL_CONTENT_CHARS = 800  # per-ToolMessage content cap
 def _estimate_tokens(text: str) -> int:
     """Rough token count for CJK-mixed text — no tokenizer dependency.
 
-    Non-ASCII (CJK) characters cost ~1 token each; ASCII runs ~4 chars per
-    token.  Used only to size the agent context window, so a coarse estimate
-    is fine — it should over-approximate Chinese text (cheaper to over-budget
-    than to overflow the model's real context).
+    Non-ASCII (CJK) characters cost ~1 token each; ASCII letters/digits and
+    whitespace run ~4 chars per token; ASCII punctuation/symbols — the
+    token-dense part of code and JSON — are weighted ~2 chars per token so a
+    symbols-heavy tool result never under-budgets.  Used only to size the
+    agent context window, so a coarse estimate is fine — it should
+    over-approximate rather than overflow the model's real context.
     """
     if not text:
         return 0
-    non_ascii = sum(1 for ch in text if ord(ch) > 0x7F)
-    ascii_chars = len(text) - non_ascii
-    return non_ascii + (ascii_chars + 3) // 4
+    non_ascii = 0
+    ascii_alnum = 0
+    ascii_sym = 0
+    for ch in text:
+        if ord(ch) > 0x7F:
+            non_ascii += 1
+        elif ch.isalnum() or ch.isspace():
+            ascii_alnum += 1
+        else:
+            ascii_sym += 1
+    return non_ascii + (ascii_alnum + 3) // 4 + (ascii_sym + 1) // 2
 
 
 def _message_tokens(message: BaseMessage) -> int:
@@ -311,22 +322,71 @@ _COMPACTION_TRANSCRIPT_CHARS = 12000
 # second call reuses the first's output.  Bounded LRU; eviction drops the
 # oldest entry.  Failures are not cached — a transient LLM error retries next
 # turn instead of poisoning the cache with an empty summary.
+#
+# The lock (``_compaction_cache_lock``) guards both the completed-cache and
+# the in-flight map.  ``_compaction_inflight`` holds a key -> future for a
+# summary currently being generated: a concurrent bound of the same overflow
+# awaits that future instead of firing a second LLM call.  All critical
+# sections are non-blocking dict ops — no ``await`` happens under the lock,
+# so a joining coroutine can never stall the event loop waiting on a leader
+# that needs the same lock to finish.
 _compaction_cache: dict[tuple[str, str], str] = {}
+_compaction_cache_lock = threading.Lock()
 _COMPACTION_CACHE_MAX = 32
+_compaction_inflight: dict[tuple[str, str], "asyncio.Future[str]"] = {}
 
 
 def reset_compaction_cache() -> None:
-    """Drop cached compaction summaries (tests / debugging)."""
-    _compaction_cache.clear()
+    """Drop cached compaction summaries and in-flight calls (tests / debugging)."""
+    with _compaction_cache_lock:
+        _compaction_cache.clear()
+        _compaction_inflight.clear()
+
+
+# Cap per-ToolMessage content in the compaction transcript — a single huge
+# search result would otherwise crowd out the rest of the overflow prefix
+# (the transcript has a hard char cap below).
+_TRANSCRIPT_TOOL_CHAR_CAP = 200
+
+
+def _tool_display_text(message: ToolMessage) -> str:
+    """The display text of a tool result, unwrapped from its JSON envelope.
+
+    Tools return ``{"display": ..., "sources": [...]}`` JSON; parsing the
+    envelope *before* truncating (the same ordering generate_final_node uses)
+    avoids cutting the raw JSON into a form the summariser can't read.
+    """
+    raw = _message_text(message)
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "display" in parsed:
+            return str(parsed["display"])
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return raw
 
 
 def _overflow_transcript(messages: list[BaseMessage]) -> str:
-    """The exact transcript *messages* collapse to for the compaction prompt."""
-    transcript = "\n".join(
-        f"{'user' if isinstance(m, HumanMessage) else 'assistant'}: {_message_text(m)}"
-        for m in messages
-        if isinstance(m, (HumanMessage, AIMessage))
-    )
+    """The exact transcript *messages* collapse to for the compaction prompt.
+
+    Human/assistant turns carry their raw text; tool results are included
+    (display-unwrapped, truncated) so a running summary of an early
+    retrieval turn keeps the context those tools surfaced — without them the
+    summary would lose every memory/doc chunk windowed out of the tail.
+    """
+    lines: list[str] = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            lines.append(f"user: {_message_text(m)}")
+        elif isinstance(m, AIMessage):
+            lines.append(f"assistant: {_message_text(m)}")
+        elif isinstance(m, ToolMessage):
+            name = getattr(m, "name", "") or "tool"
+            content = _truncate_tool_content(
+                _tool_display_text(m), limit=_TRANSCRIPT_TOOL_CHAR_CAP
+            )
+            lines.append(f"tool ({name}): {content}")
+    transcript = "\n".join(lines)
     if len(transcript) > _COMPACTION_TRANSCRIPT_CHARS:
         transcript = transcript[: _COMPACTION_TRANSCRIPT_CHARS] + "\n…[truncated]"
     return transcript
@@ -369,21 +429,74 @@ async def _memoized_summarize_overflow(messages: list[BaseMessage]) -> str:
 
     See the module note above the cache — this makes the two bounds in a tool
     turn agree on one summary and costs at most one compaction LLM call per
-    distinct overflow.
+    distinct overflow.  When two bounds race on the same overflow, the loser
+    awaits the winner's in-flight future (``_compaction_inflight``) instead
+    of firing a second LLM call.
+
+    No ``await`` happens under ``_compaction_cache_lock``: joining a future
+    or running the summariser could stall the event loop (the leader needs
+    that same lock in its ``finally`` to publish).  The lock only guards the
+    non-blocking dict lookups/inserts, so a coroutine that found the future
+    is always the leader and a coroutine that found an existing one joins it.
     """
     version, _ = get_prompt("agent.compaction")
     transcript = _overflow_transcript(messages)
     key = (version, transcript)
-    cached = _compaction_cache.get(key)
-    if cached is not None:
-        return cached
-    summary = await _summarize_overflow(messages, transcript=transcript)
-    if not summary:
+    with _compaction_cache_lock:
+        cached = _compaction_cache.get(key)
+        if cached is not None:
+            return cached
+        inflight = _compaction_inflight.get(key)
+        if inflight is None:
+            # We are the leader — register our future under the lock so a
+            # concurrent bound joins it, then do the summarising outside.
+            inflight = asyncio.get_running_loop().create_future()
+            _compaction_inflight[key] = inflight
+            leader = True
+        else:
+            leader = False
+
+    if not leader:
+        # Joiner — await the leader's future outside the lock.  A leader that
+        # failed surfaces as an exception here; fails safe like the summariser
+        # itself (no summary cached, caller falls back to truncation) rather
+        # than parking the caller on a dead future.
+        try:
+            return await inflight
+        except asyncio.CancelledError:
+            # Our own cancellation must propagate — the caller's
+            # ``asyncio.timeout`` (AGENT_TIMEOUT) may have cancelled us while
+            # we waited on a slow leader.  Swallowing it would let the node
+            # run past its deadline and only fail on the next await.
+            raise
+        except BaseException:
+            return ""
+
+    # ── Leader path ──────────────────────────────────────────────────
+    try:
+        summary = await _summarize_overflow(messages, transcript=transcript)
+    except BaseException:
+        # Let waiters resolve too — a cancelled/errored leader must not leave
+        # them parked on a future that never resolves.  An empty result keeps
+        # the joiner's behaviour identical to a summariser that returned ""
+        # (nothing is cached); the leader re-raises the original exception so
+        # cancellation/failure still propagates to its own caller.
+        if not inflight.done():
+            inflight.set_result("")
+        raise
+    else:
+        if not inflight.done():
+            inflight.set_result(summary)
+        if summary:
+            with _compaction_cache_lock:
+                _compaction_cache[key] = summary
+                if len(_compaction_cache) > _COMPACTION_CACHE_MAX:
+                    _compaction_cache.popitem(last=False)
         return summary
-    _compaction_cache[key] = summary
-    if len(_compaction_cache) > _COMPACTION_CACHE_MAX:
-        _compaction_cache.popitem(last=False)
-    return summary
+    finally:
+        with _compaction_cache_lock:
+            if _compaction_inflight.get(key) is inflight:
+                _compaction_inflight.pop(key, None)
 
 
 def _split_overflow(
@@ -544,6 +657,10 @@ _AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
 # action requests, and chatty filler are skipped.  Deliberately conservative:
 # a missed capture is recoverable, a junk memory pollutes retrieval forever.
 _AUTO_MEMORY_MIN_CONTENT_LEN = 12  # raw user message must be this long
+# After stripping chatty words and symbols, this many informative characters
+# (CJK hanzi / ASCII letters & digits) must remain — emoji spam, symbol runs
+# and bare links pass the raw length gate but carry zero knowledge.
+_AUTO_MEMORY_MIN_INFORMATIVE_CHARS = 6
 _AUTO_MEMORY_QUESTION_SUFFIXES = ("？", "?", "吗", "呢", "吧", "啊")
 _AUTO_MEMORY_QUESTION_MARKERS = (
     "什么", "怎么", "如何", "为什么", "哪些", "哪个", "能否", "能不能",
@@ -557,21 +674,68 @@ _AUTO_MEMORY_REQUEST_PREFIXES = (
 _AUTO_MEMORY_CHATTY = frozenset({
     "你好", "您好", "谢谢", "感谢", "辛苦了", "再见", "拜拜", "好的",
     "嗯", "收到", "在吗", "hello", "hi", "ok", "okay",
+    # Expanded — common acknowledgements / filler / pleasantries that carry
+    # no durable knowledge.  Short tokens are redundant with the length gate,
+    # so these are the multi-word or multi-char forms worth matching.
+    "明白了", "知道了", "了解了", "没问题", "可以的", "好的呢", "好的哟",
+    "好的好的", "好的没问题", "收到收到", "哈哈", "呵呵", "好的谢谢",
+    "谢谢谢谢", "非常感谢", "辛苦了辛苦了", "早上好", "中午好", "下午好",
+    "晚上好", "早安", "晚安", "加油", "欢迎欢迎", "恭喜恭喜", "好的呀",
+    "好嘞", "行吧", "嗯嗯", "嗯呢", "thx", "thanks", "tks", "okay",
+    "ok ok", "great", "fine", "sure", "yes", "no", "got it", "nice",
 })
+
+
+# Polite acknowledgement phrases stripped before the informative-char count —
+# a pure-acknowledgement turn ("好的，明白了，收到，谢谢！") otherwise keeps
+# 9 CJK hanzi and passes the symbol-noise check.  Longer phrases first so a
+# short one never shadows a longer match.
+_AUTO_MEMORY_POLITE_PHRASES = (
+    "好的好的", "好的没问题", "明白了", "知道了", "没问题", "辛苦了",
+    "可以的", "好的呢", "好的哟", "好的呀", "收到收到", "谢谢谢谢",
+    "好的", "收到", "谢谢", "感谢", "哈哈", "呵呵", "嗯嗯", "好嘞",
+)
+
+
+def _is_symbol_noise(text: str) -> bool:
+    """True when *text* carries fewer than ``_AUTO_MEMORY_MIN_INFORMATIVE_CHARS``
+    informative characters after stripping polite filler.
+
+    Polite phrases (谢谢 / 收到 / 明白了 …) are stripped first, then CJK
+    hanzi and ASCII letters/digits count as informative; emoji, other
+    non-CJK symbols, punctuation and whitespace are ignored.  A turn that is
+    only emoji ("🎉"×12), symbol runs ("！！！！！"), or a bare polite
+    acknowledgement ("好的，明白了，收到，谢谢！") collapses to near-zero —
+    treated as noise.
+    """
+    stripped = text
+    for phrase in _AUTO_MEMORY_POLITE_PHRASES:
+        stripped = stripped.replace(phrase, "")
+    informative = 0
+    for ch in stripped:
+        if ord(ch) > 0x7F:
+            if "一" <= ch <= "鿿" or ch.isalnum():
+                informative += 1
+        elif ch.isalnum():
+            informative += 1
+    return informative < _AUTO_MEMORY_MIN_INFORMATIVE_CHARS
 
 
 def _is_auto_memory_worthy(content: str) -> bool:
     """True when *content* reads like a declarative knowledge statement.
 
-    Filters out questions, action requests, and chatty filler before any LLM
-    call.  ``记住…`` requests are deliberately NOT filtered — they are the
-    explicit-remember path, normally handled by ``write_memory_tool``, and
-    capturing them here when the tool was not invoked is correct.
+    Filters out questions, action requests, chatty filler, and symbol-only
+    noise before any LLM call.  ``记住…`` requests are deliberately NOT
+    filtered — they are the explicit-remember path, normally handled by
+    ``write_memory_tool``, and capturing them here when the tool was not
+    invoked is correct.
     """
     text = content.strip()
     if len(text) < _AUTO_MEMORY_MIN_CONTENT_LEN:
         return False
     if text.lower() in _AUTO_MEMORY_CHATTY:
+        return False
+    if _is_symbol_noise(text):
         return False
     if text.endswith(_AUTO_MEMORY_QUESTION_SUFFIXES):
         return False
@@ -583,6 +747,53 @@ def _is_auto_memory_worthy(content: str) -> bool:
     if any(lowered.startswith(p) for p in ("please ", "can you ", "could you ")):
         return False
     return True
+
+
+# ── Optional LLM second pass on the quality gate (B3) ─────────────
+# The keyword heuristic above is free but coarse — it lets chatty-but-long
+# filler through and can misfire on complex phrasing.  AUTO_MEMORY_LLM_GATE=
+# true adds one cheap structured call per candidate turn asking whether the
+# message is durable knowledge; off by default so the default cost stays zero.
+_AUTO_MEMORY_GATE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["worthy"],
+    "properties": {"worthy": {"type": "boolean"}},
+}
+
+
+async def _llm_gate_worthy(content: str) -> bool:
+    """Ask the LLM whether *content* is durable knowledge (best-effort).
+
+    Returns True when the gate is unavailable (LLM failure, schema-valid but
+    missing verdict) so a gate outage never drops a heuristic-passing turn —
+    the later ``_has_substance`` check still guards the write.  *content* is
+    truncated so a long message doesn't inflate the gate call's prompt, and
+    braces in it are escaped so a code snippet can't break the template's
+    ``.format()`` interpolation (which would otherwise raise KeyError and
+    fail the gate open on the exact messages it exists to judge).
+    """
+    try:
+        from backend.service.prompts import get_prompt
+        from backend.service.structured import chat_structured
+
+        version, prompt = get_prompt("agent.auto_memory_gate")
+        logger.debug("Auto-memory gate: prompt agent.auto_memory_gate v%s", version)
+        # Escape the content's braces so ``.format`` interpolates them as
+        # literal text (the template's own ``{{``/``}}`` escapes still render
+        # as the JSON example braces).
+        content_snippet = content[:500].replace("{", "{{").replace("}", "}}")
+        data = await chat_structured(
+            [{"role": "user", "content": prompt.format(content=content_snippet)}],
+            json_schema=_AUTO_MEMORY_GATE_SCHEMA,
+            scenario="auto_memory_gate",
+            temperature=0.0,
+        )
+        return bool(data.get("worthy", False))
+    except Exception:
+        logger.warning(
+            "Auto-memory LLM gate failed — defaulting to allow", exc_info=True
+        )
+        return True
 
 
 # ── Auto-memory frequency control ───────────────────────────────────
@@ -719,6 +930,13 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     thread_id = current_thread_id.get("") or "_"
     if _auto_memory_throttled(thread_id, user_content):
         logger.info("Auto-memory: throttled (interval/cap/window), skipping")
+        return
+
+    # Optional LLM second pass (AUTO_MEMORY_LLM_GATE) — the keyword heuristic
+    # above is free but coarse; this adds one cheap call per candidate turn,
+    # after the zero-cost throttle so a throttled turn never pays for it.
+    if config.auto_memory_llm_gate and not await _llm_gate_worthy(user_content):
+        logger.info("Auto-memory: LLM gate judged not worthy, skipping")
         return
 
     try:

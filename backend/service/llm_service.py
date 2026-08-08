@@ -134,14 +134,24 @@ class OpenAICompatibleProvider(LLMProvider):
         result: dict[str, object] = {"content": msg.content or ""}
 
         if msg.tool_calls:
-            result["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "name": tc.function.name,
-                    "args": json.loads(tc.function.arguments),
-                }
-                for tc in msg.tool_calls
-            ]
+            # Same JSON guard as the streaming path (chat_raw_stream): a
+            # malformed arguments blob must not fail the whole call.  Empty
+            # arguments mean no args; unparsable text is surfaced as
+            # {"raw": ...} so the caller still sees what the model produced.
+            tool_calls: list[dict[str, object]] = []
+            for tc in msg.tool_calls:
+                try:
+                    args: object = (
+                        json.loads(tc.function.arguments)
+                        if tc.function.arguments
+                        else {}
+                    )
+                except json.JSONDecodeError:
+                    args = {"raw": tc.function.arguments}
+                tool_calls.append(
+                    {"id": tc.id, "name": tc.function.name, "args": args}
+                )
+            result["tool_calls"] = tool_calls
         self._record(
             ctx, scenario=scenario, usage=usage,
             response_text=str(msg.content or ""),

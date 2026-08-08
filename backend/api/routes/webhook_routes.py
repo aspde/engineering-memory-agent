@@ -37,7 +37,7 @@ from pydantic import BaseModel
 from backend.connectors.registry import get_connector, list_connectors
 from backend.db import get_session_factory
 from backend.service.conflicts import persist_pending_conflict
-from backend.shared.config import config
+from backend.shared.config import config, current_trace_id
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -232,6 +232,11 @@ async def _process_delivery(
     delivery-log row was written with ``status='received'`` at accept time.
     Every exit path releases the concurrency slot it consumed.
     """
+    # Link every LLM call this ingestion makes to one trace (the agent chat
+    # and patrol paths already set a trace id) so ``GET /api/usage/trace/{id}``
+    # can replay a whole webhook intake — extraction → grading → merge —
+    # end-to-end instead of leaving its calls trace-less.
+    trace_token = current_trace_id.set(f"webhook:{delivery_id}")
     try:
         result = await connector.process(content, metadata)
         memory_id: str | None = result.get("id") if isinstance(result, dict) else None
@@ -258,6 +263,7 @@ async def _process_delivery(
         except Exception:
             logger.exception("Failed to record failure outcome for delivery %s", delivery_id)
     finally:
+        current_trace_id.reset(trace_token)
         _release_slot()
 
 

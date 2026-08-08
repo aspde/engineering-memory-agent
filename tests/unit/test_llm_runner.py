@@ -86,6 +86,7 @@ def answer_items() -> list[AnswerItem]:
             required_facts=["pgvector"],
             category="factual",
             prohibited_claims=["用了 Qdrant"],
+            source_ids=["a1b2c3d4"],
         ),
         AnswerItem(
             id="a2",
@@ -94,6 +95,7 @@ def answer_items() -> list[AnswerItem]:
             required_facts=["连接池"],
             category="causal",
             prohibited_claims=[],
+            source_ids=["e5f6a7b8"],
         ),
     ]
 
@@ -225,7 +227,7 @@ class TestRunExtraction:
 class TestRunAnswer:
     @pytest.mark.asyncio
     async def test_deterministic_channel(self, answer_items) -> None:
-        async def fake_generator(query: str, context: str):
+        async def fake_generator(query: str, context: str, source_ids=None):
             if "502" in query:
                 return "连接池被占满导致 502"
             return "我们选用了 pgvector"
@@ -239,12 +241,15 @@ class TestRunAnswer:
         assert by_id["a1"]["groundedness"] == 1.0
         assert by_id["a2"]["groundedness"] == 1.0
         assert result.overall["fact_coverage"] == 1.0
+        # Traceability: neither fake answer cites a golden source id.
+        assert by_id["a1"]["citation_rate"] == 0.0
+        assert result.overall["citation_rate"] == 0.0
         # det_* sub-keys always present for cross-checking.
         assert "det_fact_coverage" in by_id["a1"]
 
     @pytest.mark.asyncio
     async def test_deterministic_catches_prohibited_claim(self, answer_items) -> None:
-        async def hallucinating(query: str, context: str):
+        async def hallucinating(query: str, context: str, source_ids=None):
             return "我们用了 Qdrant 而不是 pgvector"
 
         result = await run_answer(
@@ -255,8 +260,24 @@ class TestRunAnswer:
         assert by_id["a1"]["hallucination_rate"] == 1.0
 
     @pytest.mark.asyncio
+    async def test_citation_credited_when_answer_cites_source(self, answer_items) -> None:
+        async def citing(query: str, context: str, source_ids=None):
+            # Cite the id exactly as the search display exposes it.
+            return "我们选用了 pgvector（记忆 a1b2c3d4）"
+
+        result = await run_answer(
+            items=answer_items, generator=citing, judge="deterministic"
+        )
+        by_id = {q["id"]: q for q in result.per_query}
+        # a1's answer cites its golden id → 1.0; a2's cites a *different* id
+        # (not among its own source_ids) → 0.0.
+        assert by_id["a1"]["citation_rate"] == 1.0
+        assert by_id["a2"]["citation_rate"] == 0.0
+        assert result.overall["citation_rate"] == 0.5
+
+    @pytest.mark.asyncio
     async def test_judge_channel_overrides(self, answer_items, monkeypatch) -> None:
-        async def fake_generator(query: str, context: str):
+        async def fake_generator(query: str, context: str, source_ids=None):
             return "答案内容"
 
         async def fake_judge(query, context, answer, required_facts):
@@ -281,7 +302,7 @@ class TestRunAnswer:
     async def test_judge_failure_falls_back_to_deterministic(
         self, answer_items, monkeypatch
     ) -> None:
-        async def fake_generator(query: str, context: str):
+        async def fake_generator(query: str, context: str, source_ids=None):
             return "我们选了 pgvector 而非 Elasticsearch"
 
         async def failing_judge(query, context, answer, required_facts):

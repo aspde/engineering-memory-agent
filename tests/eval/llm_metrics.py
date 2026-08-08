@@ -309,6 +309,39 @@ def answer_judge_metrics(
     }
 
 
+# Source IDs are matched tolerantly: the model may cite the full id as shown,
+# only its 8-char tail, or drop a ``mem-``/``doc-`` prefix.  An opaque short id
+# is never present by accident, so a match is a strong signal of an actual
+# citation.
+_CITATION_PREFIXES = ("mem-", "doc-", "记忆", "文档")
+
+
+def citation_presence(answer: str, source_ids: list[str]) -> float:
+    """1.0 iff *answer* cites at least one of *source_ids* inline.
+
+    Traceability check for the final-answer suite: when the golden context
+    carries source ids (the answer suite always provides them), a grounded
+    answer should reference one.  Empty ``source_ids`` ⇒ 1.0 (nothing to
+    cite, vacuously compliant).
+    """
+    if not source_ids:
+        return 1.0
+    text = str(answer or "")
+    for sid in source_ids:
+        sid = str(sid).strip()
+        if not sid:
+            continue
+        variants = {sid}
+        if len(sid) > 8:
+            variants.add(sid[-8:])
+        for prefix in _CITATION_PREFIXES:
+            if sid.startswith(prefix):
+                variants.add(sid[len(prefix):])
+        if any(v and v in text for v in variants):
+            return 1.0
+    return 0.0
+
+
 # ── Per-suite metric key order (report column order) ────────────────
 
 TOOL_SELECTION_METRIC_KEYS: tuple[str, ...] = (
@@ -337,4 +370,5 @@ ANSWER_METRIC_KEYS: tuple[str, ...] = (
     "fact_coverage",
     "groundedness",
     "hallucination_rate",
+    "citation_rate",
 )

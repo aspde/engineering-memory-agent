@@ -914,6 +914,14 @@ class TestContextBounding:
         assert _estimate_tokens("中文") == 2
         assert _estimate_tokens("") == 0
 
+    def test_estimate_tokens_weights_symbols(self) -> None:
+        # Code/JSON punctuation is token-dense — weighted ~2 chars/token.
+        assert _estimate_tokens("{" * 20) == 10
+        # A symbols-heavy string estimates higher than the same-length alnum.
+        assert _estimate_tokens("path/to:foo") > _estimate_tokens("pathtofoo")
+        # Symbols count heavier than whitespace of the same length.
+        assert _estimate_tokens("a!b!c!d!e") > _estimate_tokens("a b c d e")
+
     def test_window_keeps_most_recent_messages_by_budget(self) -> None:
         # Each message is ~5 tokens ("x"*20 → 5 ASCII tokens); a budget of
         # 25 keeps exactly the newest 5.

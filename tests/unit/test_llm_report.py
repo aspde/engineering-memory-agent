@@ -93,6 +93,43 @@ class TestToMarkdown:
         assert "execution errors" in md
         assert "provider down" in md
 
+    def test_answer_uncited_answers_are_flagged(self) -> None:
+        """An answer that cites no source id is flagged for prompt iteration."""
+        rows = [
+            {
+                "id": "ans-x",
+                "category": ANSWER_CATEGORIES[0],
+                "fact_coverage": 1.0,
+                "groundedness": 1.0,
+                "citation_rate": 0.0,
+                "answer_len": 10,
+                "answer_preview": "答案是 pgvector",
+            }
+        ]
+        r = LlmEvalResult(
+            suite="answer",
+            judge="deterministic",
+            per_query=rows,
+            overall={"fact_coverage": 1.0, "groundedness": 1.0, "citation_rate": 0.0},
+            by_category={ANSWER_CATEGORIES[0]: {"citation_rate": 0.0}},
+            metric_keys=("fact_coverage", "groundedness", "citation_rate"),
+            n_items=1,
+        )
+        md = to_markdown([r])
+        assert "citation=0.000" in md
+        assert "no source cited — candidate for prompt/eval iteration" in md
+
+    def test_summarize_includes_citation_rate(self) -> None:
+        r = _fake_result(
+            "answer",
+            ("fact_coverage", "groundedness", "citation_rate"),
+            ANSWER_CATEGORIES,
+            judge="deterministic",
+        )
+        line = summarize(r)
+        assert line.startswith("[answer]")
+        assert "citation=0.500" in line
+
 
 class TestToJson:
     def test_round_trips_overall_and_rows(self) -> None:

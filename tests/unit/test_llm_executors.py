@@ -101,3 +101,16 @@ class TestMakeAnswerGenerator:
         assert "<memory source=\"search_memories_tool\">" in system["content"]
         assert "pgvector 而非 Elasticsearch" in system["content"]
         assert provider.calls[0][1] == {"role": "user", "content": "选型是什么"}
+
+    @pytest.mark.asyncio
+    async def test_renders_source_ids_for_citation(self) -> None:
+        provider = FakeStreamingProvider(["答案是", " pgvector"])
+        generator = make_answer_generator(provider=provider)
+
+        await generator(
+            "选型是什么", "用 pgvector 而非 Elasticsearch 做向量检索", ["a1b2c3d4"]
+        )
+        system = provider.calls[0][0]
+        # Source ids are rendered the way a real search display exposes the
+        # memory short ID, so the model can cite them inline.
+        assert "[memory: a1b2c3d4]" in system["content"]

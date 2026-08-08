@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
 import pytest
 
 from backend.service.prompts import PromptSpec, get_prompt
+
+_SNAPSHOT_PATH = Path(__file__).resolve().parent / "_prompt_snapshot.json"
 
 
 class TestPromptRegistry:
@@ -29,6 +35,37 @@ class TestPromptRegistry:
         with pytest.raises(KeyError):
             get_prompt("does.not.exist")
 
+    def test_prompt_text_changes_require_version_bump(self) -> None:
+        """The registry must match the committed snapshot.
+
+        A text edit that does not also bump the version breaks versioned
+        traceability (call-site logs could not tell which behaviour an LLM
+        actually saw).  On failure: bump the version of every changed prompt,
+        then regenerate the snapshot with
+        ``python -m tests.unit.regenerate_prompt_snapshot``.
+        """
+        from backend.service import prompts as mod
+
+        snapshot = json.loads(_SNAPSHOT_PATH.read_text(encoding="utf-8"))
+        registry = {k: s for k, s in mod._PROMPTS.items()}
+        assert registry.keys() == snapshot.keys(), (
+            "prompt registry keys differ from the snapshot — register new "
+            "prompts with a version, then regenerate the snapshot"
+        )
+        changed: list[str] = []
+        for key, spec in registry.items():
+            entry = snapshot[key]
+            sha = hashlib.sha256(spec.text.encode("utf-8")).hexdigest()
+            if entry["sha256"] != sha or entry["version"] != spec.version:
+                changed.append(f"{key}: snapshot v{entry['version']} → registry v{spec.version}")
+        assert not changed, (
+            "prompt text or version drifted from the snapshot:\n  "
+            + "\n  ".join(changed)
+            + "\nBump the version of every changed prompt (a text edit is a "
+            "behaviour change), then run "
+            "`python -m tests.unit.regenerate_prompt_snapshot`."
+        )
+
 
 class TestAgentSystemTemplate:
     """The merged agent system template is a semantic superset of the two
@@ -49,7 +86,10 @@ class TestAgentSystemTemplate:
         # generate_final_node's inline prompt content
         assert "Answer the user's question based on the conversation" in text
         assert "retrieved context below" in text
-        assert "Do NOT list or enumerate the sources" in text
+        # Traceability: claims grounded in retrieved content cite their source
+        # ID inline, and invented citations are forbidden.
+        assert "source ID" in text
+        assert "Never invent a source" in text
 
     def test_has_context_placeholder(self) -> None:
         _, text = get_prompt("agent.system")

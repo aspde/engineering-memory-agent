@@ -26,21 +26,24 @@ function uniqueEntities(sources: Source[]): EntityRef[] {
 /**
  * Collapsible "📚 Sources" panel.
  *
- * - Deduplicated entity chips at top → click to open entity graph.
- * - Sorts memory sources by relevance (descending), top 5 visible.
- * - Clicking a source navigates to the memory library page.
+ * - Deduplicated entity chips at top (memory sources only) → click to open
+ *   entity graph.
+ * - Sorts memory + chunk sources by relevance (descending), top 5 visible.
+ * - Memory sources are clickable (navigate to the memory library page);
+ *   chunk sources are read-only rows that show the document ID the answer's
+ *   inline citation refers to.
  */
 export default function SourcesPanel({ sources }: SourcesPanelProps) {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
 
   const sorted = sources
-    .filter((s) => s.type === 'memory')
+    .filter((s) => s.type === 'memory' || s.type === 'chunk')
     .sort((a, b) => (b.relevance ?? 0) - (a.relevance ?? 0));
 
   if (sorted.length === 0) return null;
 
-  const entities = uniqueEntities(sorted);
+  const entities = uniqueEntities(sorted.filter((s) => s.type === 'memory'));
   const visible = sorted.slice(0, MAX_VISIBLE);
   const overflow = sorted.length - MAX_VISIBLE;
 
@@ -70,18 +73,37 @@ export default function SourcesPanel({ sources }: SourcesPanelProps) {
       <ul className="divide-y divide-gray-100 border-t border-gray-100">
         {visible.map((s, i) => (
           <li key={i} className="px-3 py-2">
-            <button
-              type="button"
-              onClick={() => {
-                if (!s.id) return;
-                dispatch({ type: 'SET_MEM_FILTER', memId: s.id });
-                navigate('/memories');
-              }}
-              className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-left text-sm text-blue-700 transition-colors hover:bg-blue-50"
-            >
-              🧠 {(s.summary || s.snippet || '(无摘要)').slice(0, 120)}
-              {s.relevance !== undefined ? ` — 相关度 ${s.relevance.toFixed(2)}` : ''}
-            </button>
+            {s.type === 'memory' ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!s.id) return;
+                  dispatch({ type: 'SET_MEM_FILTER', memId: s.id });
+                  navigate('/memories');
+                }}
+                className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-left text-sm text-blue-700 transition-colors hover:bg-blue-50"
+              >
+                🧠{' '}
+                {s.id ? (
+                  <span className="font-mono text-xs text-gray-400">
+                    [{s.id.slice(0, 8)}]{' '}
+                  </span>
+                ) : null}
+                {(s.summary || s.snippet || '(无摘要)').slice(0, 120)}
+                {s.relevance !== undefined ? ` — 相关度 ${s.relevance.toFixed(2)}` : ''}
+              </button>
+            ) : (
+              <div className="w-full rounded-lg bg-gray-50 px-2 py-1.5 text-left text-sm text-gray-700">
+                📄{' '}
+                {s.document_id ? (
+                  <span className="font-mono text-xs text-gray-400">
+                    [{s.document_id}]{' '}
+                  </span>
+                ) : null}
+                {(s.snippet || '(无摘要)').slice(0, 120)}
+                {s.relevance !== undefined ? ` — 相关度 ${s.relevance.toFixed(2)}` : ''}
+              </div>
+            )}
           </li>
         ))}
         {overflow > 0 && (

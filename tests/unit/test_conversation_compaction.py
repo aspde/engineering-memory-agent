@@ -7,6 +7,7 @@ truncation behaviour is unchanged.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -206,6 +207,249 @@ class TestCompactionMemoization:
         # The failure was not cached — the retry hits the LLM again.
         assert mock_provider.chat.await_count == 2
         assert isinstance(r2[0], SystemMessage)
+
+
+class TestCompactionCacheLocking:
+    """The memoized summary cache is locked (double-checked) and resettable."""
+
+    @pytest.mark.asyncio
+    async def test_reset_drops_memoized_summary(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "S"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        await mod._maybe_compact(list(overflow))
+        assert mock_provider.chat.await_count == 1
+
+        # Reset drops the memo — the same overflow re-summarises on demand.
+        mod.reset_compaction_cache()
+        mock_provider.chat.reset_mock()
+        await mod._maybe_compact(list(overflow))
+        mock_provider.chat.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_overflow_shares_one_summary(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "S"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        results = await asyncio.gather(
+            *[mod._maybe_compact(list(overflow)) for _ in range(8)]
+        )
+        # The first bound fills the cache; the rest hit the locked lookup.
+        mock_provider.chat.assert_awaited_once()
+        for r in results:
+            assert str(r[0].content) == "S"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_miss_joins_inflight_call(self, monkeypatch) -> None:
+        """Genuinely concurrent misses of the SAME overflow share one
+        summariser call — a slow summariser parks every caller on the same
+        in-flight future instead of each firing its own LLM call."""
+        import agent.nodes as mod
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def slow_summarize(messages, transcript=None):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()  # keep the leader in-flight so joiners arrive
+            return "S"
+
+        monkeypatch.setattr(mod, "_summarize_overflow", slow_summarize)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        tasks = [
+            asyncio.create_task(mod._memoized_summarize_overflow(list(overflow)))
+            for _ in range(8)
+        ]
+        await started.wait()    # the leader entered and is parked on release
+        await asyncio.sleep(0)  # let the other seven reach their join await
+        release.set()
+        results = await asyncio.gather(*tasks)
+
+        assert calls == 1
+        assert all(r == "S" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_joiner_resolves_when_leader_fails(self, monkeypatch) -> None:
+        """A leader that errors must resolve its future — joiners fails-safe
+        with "" rather than hanging on a future that never completes."""
+        import agent.nodes as mod
+
+        started = asyncio.Event()
+        calls = 0
+
+        async def failing_summarize(messages, transcript=None):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await asyncio.sleep(0.05)  # keep the leader in-flight briefly
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(mod, "_summarize_overflow", failing_summarize)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        tasks = [
+            asyncio.create_task(mod._memoized_summarize_overflow(list(overflow)))
+            for _ in range(2)
+        ]
+        await started.wait()
+        await asyncio.sleep(0)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # The leader propagated its failure; the joiner degraded to "".
+        assert any(isinstance(r, RuntimeError) for r in results)
+        assert any(r == "" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_joiner_cancellation_propagates(self, monkeypatch) -> None:
+        """A joiner cancelled while waiting on a slow leader re-raises
+        CancelledError instead of swallowing it — the caller's
+        ``asyncio.timeout`` (AGENT_TIMEOUT) deadline keeps working."""
+        import agent.nodes as mod
+
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_summarize(messages, transcript=None):
+            started.set()
+            await release.wait()  # keep the leader in-flight so the joiner joins
+            return "S"
+
+        monkeypatch.setattr(mod, "_summarize_overflow", slow_summarize)
+
+        overflow = [
+            HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
+        ]
+        leader = asyncio.create_task(
+            mod._memoized_summarize_overflow(list(overflow))
+        )
+        await started.wait()  # the leader is parked in slow_summarize
+        joiner = asyncio.create_task(
+            mod._memoized_summarize_overflow(list(overflow))
+        )
+        await asyncio.sleep(0)  # let the joiner reach its join await
+        joiner.cancel()
+        (joiner_result,) = await asyncio.gather(joiner, return_exceptions=True)
+        # Cancellation surfaced on the joiner — not absorbed by the broad
+        # except.  The leader is unaffected and completes normally.
+        assert isinstance(joiner_result, asyncio.CancelledError)
+        release.set()
+        assert await leader == "S"
+
+
+class TestCompactionTranscriptIncludesTools:
+    """Tool results are folded into the compaction transcript so a summary of
+    an early retrieval turn keeps the context those tools surfaced."""
+
+    def test_transcript_includes_tool_results(self) -> None:
+        import agent.nodes as mod
+
+        messages = [
+            HumanMessage(content="early question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool", "args": {}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(
+                content='{"display": "Found: pgvector is the vector store.", "sources": []}',
+                tool_call_id="c1",
+                name="search_memories_tool",
+            ),
+            HumanMessage(content="later question"),
+        ]
+        transcript = mod._overflow_transcript(messages)
+        assert "user: early question" in transcript
+        assert "tool (search_memories_tool)" in transcript
+        assert "pgvector is the vector store" in transcript
+
+    def test_transcript_unwraps_tool_display_envelope(self) -> None:
+        import agent.nodes as mod
+
+        m = ToolMessage(
+            content='{"display": "clean display text", "sources": [{"id": "1"}]}',
+            tool_call_id="c1",
+            name="search_memories_tool",
+        )
+        assert mod._tool_display_text(m) == "clean display text"
+        # Non-JSON tool output passes through unchanged.
+        assert mod._tool_display_text(ToolMessage("raw text", tool_call_id="c2")) == "raw text"
+
+    def test_transcript_truncates_long_tool_content(self) -> None:
+        import agent.nodes as mod
+
+        m = ToolMessage(
+            content='{"display": "' + "x" * 5000 + '", "sources": []}',
+            tool_call_id="c1",
+            name="search_memories_tool",
+        )
+        truncated = mod._truncate_tool_content(
+            mod._tool_display_text(m), limit=mod._TRANSCRIPT_TOOL_CHAR_CAP
+        )
+        assert truncated.endswith("…[truncated]")
+        assert len(truncated) <= (
+            mod._TRANSCRIPT_TOOL_CHAR_CAP + 1 + len("…[truncated]")
+        )
+
+    @pytest.mark.asyncio
+    async def test_tool_result_in_overflow_folds_into_summary(self, monkeypatch) -> None:
+        import agent.nodes as mod
+
+        _set_compaction(monkeypatch, True)
+        _set_budget(monkeypatch, 60)
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "SUMMARY"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        # The tool turn sits at the FRONT of the thread — 28 filler messages
+        # follow, so the oldest messages (including the ToolMessage) land in
+        # the overflow prefix that gets summarised.
+        messages = [
+            HumanMessage(content="early question"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool", "args": {}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(
+                content='{"display": "found pgvector details", "sources": []}',
+                tool_call_id="c1",
+                name="search_memories_tool",
+            ),
+            *[HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(28)],
+            HumanMessage(content="current question"),
+        ]
+        await mod._maybe_compact(messages)
+
+        # The compaction LLM saw the tool result inside its transcript.
+        prompt = mock_provider.chat.await_args.args[0][0]["content"]
+        assert "found pgvector details" in prompt
+        assert "tool (search_memories_tool)" in prompt
 
 
 class TestCompactionThroughNodes:

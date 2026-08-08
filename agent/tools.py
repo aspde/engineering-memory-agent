@@ -76,9 +76,13 @@ async def search_memories_tool(
         entities = entity_map.get(mid, [])
         entity_names = [e["canonical_name"] for e in entities]
 
+        # Expose the stable memory short ID in the display text so the LLM
+        # can cite it inline (per the agent.system citation guidance).  The
+        # full ID stays in the sources envelope for the UI.
+        short_id = mid[:8]
         line = (
-            f"[{i + 1}] (relevance: {score:.2f}, decay: {decay:.2f}) "
-            f"{r['summary']}"
+            f"[{i + 1}] (memory: {short_id}, relevance: {score:.2f}, "
+            f"decay: {decay:.2f}) {r['summary']}"
         )
         if entity_names:
             line += f"  [entities: {', '.join(entity_names)}]"

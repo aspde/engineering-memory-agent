@@ -218,6 +218,87 @@ class TestAgentChat:
         assert "RuntimeError" not in data["detail"]
 
 
+class TestAgentConcurrencyCap:
+    """Beyond MAX_AGENT_CONCURRENCY simultaneous runs the request is refused
+    with 503 — never queued behind long ReAct loops."""
+
+    async def _request(self, async_client: AsyncClient, path: str = "/api/agent/chat") -> object:
+        return await async_client.post(
+            path,
+            json={"message": "hi", "thread_id": "cap-thread-1"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_chat_refused_when_cap_reached(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """Zero slots → the non-streaming chat endpoint answers 503."""
+        from backend.shared import config as config_mod
+
+        monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 0)
+
+        response = await self._request(async_client)
+        assert response.status_code == 503
+        assert "繁忙" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_stream_refused_when_cap_reached(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """Zero slots → the streaming endpoint answers a plain HTTP 503, not
+        an SSE error event."""
+        from backend.shared import config as config_mod
+
+        monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 0)
+
+        response = await self._request(async_client, "/api/agent/chat/stream")
+        assert response.status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_refused_request_does_not_upsert_conversation(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A refused request returns 503 before any DB write — no conversation
+        upsert runs for a request that will never execute."""
+        from unittest.mock import AsyncMock
+
+        from backend.shared import config as config_mod
+
+        monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 0)
+        mock_upsert = AsyncMock()
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes._upsert_conversation", mock_upsert
+        )
+
+        response = await self._request(async_client)
+        assert response.status_code == 503
+        mock_upsert.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_slot_released_after_run(self, async_client: AsyncClient, monkeypatch) -> None:
+        """A completed run releases its slot — the next request is admitted."""
+        from unittest.mock import AsyncMock
+
+        from backend.shared import config as config_mod
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "ok",
+            "messages": [],
+        }
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+        monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 1)
+
+        first = await self._request(async_client)
+        assert first.status_code == 200
+        # The first run's finally released the slot — a second is admitted.
+        second = await self._request(async_client)
+        assert second.status_code == 200
+
+
 class TestTokenUsageEndpoint:
     """Tests for the /api/agent/usage cost-monitoring endpoint."""
 

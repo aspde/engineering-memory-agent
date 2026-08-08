@@ -1,4 +1,5 @@
 import type { Message } from '../types';
+import CitationText from './CitationText';
 import RichText from './RichText';
 import SourcesPanel from './SourcesPanel';
 
@@ -58,8 +59,13 @@ export default function MessageBubble({ message, isStreaming = false }: MessageB
                   style={{ animationDelay: '0.3s' }}
                 />
               </span>
-            ) : (
+            ) : isUser ? (
               <RichText text={message.content} />
+            ) : (
+              <CitationText
+                text={message.content}
+                sources={message._meta?.sources ?? []}
+              />
             )}
           </div>
         </div>

@@ -397,6 +397,10 @@ class AnswerItem:
     required_facts: list[str]
     category: str
     prohibited_claims: list[str] = field(default_factory=list)
+    #: Source IDs the model is shown alongside the context (the answer suite
+    #: presents them the way a real memory-search display does).  A grounded
+    #: answer should cite at least one — measured by ``citation_presence``.
+    source_ids: list[str] = field(default_factory=list)
     notes: str = ""
 
 
@@ -413,6 +417,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="factual",
         prohibited_claims=["最终选用了 Elasticsearch", "选择了 Qdrant", "选择了 Milvus"],
         notes="答案是明确的选型陈述，禁止虚构未提及的备选",
+        source_ids=["c4a11b2e"],
     ),
     AnswerItem(
         id="ans-002",
@@ -426,6 +431,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="causal",
         prohibited_claims=["内存泄漏", "代码语法错误"],
         notes="根因是连接池占满，禁止编造其他根因",
+        source_ids=["9f2d8a01"],
     ),
     AnswerItem(
         id="ans-003",
@@ -439,6 +445,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="negation",
         prohibited_claims=["重启后状态不会丢失"],
         notes="正确答案是否定的，禁止肯定化",
+        source_ids=["51b7e3c9"],
     ),
     AnswerItem(
         id="ans-004",
@@ -452,6 +459,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="instruction",
         prohibited_claims=[],
         notes="操作说明，应引用具体工具与参数",
+        source_ids=["d8e0f6a2"],
     ),
     AnswerItem(
         id="ans-005",
@@ -464,6 +472,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="factual",
         prohibited_claims=["选用了 OpenAI 的 text-embedding-3-large"],
         notes="答案应给出对比理由，禁止把备选说成已选用",
+        source_ids=["7a4c19d0"],
     ),
     AnswerItem(
         id="ans-006",
@@ -477,6 +486,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="causal",
         prohibited_claims=[],
         notes="根因是事件循环兼容性冲突",
+        source_ids=["3e6b2f8c"],
     ),
     AnswerItem(
         id="ans-007",
@@ -490,6 +500,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="factual",
         prohibited_claims=[],
         notes="答案应提到循环上限机制",
+        source_ids=["b1a5c7e3"],
     ),
     AnswerItem(
         id="ans-008",
@@ -503,6 +514,7 @@ ANSWER_ITEMS: list[AnswerItem] = [
         category="instruction",
         prohibited_claims=["调用前要自己先判断是否冲突"],
         notes="操作说明，禁止给出与上下文相反的建议",
+        source_ids=["e2d9f4b6"],
     ),
 ]
 
@@ -648,5 +660,13 @@ def validate_llm_dataset() -> list[str]:
                 f"{it.id}: unknown category {it.category!r} "
                 f"(expected one of {ANSWER_CATEGORIES})"
             )
+        if not it.source_ids:
+            warnings.append(
+                f"{it.id}: no source_ids — the citation_rate metric is vacuous "
+                "(1.0 for every answer) without something to cite"
+            )
+        for sid in it.source_ids:
+            if not str(sid).strip():
+                raise ValueError(f"{it.id}: empty source id in source_ids")
 
     return warnings
