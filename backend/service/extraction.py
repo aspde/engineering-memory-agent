@@ -12,6 +12,7 @@ import logging
 
 from backend.model.llm import LLMStructuredError
 from backend.service.llm_service import get_llm_provider
+from backend.service.prompts import get_prompt
 from backend.service.structured import chat_structured
 from backend.shared.metrics import record_structured_failure
 
@@ -28,24 +29,14 @@ async def extract_summary(content: str) -> str:
     """
     try:
         llm = get_llm_provider()
-        msg = _SUMMARY_PROMPT.format(content=content)
+        version, prompt = get_prompt("extraction.summary")
+        logger.debug("extract_summary: using prompt extraction.summary v%s", version)
+        msg = prompt.format(content=content)
         summary = await llm.chat([{"role": "user", "content": msg}], scenario="extraction_summary")
         return summary.strip()
     except Exception:
         logger.exception("LLM summary extraction failed, using raw content fallback")
         return content.strip()[:200]
-
-
-_SUMMARY_PROMPT = """\
-Summarize the following content in one concise paragraph (2-5 sentences).
-Focus on key facts, decisions, and actionable information.
-Avoid fluff — only write what someone searching for this information would want to find.
-Respond in the same language as the input content.
-
-Content:
-{content}
-
-Summary:"""
 
 # ── Stage 2: Entities ─────────────────────────────────────────────
 
@@ -63,7 +54,9 @@ async def extract_entities(content_or_summary: str) -> list[dict]:
     correctness-critical, so the memory write proceeds).
     """
     try:
-        msg = _ENTITIES_PROMPT.format(input_text=content_or_summary)
+        version, prompt = get_prompt("extraction.entities")
+        logger.debug("extract_entities: using prompt extraction.entities v%s", version)
+        msg = prompt.format(input_text=content_or_summary)
         data = await chat_structured(
             [{"role": "user", "content": msg}],
             json_schema=_ENTITIES_SCHEMA,
@@ -102,18 +95,6 @@ _ENTITIES_SCHEMA = {
     },
 }
 
-_ENTITIES_PROMPT = """\
-Extract named entities from the following text.
-Return ONLY a JSON array of objects with "name" and "type" fields.
-Types must be one of: person, project, technology, decision, event, file, concept.
-Use the same language as the input text for entity names.
-
-Text:
-{input_text}
-
-Example output:
-[{{"name": "PostgreSQL", "type": "technology"}}, {{"name": "migration plan", "type": "decision"}}]"""
-
 
 # ── Stage 3: Relations ────────────────────────────────────────────
 
@@ -137,7 +118,9 @@ async def extract_relations(
 
     entity_names = [e["name"] for e in entities]
     try:
-        msg = _RELATIONS_PROMPT.format(
+        version, prompt = get_prompt("extraction.relations")
+        logger.debug("extract_relations: using prompt extraction.relations v%s", version)
+        msg = prompt.format(
             summary=summary, entities=json.dumps(entity_names, ensure_ascii=False)
         )
         data = await chat_structured(
@@ -190,20 +173,6 @@ _RELATIONS_SCHEMA = {
         },
     },
 }
-
-_RELATIONS_PROMPT = """\
-Identify relationships between the following entities based on the summary.
-Return ONLY a JSON array of objects with "from", "to", and "type" fields.
-"from" and "to" must be entity names from the provided list.
-Types must be one of: depends_on, causes, part_of, contradicts, supersedes, relates_to.
-
-Summary:
-{summary}
-
-Entities: {entities}
-
-Example output:
-[{{"from": "PostgreSQL", "to": "pgvector", "type": "depends_on"}}, {{"from": "migration", "to": "downtime", "type": "causes"}}]"""
 
 # ── Orchestration (still a plain function, not a chain) ────────────
 

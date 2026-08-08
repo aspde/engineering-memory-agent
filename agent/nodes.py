@@ -16,56 +16,12 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from agent.state import AgentState
+from backend.service.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
-from backend.service.memory import resolve_conflict
+from backend.service.memory import resolve_conflict, write_memory
+from backend.service.prompts import get_prompt
 
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """\
-You are EMA, the Engineering Memory Agent for development teams.
-
-You have access to tools for:
-- Searching long-term memories (from conversations, PingCode work items,
-  CI builds, 飞书 discussions, Git history, and manual ingestion)
-- Searching document chunks (code, documentation)
-- Writing new memories from conversations or content
-- Extracting structured knowledge from text
-- Ingesting git repository history
-- Ingesting documents into the knowledge base
-
-Memories in your knowledge base come from multiple sources:
-- Manual: conversations, documents uploaded by the team
-- PingCode: bug root causes, fixes, and work item resolutions
-- CI/CD: build failures, test regressions, duration anomalies
-- 飞书: technical discussions and decisions from chat threads
-- Git: commit history and code changes
-You search across ALL sources by default — the user does not need to specify.
-
-When the user asks a question:
-1. Search relevant memories and documents first
-2. Synthesize information from retrieved context
-3. Answer clearly and concisely — do not list or enumerate sources, they are shown separately in the UI
-4. If a search returned no results, simply ignore it — do not mention empty searches
-
-When the user asks about a specific external item (a PingCode work item like
-"#1234", a CI build, a 飞书 discussion):
-- Search for memories related to that item first
-- If found, answer from the memory
-- If NOT found, say "该 issue/事件 尚未被摄入 EMA，我目前没有关于它的记忆。"
-  rather than a generic "I don't know"
-
-When the user asks to ingest or index content, use the appropriate tools.
-Always prefer searching over guessing.
-
-When the user tells you to remember something, or shares facts/decisions/knowledge:
-- Call write_memory_tool IMMEDIATELY with the user's exact words as content.
-- Do NOT pre-check for conflicts yourself. The tool has built-in conflict detection
-  and will pause for human review if a contradiction is found.
-- Do NOT ask the user whether to overwrite or merge — that is handled by the tool.
-
-Always respond in Chinese (简体中文). All your answers, explanations,
-and tool interactions should use Chinese unless the user explicitly
-requests another language."""
 
 
 # ── Helper: message conversion ───────────────────────────────────────
@@ -236,6 +192,88 @@ def _window_messages(
     return system + rest[-max_messages:]
 
 
+# ── Conversation compaction (B4) ─────────────────────────────────
+# Long threads previously dropped everything outside the window.  When
+# CONVERSATION_COMPACTION_ENABLED=true, the overflow is folded into one
+# running-summary SystemMessage (a single LLM call) so the retained tail
+# keeps its conversational context.  Default off — the existing truncation
+# behaviour is unchanged.
+
+
+async def _summarize_overflow(messages: list[BaseMessage]) -> str:
+    """Collapse *messages* into a one-line running summary (one LLM call).
+
+    Fails safe: any error returns ``""`` so the caller falls back to the
+    existing truncation behaviour.
+    """
+    try:
+        provider = get_llm_provider()
+        transcript = "\n".join(
+            f"{'user' if isinstance(m, HumanMessage) else 'assistant'}: {_message_text(m)}"
+            for m in messages
+            if isinstance(m, (HumanMessage, AIMessage))
+        )
+        version, prompt = get_prompt("agent.compaction")
+        logger.info(
+            "Compacting %d early messages (prompt agent.compaction v%s)",
+            len(messages),
+            version,
+        )
+        summary = await provider.chat(
+            [{"role": "user", "content": prompt.format(transcript=transcript)}],
+            scenario="conversation_compaction",
+        )
+        return summary.strip()
+    except Exception:
+        logger.exception("Conversation compaction failed, falling back to truncation")
+        return ""
+
+
+async def _maybe_compact(
+    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+) -> list[BaseMessage]:
+    """Fold messages older than the window into a running-summary SystemMessage.
+
+    Only active when ``config.conversation_compaction_enabled`` is set
+    (default off).  When the non-system history exceeds *max_messages*, the
+    overflow prefix is summarised in one LLM call and prepended as a
+    ``SystemMessage`` so the retained tail keeps its conversational context.
+    On any failure it returns *messages* unchanged and the caller's windowing
+    still truncates — compaction never loses more context than the existing
+    behaviour.
+    """
+    from backend.shared.config import config
+
+    if not config.conversation_compaction_enabled:
+        return messages
+    if len(messages) <= max_messages:
+        return messages
+    system = [m for m in messages if isinstance(m, SystemMessage)]
+    rest = [m for m in messages if not isinstance(m, SystemMessage)]
+    if len(rest) <= max_messages:
+        return messages
+    summary = await _summarize_overflow(rest[:-max_messages])
+    if not summary:
+        return messages
+    # Pinned system messages stay first, then the running summary, then the
+    # retained tail.  (OpenAI-compatible providers accept multiple system
+    # messages; the Anthropic provider lifts only the first as ``system`` —
+    # a documented limitation of this opt-in feature.)
+    return system + [SystemMessage(content=summary)] + rest[-max_messages:]
+
+
+async def _bounded_messages(
+    messages: list[BaseMessage], max_messages: int = _MAX_CONTEXT_MESSAGES
+) -> list[BaseMessage]:
+    """Compact (when enabled) then window *messages* for the LLM.
+
+    With compaction disabled this is exactly ``_window_messages`` — the
+    default behaviour is unchanged.
+    """
+    compacted = await _maybe_compact(messages, max_messages)
+    return _window_messages(compacted, max_messages)
+
+
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
     """Cap a ToolMessage's content before it is resent to the LLM.
 
@@ -246,6 +284,121 @@ def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> s
     if len(text) <= limit:
         return text
     return text[:limit] + "\n…[truncated]"
+
+
+# ── Retrieved-context tagging (B2) ───────────────────────────────
+# Tool results folded into the final system prompt come from the knowledge
+# base and must be framed as untrusted data.  Each item is wrapped in a
+# fixed marker tag so the LLM can distinguish retrieved content from its own
+# instructions (see the agent.system template's isolation declaration).
+_CONTEXT_DOC_TOOLS: frozenset[str] = frozenset({
+    "retrieve_chunks_tool",
+    "query_rewrite_and_search_tool",
+    "ingest_document_tool",
+})
+
+
+def _context_tag(tool_name: str) -> str:
+    """Retrieval-source marker: ``doc`` for document/chunk tools, else ``memory``."""
+    return "doc" if tool_name in _CONTEXT_DOC_TOOLS else "memory"
+
+
+def _wrap_context_item(tool_name: str, content: str) -> str:
+    """Wrap one retrieved context item in its fixed source marker tag."""
+    tag = _context_tag(tool_name)
+    return f'<{tag} source="{tool_name}">\n{content}\n</{tag}>'
+
+
+# ── Automatic knowledge capture (B3) ──────────────────────────────
+# When AUTO_MEMORY_ENABLED=true, substantive user turns are written to the
+# memory store automatically (unless the agent already wrote this turn via
+# write_memory_tool).  Default off — the existing behaviour is unchanged.
+_AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
+
+
+def _message_text(message: BaseMessage) -> str:
+    """Plain-text content of a message (falls back to str for block content)."""
+    content = message.content
+    return content if isinstance(content, str) else str(content)
+
+
+def _last_human_content(messages: list[BaseMessage]) -> str:
+    """Return the most recent HumanMessage's non-empty text, or ``""``."""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return _message_text(m).strip()
+    return ""
+
+
+def _write_tool_used_this_turn(messages: list[BaseMessage]) -> bool:
+    """True if ``write_memory_tool`` was invoked or executed this turn.
+
+    Scans from the latest HumanMessage forward for either an assistant
+    tool_call naming the tool or a ToolMessage it produced.  Only the
+    current turn counts — earlier turns' writes don't suppress auto memory.
+    """
+    start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            start = i
+            break
+    for m in messages[start:]:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "write_memory_tool":
+            return True
+        if isinstance(m, AIMessage) and any(
+            str(tc.get("name", "")) == "write_memory_tool"
+            for tc in getattr(m, "tool_calls", None) or []
+        ):
+            return True
+    return False
+
+
+def _has_substance(extracted: dict) -> bool:
+    """Heuristic: does the extracted memory carry real knowledge?"""
+    summary = str(extracted.get("summary") or "").strip()
+    return len(summary) >= _AUTO_MEMORY_MIN_SUMMARY_LEN or bool(extracted.get("entities"))
+
+
+async def _maybe_auto_memory(state: AgentState) -> None:
+    """Best-effort automatic knowledge capture at the end of a turn.
+
+    Runs only when ``config.auto_memory_enabled`` is set.  If the user's
+    latest message carries substantive knowledge and the agent did not
+    already call ``write_memory_tool`` this turn, the message is extracted
+    and written to the memory store.  Any failure is logged and swallowed —
+    auto memory must never break the chat response.
+    """
+    from backend.shared.config import config
+
+    if not config.auto_memory_enabled:
+        return
+
+    user_content = _last_human_content(state["messages"])
+    if not user_content:
+        return
+    if _write_tool_used_this_turn(state["messages"]):
+        return
+
+    try:
+        extracted = await extract_memory(user_content)
+    except Exception:
+        logger.exception("Auto-memory extraction failed for user message")
+        return
+    if not _has_substance(extracted):
+        logger.info(
+            "Auto-memory: user message carries no substantive knowledge, skipping"
+        )
+        return
+
+    try:
+        result = await write_memory(user_content, source_type="conversation")
+        logger.info(
+            "Auto-memory: wrote memory %s (action=%s)",
+            result.get("id"),
+            result.get("action"),
+        )
+    except Exception:
+        logger.exception("Auto-memory write failed")
 
 
 # ── Nodes ────────────────────────────────────────────────────────────
@@ -266,13 +419,16 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     """
     provider = get_llm_provider()
 
-    # Prepend system prompt if this is the first call, then bound the history
-    # sent to the LLM (recent window + pinned system prompt).
+    # Prepend the system prompt if this is the first call, then bound the
+    # history sent to the LLM (compact when enabled, then window to the
+    # recent tail + pinned system prompts).
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
-    messages = _window_messages(messages)
+    messages = await _bounded_messages(messages)
     if not has_system:
-        messages.insert(0, SystemMessage(content=SYSTEM_PROMPT))
+        version, system_text = get_prompt("agent.system")
+        logger.info("call_llm_node: using agent.system prompt v%s", version)
+        messages.insert(0, SystemMessage(content=system_text.format(context="")))
 
     tool_schemas = _to_openai_tools(tools)
     dicts = _messages_to_dicts(messages)
@@ -356,14 +512,22 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         logger.info(
             "Reusing call_llm output as final answer (no tool results this turn)"
         )
+        await _maybe_auto_memory(state)
         return {"final_prompt": None, "final_response": str(last.content)}
 
     # ── Harvest context from ToolMessages in the recent conversation ──
-    # Both this loop and the role loop below walk the *windowed* history so
-    # a long thread doesn't resend unbounded tool results into the synthesis
-    # prompt on every turn.
+    # Both this loop and the role loop below walk the *bounded* history so a
+    # long thread doesn't resend unbounded tool results into the synthesis
+    # prompt on every turn.  When compaction is enabled the overflow is folded
+    # into a running-summary SystemMessage, which is folded into the context
+    # block below so the synthesis LLM still sees the compressed history.
+    windowed = await _bounded_messages(state["messages"])
     context_parts: list[str] = []
-    for m in _window_messages(state["messages"]):
+    # Compaction summaries (SystemMessages) become <summary> context items.
+    for m in windowed:
+        if isinstance(m, SystemMessage) and (m.content or "").strip():
+            context_parts.append(f"<summary>\n{str(m.content).strip()}\n</summary>")
+    for m in windowed:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
@@ -389,21 +553,18 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         content = _truncate_tool_content(content)
         if not content.strip():
             continue
-        context_parts.append(f"### {tool_name}\n{content}")
+        context_parts.append(_wrap_context_item(tool_name, content))
 
     context_str = "\n\n".join(context_parts) if context_parts else ""
 
     # Build the final prompt — single system message (Anthropic only
-    # accepts one top-level system param, so context is folded in).
-    system_content = (
-        "You are EMA, the Engineering Memory Agent. "
-        "Answer the user's question based on the conversation "
-        "and the retrieved context below. "
-        "Be concise.  Do NOT list or enumerate the sources in your response — "
-        "they are already displayed separately in the UI."
-    )
-    if context_str:
-        system_content += f"\n\nContext:\n{context_str}"
+    # accepts one top-level system param, so context is folded in).  The
+    # agent system template is the merged persona + answer guidance; the
+    # retrieved-context block is injected via the ``{context}`` placeholder.
+    version, system_text = get_prompt("agent.system")
+    logger.info("generate_final_node: using agent.system prompt v%s", version)
+    context_block = f"\n\nContext:\n{context_str}" if context_str else ""
+    system_content = system_text.format(context=context_block)
 
     messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},
@@ -411,7 +572,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
 
     # Include the recent conversation history (skip tool & system messages),
     # windowed so a long thread doesn't resend unbounded history every turn.
-    for m in _window_messages(state["messages"]):
+    for m in windowed:
         if isinstance(m, (ToolMessage, SystemMessage)):
             continue
         role = "assistant" if isinstance(m, AIMessage) else "user"
@@ -442,6 +603,8 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         writer({"type": "token", "content": response})
 
     aimessage = AIMessage(content=response)
+
+    await _maybe_auto_memory(state)
 
     return {
         "final_prompt": messages,

@@ -19,6 +19,7 @@ from backend.db import get_session_factory
 from backend.service.embedding_service import get_embedding_provider
 from backend.service.entity import normalize_entities
 from backend.service.extraction import extract_memory
+from backend.service.prompts import get_prompt
 from backend.shared.config import current_thread_id
 
 logger = logging.getLogger(__name__)
@@ -160,7 +161,9 @@ async def _detect_conflict(existing: dict, extracted: dict) -> bool:
     """
     from backend.service.structured import chat_structured
 
-    prompt = _CONFLICT_PROMPT.format(
+    version, prompt = get_prompt("memory.conflict")
+    logger.debug("_detect_conflict: using prompt memory.conflict v%s", version)
+    prompt = prompt.format(
         existing_summary=existing["summary"],
         new_summary=extracted["summary"],
     )
@@ -178,16 +181,6 @@ _CONFLICT_SCHEMA = {
     "properties": {"conflict": {"type": "boolean"}},
 }
 
-_CONFLICT_PROMPT = """\
-You are a conflict detector. Compare two summaries and determine if the new one
-CONTRADICTS the existing one.
-
-Existing summary: {existing_summary}
-
-New summary: {new_summary}
-
-Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}"""
-
 
 async def _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Merge new memory into existing one — update summary and entities.
@@ -199,7 +192,9 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata, c
 
     try:
         llm = get_llm_provider()
-        prompt = _MERGE_PROMPT.format(
+        version, prompt = get_prompt("memory.merge")
+        logger.debug("_merge_memory: using prompt memory.merge v%s", version)
+        prompt = prompt.format(
             existing_summary=existing["summary"],
             new_summary=extracted["summary"],
         )
@@ -307,17 +302,6 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata, c
         "summary": merged_summary.strip(),
         "entity_ids": [],
     }
-
-
-_MERGE_PROMPT = """\
-Combine the following two summaries into a single concise summary.
-Preserve all key facts from both. If they describe the same thing, prefer the more detailed version.
-
-Existing summary: {existing_summary}
-
-New summary: {new_summary}
-
-Merged summary:"""
 
 
 async def _mark_conflict(existing, extracted, embedding, source_type, metadata, content_hash):
@@ -551,7 +535,9 @@ async def resolve_conflict(
 
         try:
             llm = get_llm_provider()
-            prompt = _MERGE_PROMPT.format(
+            version, prompt = get_prompt("memory.merge")
+            logger.debug("resolve_conflict(merge): using prompt memory.merge v%s", version)
+            prompt = prompt.format(
                 existing_summary=existing_summary,
                 new_summary=extracted["summary"],
             )
