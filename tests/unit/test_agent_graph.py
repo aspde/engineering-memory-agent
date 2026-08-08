@@ -7,6 +7,17 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from agent.graph import build_agent_graph
+from backend.shared import config as config_mod
+
+
+@pytest.fixture(autouse=True)
+def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep auto memory off — these tests exercise graph routing, not B3.
+
+    Auto memory defaults on; the graph's generate_final_node would otherwise
+    hit the real extraction service (unmocked) at the end of each turn.
+    """
+    monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
 
 
 def _make_fake_tool() -> object:

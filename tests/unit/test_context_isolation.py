@@ -16,6 +16,18 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from tests._fake_llm import text_stream
 
 
+@pytest.fixture(autouse=True)
+def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep auto memory off — these tests exercise context isolation, not B3.
+
+    Auto memory defaults on; generate_final_node would otherwise hit the
+    real extraction service (unmocked) at the end of each turn.
+    """
+    from backend.shared import config as config_mod
+
+    monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
+
+
 def _make_tool_state(tool_name: str, content: str) -> dict:
     """Build an AgentState where *tool_name* returned *content* this turn."""
     from agent.state import AgentState

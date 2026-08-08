@@ -1,8 +1,8 @@
-"""Tests for conversation compaction (B4) — opt-in, fails safe.
+"""Tests for conversation compaction (B4) — enabled by default, fails safe.
 
 When enabled, messages older than the context window are folded into one
-running-summary SystemMessage; when disabled, the existing truncation
-behaviour is unchanged.
+running-summary SystemMessage; when explicitly disabled, the existing
+truncation behaviour is unchanged.
 """
 
 from __future__ import annotations
@@ -15,12 +15,22 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from backend.shared import config as config_mod
 
 
+@pytest.fixture(autouse=True)
+def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep auto memory off — these tests exercise compaction, not B3.
+
+    Auto memory defaults on; generate_final_node would otherwise hit the
+    real extraction service (unmocked) at the end of each turn.
+    """
+    monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
+
+
 def _set_compaction(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", enabled)
 
 
 class TestCompactionDisabled:
-    """Default off — truncation behaviour is identical to before."""
+    """Explicitly disabled — truncation behaviour is identical to before."""
 
     @pytest.mark.asyncio
     async def test_returns_messages_unchanged_without_llm_call(self, monkeypatch) -> None:

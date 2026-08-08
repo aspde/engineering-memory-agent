@@ -146,16 +146,18 @@ class AppConfig:
     )
     # When enabled, generate_final_node automatically extracts substantive
     # user turns into memories (unless the agent already wrote this turn).
-    # Default off — memory writes only happen on explicit user request.
+    # Enabled by default — auto memory is the intended steady-state; set
+    # AUTO_MEMORY_ENABLED=false to opt out.
     auto_memory_enabled: bool = field(
-        default_factory=lambda: os.getenv("AUTO_MEMORY_ENABLED", "false").lower() == "true"
+        default_factory=lambda: os.getenv("AUTO_MEMORY_ENABLED", "true").lower() == "true"
     )
     # When enabled, messages older than the context window are folded into a
-    # running-summary SystemMessage instead of being dropped.  Default off —
-    # long history is truncated as before.
+    # running-summary SystemMessage instead of being dropped.  Enabled by
+    # default — long threads are summarised rather than truncated; set
+    # CONVERSATION_COMPACTION_ENABLED=false to restore plain truncation.
     conversation_compaction_enabled: bool = field(
         default_factory=lambda: os.getenv(
-            "CONVERSATION_COMPACTION_ENABLED", "false"
+            "CONVERSATION_COMPACTION_ENABLED", "true"
         ).lower() == "true"
     )
     # ── Phase 3: proactive agent ───────────────────────────────────

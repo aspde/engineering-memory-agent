@@ -1,6 +1,6 @@
-"""Tests for automatic knowledge capture (B3) — opt-in, best-effort.
+"""Tests for automatic knowledge capture (B3) — enabled by default, best-effort.
 
-Auto memory is disabled by default; when enabled, substantive user turns are
+Auto memory is enabled by default; when enabled, substantive user turns are
 extracted and written unless the agent already wrote this turn.  Failures are
 logged and swallowed.
 """
@@ -60,16 +60,19 @@ def _mock_services(
 
 
 class TestAutoMemoryGate:
-    """The config gate — default off means existing behaviour is unchanged."""
+    """The config gate — enabled by default; disabled means no-op."""
 
     @pytest.mark.asyncio
-    async def test_disabled_by_default(self) -> None:
+    async def test_enabled_by_default(self, monkeypatch) -> None:
         import agent.nodes as mod
 
-        assert config_mod.config.auto_memory_enabled is False
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        assert config_mod.config.auto_memory_enabled is True
         await mod._maybe_auto_memory(
             _make_state([HumanMessage(content="记住：用 PostgreSQL 存向量")])
         )
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_disabled_does_not_extract_or_write(self, monkeypatch) -> None:
