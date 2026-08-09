@@ -188,6 +188,65 @@ class TestAutoMemorySubstance:
         mock_write.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_real_llm_outage_truncated_extraction_not_written(self, monkeypatch) -> None:
+        """Real extraction pipeline under an LLM outage: extract_summary falls
+        back to a verbatim truncation and entity extraction degrades to [] —
+        _has_substance rejects the artifact and no memory is written.
+
+        Unlike the other substance tests (which mock extract_memory), this
+        runs the real extraction chain, so it guards the *combination* of the
+        degradation fallback and the substance gate.
+        """
+        import agent.nodes as mod
+        from backend.service.extraction import extract_memory
+
+        _set_auto_memory(monkeypatch, True)
+        # A declarative statement that passes the keyword-heuristic gate
+        # (this file's default) and is long enough to be truncated.
+        user_content = (
+            "本次巡检发现记忆检索流水线包含四个阶段：先对查询文本执行 BGE-M3 编码得到 1024 维向量，"
+            "再用 pgvector 的 HNSW 索引做余弦相似度召回，得到候选后用衰变公式 R=e^(-t/S) 加权排序，"
+            "最后把命中摘要拼装为上下文供大模型综合回答，整条链路在单个请求内完成，平均延迟约八百毫秒，"
+            "其中向量编码约占一半耗时，属于当前检索性能的主要瓶颈，后续可考虑更轻量的编码模型。"
+            "此外记忆去重依赖内容哈希和余弦阈值分档，冲突检测失败时降级为补充写入，"
+            "这些决策都需要在评估数据集中反复校准才能保证召回率稳定。"
+        )
+        assert len(user_content) > 200
+
+        class _DownLLM:
+            async def chat(self, messages, **kwargs):  # noqa: ANN001, ANN003, ANN002
+                raise RuntimeError("LLM down")
+            async def chat_json(self, messages, **kwargs):  # noqa: ANN001, ANN003, ANN002
+                raise RuntimeError("LLM down")
+
+        down = _DownLLM()
+        monkeypatch.setattr(
+            "backend.service.extraction.get_llm_provider", lambda: down
+        )
+        monkeypatch.setattr(
+            "backend.service.structured.get_llm_provider", lambda: down
+        )
+        # One attempt, no backoff — keep the degraded extraction fast.
+        monkeypatch.setattr(config_mod.config.llm, "structured_max_attempts", 1)
+        monkeypatch.setattr(config_mod.config.llm, "structured_backoff", 0)
+
+        mock_write = AsyncMock()
+        monkeypatch.setattr(mod, "write_memory", mock_write)
+
+        # The real extraction degrades: verbatim truncation + no entities.
+        extracted = await extract_memory(user_content)
+        assert extracted["summary"] == user_content[:200]
+        assert extracted["entities"] == []
+        assert extracted["relations"] == []
+        assert mod._has_substance(extracted, user_content) is False
+
+        # Full auto-memory path: no memory is written for the artifact.
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content=user_content)])
+        )
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_human_message_is_noop(self, monkeypatch) -> None:
         import agent.nodes as mod
 
