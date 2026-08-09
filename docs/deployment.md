@@ -2,22 +2,27 @@
 
 ## Container
 
-Docker Compose 编排：
+`docker compose up -d` 一键启动完整栈（PostgreSQL + pgvector + EMA 后端 + 前端）：
 
 ```yaml
 services:
-  postgres:      # PostgreSQL + pgvector
+  postgres:      # PostgreSQL + pgvector（含健康检查）
+  backend:       # EMA 单镜像（后端 + 构建产物 frontend/dist，见 Dockerfile）
 ```
 
-当前仅包含数据库容器。后续将加入 backend、frontend 等服务。
+`backend` 使用根目录 `Dockerfile` 构建**单镜像**——FastAPI 同时托管前端构建产物（`backend/main.py` 挂载 `frontend/dist` 并对非 API 路由回退到 index.html），因此不需要单独的 frontend 服务。构建流程：
+
+- **Stage 1**（`node:22-alpine`）：`npm ci && npm run build` 产出 SPA
+- **Stage 2**（`python:3.12-slim`）：装依赖 + 将 BGE-M3 权重烘焙进镜像（离线运行）+ 拷贝前端产物
+
+**torch 分步安装**：`torch==2.13.0+cpu` 只发布在 PyTorch 官方 CPU index（`+cpu` 后缀在 PyPI 不存在），因此 Dockerfile 先用 `--no-deps --index-url https://download.pytorch.org/whl/cpu` 单独装 torch，再用纯 PyPI 装其余依赖——不能合并为一个 `--extra-index-url`，否则 PyTorch index 的旧包快照会污染 charset-normalizer 等共享包的解析。
 
 ## Services
 
 | Service | Image | Status |
 |---------|-------|--------|
 | postgres | pgvector/pgvector:pg16 | 已就绪 |
-| backend | FastAPI + Python 3.12 | 11 个 API 端点已实现，待容器化 |
-| frontend | React + TypeScript + Vite | SPA 已实现（聊天页、记忆库页），待容器化 |
+| backend | `Dockerfile` 构建（后端 + 前端产物单镜像） | 已容器化，`docker compose up -d` 一键启动 |
 
 > **pgvector 版本要求**：向量索引使用 HNSW（`USING hnsw`），需要 **pgvector ≥ 0.5**。上述 `pgvector/pgvector:pg16` 镜像满足要求；若使用发行版自带扩展或自建镜像，请先确认 `SELECT extversion FROM pg_extension WHERE extname = 'vector'` 不低于 0.5，否则 `init_db()` 建索引会失败（旧库的 ivfflat 索引会在启动迁移中被替换为 HNSW）。
 
@@ -27,6 +32,8 @@ services:
 
 - `LLM_*` — LLM provider 配置（含传输韧性 `LLM_RETRY_*` / `LLM_CIRCUIT_BREAKER_*`、结构化重试 `LLM_STRUCTURED_*`、可选故障转移 `LLM_FALLBACK_*`——设置 `LLM_FALLBACK_PROVIDER` 后，主 provider 的可重试失败或熔断会在该次调用上改走备用 provider，留空则关闭）
 - `EMBEDDING_*` — Embedding 模型配置（含可选故障转移 `EMBEDDING_FALLBACK_*`——设置 `EMBEDDING_FALLBACK_PROVIDER` 后，主 provider 失败（重试耗尽/熔断/本地模型损坏）会在该次调用上改走备用 provider，留空则关闭；备用模型维度必须与主模型一致）
+- `EMA_API_KEY` — API 接入认证 key。设置后所有 `/api` 请求须携带 `Authorization: Bearer <EMA_API_KEY>`（见下文 Authentication）；不设置时服务仍可启动，但任何 `/api` 请求都会收到 401
+- `VITE_EMA_API_KEY` — 前端注入的同一 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）；未配置时前端请求不携带认证头（向后兼容）。应与 `EMA_API_KEY` 保持一致
 - `DATABASE_URL` — PostgreSQL 连接
 - `MAX_AGENT_STEPS` — Agent 最大工具调用次数
 - `MAX_AGENT_CONCURRENCY` — 同时运行的交互式 Agent 会话上限（默认 4；超过的 chat 请求返回 503，防止并发 ReAct 循环一起打满 provider 限流）
@@ -34,8 +41,26 @@ services:
 - `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` / `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
 - `USAGE_*` — LLM 用量追踪（`USAGE_ENABLED` / `USAGE_FLUSH_INTERVAL_SECONDS` / `USAGE_BUFFER_MAX` / `USAGE_SAMPLE_RATE`——采样率决定多少成功调用把 prompt/response 文本存入 `llm_usage` 供事后质量分析，error 调用一律采样；`/api/usage/samples` 查询。`USAGE_SAMPLE_RETENTION_DAYS`——采样文本保留天数，到期由 flusher 清空文本列、元数据保留，默认 30）
 - `ALERT_*` — LLM 健康告警（`ALERTS_ENABLED` / `ALERT_ERROR_RATE_THRESHOLD` / `ALERT_CHECK_INTERVAL_SECONDS` / `ALERT_FEISHU_ENABLED`——错误率/结构化失败/熔断超阈值写日志；飞书推送需显式开启）
+- `METRICS_ENABLED` — 运行健康指标（Prometheus，默认 true）。开启后 `GET /metrics` 暴露进程内时间序列：HTTP 请求数与延迟分位数、LLM 调用数/延迟/token、熔断器状态与打开/拒绝计数、Agent 并发槽位占用与 503 拒绝、ReAct 循环步数分布。与 `USAGE_ENABLED` 独立——这是进程本地健康观测，`llm_usage` 是持久化成本行。关闭则 `/metrics` 返回 404
 - `LOG_LEVEL` — 日志级别（DEBUG / INFO / WARNING / ERROR）
 - `APP_ENV` — 运行环境 (development / test / production)
+
+## Authentication
+
+API 接入认证为共享 key（`Authorization: Bearer <EMA_API_KEY>`），实现见 `backend/api/auth.py`，作为全局依赖覆盖所有 `/api` 路由：
+
+```bash
+# 服务端：设置 key 后启动（未设置时所有 /api 请求返回 401）
+EMA_API_KEY=<your-key> uvicorn backend.main:app
+
+# 客户端：请求头携带同一 key
+curl -H "Authorization: Bearer <your-key>" http://localhost:8000/api/memory/stats
+```
+
+- `APP_ENV=test` 豁免该守卫（API 测试套件用 mock，不需 key）。
+- key 比较为常量时间（`secrets.compare_digest`），不匹配返回无细节的通用 401。
+- 前端构建期用 `VITE_EMA_API_KEY` 注入同一 key；开发模式未配置时前端请求不携带认证头（后端返回 401）。
+- 边界：单 key 共享、无用户身份与角色——这是有意取舍（与 ADR 004 不做多租户一致），非生产多用户场景的完整认证方案。
 
 ## Health & Startup
 
@@ -78,6 +103,29 @@ pytest
 ```
 
 ## Production
+
+### 方式 A（推荐）：Docker Compose
+
+```bash
+# 1. 构建镜像（后端 + 前端产物单镜像，约 10-30 分钟，视网络）
+docker compose build
+
+# 2. 启动完整栈（postgres + backend，backend 依赖 postgres 健康检查通过）
+docker compose up -d
+
+# 3. 访问
+#    API + SPA:  http://localhost:8000
+#    OpenAPI:    http://localhost:8000/docs
+
+# 4. 查看日志
+docker compose logs -f backend
+```
+
+- `.env` 通过 `env_file` 注入；compose 内 `DATABASE_URL` 覆盖指向 `postgres` 服务名（`.env` 里的 localhost 不适用容器网络）。
+- BGE-M3 权重已烘焙进镜像，运行期完全离线（`HF_HUB_OFFLINE=1`）。
+- **Linux 容器顺带解决了 Windows 平台的 checkpointer 限制**：`AsyncPostgresSaver`（psycopg 异步）在 Linux 原生可用，对话 checkpoint 落 PostgreSQL；Windows 下降级为 `InMemorySaver` 仅是开发期兼容（见 `backend/main.py`）。
+
+### 方式 B：裸进程（开发 / 调试）
 
 Backend 在生产模式下直接托管前端构建产物（`frontend/dist/`），无需单独运行前端开发服务器：
 
