@@ -164,6 +164,30 @@ class TestAutoMemorySubstance:
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_degraded_truncated_summary_is_not_written(self, monkeypatch) -> None:
+        """LLM-outage extraction (verbatim-truncated summary + no entities)
+        must not be written — it is a failure artifact, not knowledge.
+
+        Regression: with the LLM down, extract_summary falls back to the
+        first 200 chars of the source verbatim and entity extraction
+        degrades to [] — a combination that cleared the old length-only
+        substance gate and polluted the memory store with raw truncations.
+        """
+        import agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        user_content = "记住：用 PostgreSQL 存向量，且连接池超时配置是 30 秒"
+        mock_extract, mock_write = _mock_services(
+            monkeypatch, summary=user_content[:200], entities=[]
+        )
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content=user_content)])
+        )
+        mock_extract.assert_awaited_once()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_no_human_message_is_noop(self, monkeypatch) -> None:
         import agent.nodes as mod
 

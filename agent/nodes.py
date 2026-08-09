@@ -989,9 +989,23 @@ def _write_tool_used_this_turn(messages: list[BaseMessage]) -> bool:
     return False
 
 
-def _has_substance(extracted: dict) -> bool:
-    """Heuristic: does the extracted memory carry real knowledge?"""
+def _has_substance(extracted: dict, source_content: str | None = None) -> bool:
+    """Heuristic: does the extracted memory carry real knowledge?
+
+    ``source_content`` (when supplied) lets the check reject a *degraded*
+    extraction: when the LLM is unavailable, ``extract_summary`` falls back
+    to the first 200 chars of the source verbatim (see
+    ``backend.service.extraction.extract_summary``) and entity/relation
+    extraction degrades to empty lists — a combination that easily clears
+    the length gate below.  A summary that is exactly the verbatim truncation
+    AND carries no entities is a failure artifact, not knowledge; refusing it
+    keeps an LLM outage from polluting the memory store with raw truncations.
+    """
     summary = str(extracted.get("summary") or "").strip()
+    if source_content:
+        stripped = source_content.strip()
+        if summary and summary == stripped[:200] and not extracted.get("entities"):
+            return False
     return len(summary) >= _AUTO_MEMORY_MIN_SUMMARY_LEN or bool(extracted.get("entities"))
 
 
@@ -1053,7 +1067,7 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     except Exception:
         logger.exception("Auto-memory extraction failed for user message")
         return
-    if not _has_substance(extracted):
+    if not _has_substance(extracted, user_content):
         logger.info(
             "Auto-memory: user message carries no substantive knowledge, skipping"
         )
