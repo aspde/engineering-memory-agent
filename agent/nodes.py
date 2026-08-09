@@ -1076,6 +1076,67 @@ async def _maybe_auto_memory(state: AgentState) -> None:
         logger.exception("Auto-memory write failed")
 
 
+# ── Auto-memory background execution ─────────────────────────────────
+# Auto-memory is best-effort knowledge capture that runs AFTER the answer
+# is delivered.  It must not gate the response on 4-7 more LLM calls (gate +
+# summary + entities + relations + embedding + optional conflict check) plus
+# DB writes — a substantive turn previously hung the request for seconds
+# after the SSE stream finished and held the agent-concurrency slot the whole
+# time.  It now runs as a fire-and-forget background task; the context
+# variables (``current_thread_id`` / ``current_trace_id``) are copied into
+# the task at ``create_task``, so the capture keeps its thread/trace linkage.
+#
+# Strong references are held so the event loop can't garbage-collect a task
+# at its first await (same pattern as ``_schedule_normalization`` in
+# ``backend/service/memory.py``).  Concurrency is bounded by a semaphore:
+# every agent run can spawn one capture per turn, and each fires up to 4-7
+# LLM calls — unbounded, concurrent sessions would stack that onto the
+# provider rate limit on top of the interactive traffic.  The per-thread /
+# per-window throttle inside ``_maybe_auto_memory`` limits *writes*; this
+# bounds the *calls*.
+_AUTO_MEMORY_MAX_CONCURRENCY = 4
+_auto_memory_semaphore = asyncio.Semaphore(_AUTO_MEMORY_MAX_CONCURRENCY)
+_auto_memory_tasks: set[asyncio.Task] = set()
+
+
+def _schedule_auto_memory(state: AgentState) -> None:
+    """Fire-and-forget auto-memory capture — never blocks the response.
+
+    Runs ``_maybe_auto_memory`` in a background task so the answer stream is
+    not held open on the capture's LLM + embedding + DB calls.  Failures are
+    logged inside ``_maybe_auto_memory`` (best-effort, swallowed) and never
+    propagate; the task reference is held until it finishes so it can't be
+    garbage-collected at its first await.
+    """
+
+    async def _run() -> None:
+        try:
+            async with _auto_memory_semaphore:
+                await _maybe_auto_memory(state)
+        except Exception:
+            logger.exception("Auto-memory background capture failed")
+        finally:
+            _auto_memory_tasks.discard(asyncio.current_task())
+
+    try:
+        task = asyncio.create_task(_run())
+    except RuntimeError:
+        # No running event loop (e.g. synchronous test context) — skip.
+        logger.debug("No event loop available; skipping auto-memory")
+        return
+    _auto_memory_tasks.add(task)
+
+
+async def wait_auto_memory_tasks() -> None:
+    """Wait for all in-flight auto-memory background tasks to finish.
+
+    Tests call this after exercising a node that schedules auto-memory,
+    before asserting on its side effects; production never needs it.
+    """
+    while _auto_memory_tasks:
+        await asyncio.gather(*list(_auto_memory_tasks), return_exceptions=True)
+
+
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
@@ -1211,7 +1272,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         logger.info(
             "Reusing call_llm output as final answer (no tool results this turn)"
         )
-        await _maybe_auto_memory(state)
+        _schedule_auto_memory(state)
         return {"final_prompt": None, "final_response": str(last.content)}
 
     # ── Harvest context from ToolMessages in the recent conversation ──
@@ -1305,7 +1366,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
 
     aimessage = AIMessage(content=response)
 
-    await _maybe_auto_memory(state)
+    _schedule_auto_memory(state)
 
     return {
         "final_prompt": messages,

@@ -316,6 +316,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "已记住"
+        await mod.wait_auto_memory_tasks()
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -344,6 +345,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "Final."
+        await mod.wait_auto_memory_tasks()
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -365,6 +367,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "已记住"
+        await mod.wait_auto_memory_tasks()
         mock_write.assert_not_awaited()
 
 
@@ -713,3 +716,54 @@ class TestAutoMemoryThrottle:
                 _make_state([HumanMessage(content=content)])
             )
         assert mock_write.await_count == 2  # third crosses the global window cap
+
+
+class TestAutoMemoryBackgrounding:
+    """generate_final_node must NOT block on the auto-memory capture.
+
+    A substantive turn's capture costs 4-7 LLM calls plus embedding + DB
+    writes.  Running it synchronously after the answer stream finished held
+    the request open for seconds and held the agent-concurrency slot.  It now
+    runs as a fire-and-forget task: the node returns before the capture
+    finishes, and the capture still completes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_node_returns_before_slow_capture_completes(self, monkeypatch) -> None:
+        import asyncio
+
+        import agent.nodes as mod
+        from tests._fake_llm import text_stream
+
+        _set_auto_memory(monkeypatch, True)
+
+        mock_extract = AsyncMock(
+            return_value={"summary": "A substantive technical decision.", "entities": [], "relations": []}
+        )
+
+        async def _slow_write(content, source_type="conversation", metadata=None):
+            await asyncio.sleep(0.3)
+            return {"id": "mem-1", "action": "inserted"}
+
+        mock_write = AsyncMock(side_effect=_slow_write)
+        monkeypatch.setattr(mod, "extract_memory", mock_extract)
+        monkeypatch.setattr(mod, "write_memory", mock_write)
+
+        mock_provider = AsyncMock()
+        mock_provider.chat.return_value = "已记住"
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            [
+                HumanMessage(content="记住：用 PostgreSQL 存向量"),
+                AIMessage(content="已记住"),
+            ]
+        )
+
+        result = await mod.generate_final_node(state)
+        assert result["final_response"] == "已记住"
+        # The capture is still in flight — the node returned before it
+        # finished, instead of awaiting all of it synchronously.
+        assert mod._auto_memory_tasks
+        await mod.wait_auto_memory_tasks()
+        mock_write.assert_awaited_once()
