@@ -88,3 +88,19 @@ cd frontend && npm run build
 # 2. Start backend (serves both API and SPA)
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
+
+## 单实例部署约束
+
+**当前版本只支持单进程 / 单副本部署，不支持 `uvicorn --workers N` 或多实例副本。** 以下状态全部保存在进程内，不跨实例共享：
+
+| 状态 | 位置 | 多副本后果 |
+|------|------|-----------|
+| LLM / Embedding 熔断器（开关状态、半开探测） | `backend/shared/resilience.py` | 每个副本各自计数熔断、半开探测互相打散，一个实例熔断不保护其他实例；/health 只反映本副本状态 |
+| auto-memory 节流（per-thread 间隔/上限、进程级滚动窗口） | `agent/nodes.py` | 每个副本独立计数，实际写入频率放大到上限的 N 倍 |
+| LLM usage 缓冲（`_pending`，由后台 flusher 批量入库） | `backend/service/usage.py` | 缓冲只记录本副本的调用；写入 `llm_usage` 的行不重复，但 `USAGE_BUFFER_MAX` 兜底语义按副本独立 |
+| 会话压缩摘要缓存 / in-flight 去重 | `agent/nodes.py` | 跨副本完全失效，每副本各自付一次压缩 LLM 调用（结果一致，仅浪费 token） |
+| 对话 checkpoint（`AsyncPostgresSaver` 连接池） | `backend/service/agent_service.py` | 唯一已持久化的状态；`checkpoints` 表在 PG 中，多副本下对话历史仍一致，但同一 `thread_id` 的并发续写由哪副本处理不可控 |
+
+巡检互斥（`patrol_logs` 中 `status='running'` 的查重）在数据库层，多副本下仍有效；其余状态均受上述约束。
+
+**改造方向**（当需要横向扩展时）：将熔断计数与 auto-memory 节流计数迁到共享存储（PostgreSQL 表或 Redis），usage 缓冲保持内存态但接受 `llm_usage` 行由多副本各自 flush。在此之前，扩容请垂直扩容（加大单实例资源）而非加副本。
