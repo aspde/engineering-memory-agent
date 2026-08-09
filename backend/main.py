@@ -118,7 +118,6 @@ async def lifespan(app: FastAPI):
             status="active" if _feishu_secret else "pending",
         )
     except Exception:
-        import logging
 
         logging.getLogger(__name__).warning(
             "Failed to register connectors — webhook endpoints will be unavailable."
@@ -130,7 +129,6 @@ async def lifespan(app: FastAPI):
 
         await _setup_checkpointer()
     except Exception as _exc:
-        import logging
 
         logging.getLogger(__name__).warning(
             "Failed to setup checkpointer — conversations will be ephemeral. "
@@ -147,7 +145,6 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.to_thread(get_embedding_provider)
             except Exception:
-                import logging
 
                 logging.getLogger(__name__).warning(
                     "Background embedding warmup failed — model will "
@@ -247,7 +244,6 @@ async def lifespan(app: FastAPI):
                     findings to the team channel.  Persistence is handled by
                     the agent's memory tools — no separate DB write needed.
                     """
-                    import logging
 
                     _log = logging.getLogger(__name__)
                     try:
@@ -269,10 +265,8 @@ async def lifespan(app: FastAPI):
                 )
 
             await _scheduler.start()
-            import logging
             logging.getLogger(__name__).info("Patrol scheduler started")
         except Exception:
-            import logging
             logging.getLogger(__name__).warning(
                 "Failed to start patrol scheduler — proactive features disabled."
             )
@@ -284,7 +278,6 @@ async def lifespan(app: FastAPI):
         try:
             await _scheduler.stop()
         except Exception:
-            import logging
             logging.getLogger(__name__).warning("Failed to stop patrol scheduler")
 
     # Cancel any catch-up patrol still in flight (same trade-off as the
@@ -304,7 +297,6 @@ async def lifespan(app: FastAPI):
 
             await flush_usage_buffer()
         except Exception:
-            import logging
 
             logging.getLogger(__name__).warning(
                 "Failed to flush usage buffer on shutdown", exc_info=True
@@ -323,7 +315,6 @@ async def lifespan(app: FastAPI):
 
         await _close_checkpointer()
     except Exception:
-        import logging
 
         logging.getLogger(__name__).warning("Failed to close checkpointer pool")
 
