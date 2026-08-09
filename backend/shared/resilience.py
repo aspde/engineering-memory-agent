@@ -45,6 +45,11 @@ from tenacity import (
 from tenacity.asyncio import AsyncRetrying
 
 from backend.shared.config import config
+from backend.shared.runtime_metrics import (
+    inc_circuit_breaker_opens,
+    inc_circuit_breaker_rejections,
+    set_circuit_breaker_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,12 +150,14 @@ class CircuitBreaker:
                 return
             if now < self._open_until:
                 remaining = self._open_until - now
+                inc_circuit_breaker_rejections(self._name)
                 raise CircuitOpenError(
                     f"Circuit breaker {self._name!r} is open — provider failed "
                     f"{self._failure_threshold}x consecutively; retry in "
                     f"~{remaining:.0f}s"
                 )
             if self._probing and now < self._probe_deadline:
+                inc_circuit_breaker_rejections(self._name)
                 raise CircuitOpenError(
                     f"Circuit breaker {self._name!r} is half-open — a recovery "
                     f"probe is in flight; retry shortly"
@@ -160,6 +167,7 @@ class CircuitBreaker:
             self._failures = 0
             self._probing = True
             self._probe_deadline = now + self._cooldown_seconds
+            set_circuit_breaker_state(self._name, True)  # half-open
 
     def record_success(self) -> None:
         """Reset failure count (consecutive-failure semantics) and close."""
@@ -167,6 +175,7 @@ class CircuitBreaker:
             self._failures = 0
             self._open_until = 0.0
             self._probing = False
+        set_circuit_breaker_state(self._name, False)
 
     def record_failure(self) -> None:
         """Count one retryable failure; trip the breaker at the threshold.
@@ -180,16 +189,19 @@ class CircuitBreaker:
             if self._probing:
                 self._probing = False
                 self._open_until = now + self._cooldown_seconds
+                inc_circuit_breaker_opens(self._name)
                 logger.warning(
                     "Circuit breaker %r probe failed; re-opening for %.0fs",
                     self._name,
                     self._cooldown_seconds,
                 )
+                set_circuit_breaker_state(self._name, True)
                 return
             self._failures += 1
             if self._failures >= self._failure_threshold:
                 self._open_until = now + self._cooldown_seconds
                 self._failures = 0
+                inc_circuit_breaker_opens(self._name)
                 logger.warning(
                     "Circuit breaker %r OPEN after %d consecutive failures; "
                     "failing fast for %.0fs",
@@ -197,6 +209,7 @@ class CircuitBreaker:
                     self._failure_threshold,
                     self._cooldown_seconds,
                 )
+                set_circuit_breaker_state(self._name, True)
 
     def settle_probe_failure(self) -> None:
         """Re-open a half-open probe that failed with a *non-retryable* error.
@@ -217,12 +230,14 @@ class CircuitBreaker:
             self._probing = False
             now = time.monotonic()
             self._open_until = now + self._cooldown_seconds
+            inc_circuit_breaker_opens(self._name)
             logger.warning(
                 "Circuit breaker %r probe failed with a non-retryable error; "
                 "re-opening for %.0fs",
                 self._name,
                 self._cooldown_seconds,
             )
+            set_circuit_breaker_state(self._name, True)
 
 
 _circuit_breakers: dict[str, CircuitBreaker] = {}

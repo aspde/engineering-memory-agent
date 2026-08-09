@@ -318,6 +318,16 @@ class AppConfig:
     usage_sample_retention_days: int = field(
         default_factory=lambda: int(os.getenv("USAGE_SAMPLE_RETENTION_DAYS", "30"))
     )
+    # ── Runtime health metrics (Prometheus) ──────────────────────────
+    # In-memory time series (request latency / status, LLM call count /
+    # latency / tokens, circuit-breaker state, agent concurrency, ReAct step
+    # distribution) exposed at ``GET /metrics`` for Prometheus scraping.
+    # Independent of ``usage_enabled`` — this is process-local health
+    # observability, not the persisted cost rows.  Disabling it drops the
+    # /metrics endpoint's data without touching the llm_usage pipeline.
+    metrics_enabled: bool = field(
+        default_factory=lambda: os.getenv("METRICS_ENABLED", "true").lower() == "true"
+    )
     # ── LLM health alerting ──────────────────────────────────────────
     # A periodic loop inspects a recent window of llm_usage for a high error
     # rate, the in-memory structured-failure counters, and the primary LLM

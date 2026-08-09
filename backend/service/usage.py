@@ -124,8 +124,6 @@ def record_call(
     no-op (the in-memory ``/api/agent/usage`` counters are unaffected).
     """
     try:
-        if not config.usage_enabled:
-            return
         (
             input_tokens,
             output_tokens,
@@ -134,6 +132,26 @@ def record_call(
             cache_creation_tokens,
         ) = extract_tokens(usage)
         latency_ms = round((time.perf_counter() - ctx["t0"]) * 1000)
+
+        # Runtime health metrics — fed from the same event as the persisted
+        # row but independent of usage_enabled (the Prometheus series are
+        # process-local health; the cost pipeline is opt-out separately).
+        try:
+            from backend.shared.runtime_metrics import record_llm_call
+
+            record_llm_call(
+                scenario=scenario,
+                status=status,
+                latency_ms=latency_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+            )
+        except Exception:
+            pass  # metrics must never back-pressure the LLM hot path
+
+        if not config.usage_enabled:
+            return
 
         # Sample prompt/response text for post-hoc quality analysis (see the
         # module note above _SAMPLE_MAX_CHARS).  NULL columns mean "not

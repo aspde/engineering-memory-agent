@@ -34,13 +34,14 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
 from backend.api.router import api_router
 from backend.db import close_db, get_session_factory
 from backend.db.schema import init_db
 from backend.shared.config import config, validate_config
+from backend.shared.runtime_metrics import MetricsMiddleware, render_metrics
 
 # Paths relative to backend/main.py
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
@@ -326,6 +327,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Runtime health metrics: per-route request count / latency / status for
+# every HTTP request (including /health and /metrics themselves).
+app.add_middleware(MetricsMiddleware)
+
 app.include_router(api_router, prefix="/api")
 
 
@@ -383,6 +388,23 @@ async def health_check() -> JSONResponse:
         status_code=200 if db_ok else 503,
         content=payload,
     )
+
+@app.get("/metrics", include_in_schema=False)
+async def metrics_endpoint() -> PlainTextResponse:
+    """Prometheus scrape endpoint — runtime health metrics in text format.
+
+    Serves the in-memory time series (HTTP request latency / status, LLM
+    call count / latency / tokens, circuit-breaker state, agent concurrency,
+    ReAct step distribution) when ``METRICS_ENABLED=true``.  Registered
+    before the SPA catch-all so scraping actually reaches it.
+    """
+    if not config.metrics_enabled:
+        return PlainTextResponse(
+            "Metrics disabled (METRICS_ENABLED=false)",
+            status_code=404,
+        )
+    return PlainTextResponse(render_metrics())
+
 
 # ── SPA static files & fallback ──
 # Mount asset directories so the browser can load JS/CSS/images.

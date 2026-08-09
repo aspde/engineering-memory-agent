@@ -65,8 +65,14 @@ def _try_acquire_agent_slot() -> bool:
     global _agent_active
     with _agent_slots_lock:
         if _agent_active >= config.max_agent_concurrency:
+            from backend.shared.runtime_metrics import inc_agent_slots_rejected
+
+            inc_agent_slots_rejected()
             return False
         _agent_active += 1
+        from backend.shared.runtime_metrics import set_agent_slots_in_use
+
+        set_agent_slots_in_use(_agent_active)
         return True
 
 
@@ -75,6 +81,9 @@ def _release_agent_slot() -> None:
     global _agent_active
     with _agent_slots_lock:
         _agent_active = max(_agent_active - 1, 0)
+        from backend.shared.runtime_metrics import set_agent_slots_in_use
+
+        set_agent_slots_in_use(_agent_active)
 
 
 # ── Trigger offline flags before SentenceTransformer sees them ──────

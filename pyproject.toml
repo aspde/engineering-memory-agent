@@ -25,6 +25,7 @@ dependencies = [
     "python-multipart>=0.0.30",
     "jieba>=0.42",
     "tiktoken>=0.7",
+    "prometheus-client>=0.20",
 ]
 
 [build-system]

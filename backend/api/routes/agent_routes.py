@@ -524,6 +524,15 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
         req.thread_id, (req.message or "")[:60],
     )
 
+    # Observe the ReAct loop length — the live-traffic view of the over-call
+    # signal the offline task eval measures (agent_steps histogram).
+    try:
+        from backend.shared.runtime_metrics import observe_agent_steps
+
+        observe_agent_steps(result.get("step_count") or 0)
+    except Exception:
+        pass
+
     return ChatResponse(
         thread_id=req.thread_id,
         status="completed",
@@ -640,7 +649,10 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                     for node_name, node_state in (event_data or {}).items():
                         yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
 
-                # Send tool traces fetched from the final graph state
+                # Fetch the final graph state once: tool traces for the meta
+                # event, plus the ReAct loop length (agent_steps histogram) —
+                # the same over-call signal the task eval measures on live
+                # traffic.  One checkpointer read serves both.
                 try:
                     final_state = await agent.aget_state(run_config)
                     if final_state and final_state.values:
@@ -649,6 +661,10 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                         )
                         if tool_traces or sources:
                             yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources}, ensure_ascii=False)}\n\n"
+
+                        from backend.shared.runtime_metrics import observe_agent_steps
+
+                        observe_agent_steps(final_state.values.get("step_count") or 0)
                 except Exception:
                     pass
 
