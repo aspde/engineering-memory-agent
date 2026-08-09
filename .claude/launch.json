@@ -11,13 +11,11 @@
       }
     },
     {
-      "name": "streamlit",
-      "runtimeExecutable": ".venv/Scripts/streamlit.exe",
-      "runtimeArgs": ["run", "frontend/app.py", "--server.port", "${PORT}", "--server.headless", "true"],
-      "port": 8501,
-      "env": {
-        "PYTHONPATH": "."
-      }
+      "name": "frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "port": 5173,
+      "cwd": "frontend"
     }
   ]
 }
