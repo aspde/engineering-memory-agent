@@ -16,11 +16,14 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from backend.db import get_session_factory
+from backend.model.llm import LLMStructuredError
 from backend.service.embedding_service import get_embedding_provider
 from backend.service.entity import normalize_entities
 from backend.service.extraction import extract_memory
 from backend.service.prompts import get_prompt
 from backend.shared.config import current_thread_id
+from backend.shared.metrics import record_structured_failure
+from backend.shared.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,11 @@ async def write_memory(
 
     Returns the final memory record (either the newly inserted one or the
     merged existing one).
+
+    Fail-safe: if conflict detection (a correctness-critical structured call)
+    exhausts its retries, the new content is *not* dropped and no contradiction
+    is assumed — it is conservatively written as a supplement, so ingestion
+    and auto-memory never lose content to a detection hiccup.
     """
     provider = get_embedding_provider()
     session_factory = get_session_factory()
@@ -81,8 +89,35 @@ async def write_memory(
     vectors = await provider.embed([extracted["summary"]])
     embedding = vectors[0]
 
-    # 3. Check existing memories for similarity
-    grade, existing = await _find_similar(embedding, session_factory)
+    # 3. Check existing memories for similarity — top-N closest, so a new
+    # memory similar to several existing ones can fan out (merge with the
+    # closest, record the others as supplements) instead of only ever touching
+    # the single nearest row.
+    similar = await _find_similar(embedding, session_factory)
+
+    if similar:
+        grade, existing = similar[0]
+        # Candidates this content also relates to (below merge grade) — their
+        # ids are recorded on the new memory's meta as ``supplements`` so a
+        # multi-match is visible instead of silently favouring the closest.
+        supplement_ids: list[str] = []
+        # Of those supplements, the ones sitting in the conflict-detection band
+        # [CONFLICT_CHECK, MERGE_THRESHOLD) that only the *closest* match ever
+        # runs _detect_conflict against.  They are recorded as supplements but
+        # were never vetted for a contradiction — flagged on the meta as
+        # ``supplements_unchecked`` so readers can tell vetted from unvetted.
+        unchecked_ids: list[str] = []
+        for sim, row in similar[1:]:
+            rid = str(row["id"])
+            if sim < SUPPLEMENT_THRESHOLD or rid == str(existing["id"]):
+                continue
+            supplement_ids.append(rid)
+            if CONFLICT_CHECK <= sim < MERGE_THRESHOLD:
+                unchecked_ids.append(rid)
+    else:
+        grade, existing = 0.0, None
+        supplement_ids = []
+        unchecked_ids = []
 
     logger.info(
         "Similarity grade: %s (thresholds: merge=%.2f, conflict=%.2f, supplement=%.2f)",
@@ -92,56 +127,98 @@ async def write_memory(
         SUPPLEMENT_THRESHOLD,
     )
 
+    # Fan-out metadata — when the content supplements several related memories,
+    # carry their ids on the meta so the merge/supplement writes record them.
+    write_meta = metadata or {}
+    if supplement_ids:
+        write_meta = {**write_meta, "supplements": supplement_ids}
+    if unchecked_ids:
+        write_meta = {**write_meta, "supplements_unchecked": unchecked_ids}
+
     # 4. Act on the grade
     if grade >= MERGE_THRESHOLD and existing:
-        return await _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash)
+        return await _merge_memory(existing, extracted, embedding, source_type, write_meta, content_hash)
 
     elif grade >= CONFLICT_CHECK and existing:
-        has_conflict = await _detect_conflict(existing, extracted)
+        try:
+            has_conflict = await _detect_conflict(existing, extracted)
+        except (LLMStructuredError, CircuitOpenError):
+            # Conflict detection failed — either structured output exhausted
+            # its retries (LLMStructuredError) or the circuit breaker is open
+            # and chat_structured failed fast (CircuitOpenError).  Fail safe:
+            # do NOT assume a contradiction — that would either drop the write
+            # (ingestion/auto-memory swallow the error) or misroute it to HITL
+            # for a non-conflict — and do not write the new content unmarked
+            # into the conflicting memory either.
+            # Recording it as a supplement conservatively keeps the content
+            # without asserting it contradicts anything.
+            logger.exception(
+                "Conflict detection failed for memory %s — writing as supplement (fail-safe)",
+                existing["id"],
+            )
+            record_structured_failure("conflict_detection")
+            return await _supplement_memory(existing, extracted, embedding, source_type, write_meta, content_hash)
         if has_conflict:
-            return await _mark_conflict(existing, extracted, embedding, source_type, metadata, content_hash)
+            return await _mark_conflict(existing, extracted, embedding, source_type, write_meta, content_hash)
         # Close but not contradictory — supplement
-        return await _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash)
+        return await _supplement_memory(existing, extracted, embedding, source_type, write_meta, content_hash)
 
     elif grade >= SUPPLEMENT_THRESHOLD and existing:
-        return await _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash)
+        return await _supplement_memory(existing, extracted, embedding, source_type, write_meta, content_hash)
 
     # 5. Unrelated — insert as new
-    return await _insert_memory(extracted, embedding, source_type, metadata, content_hash)
+    return await _insert_memory(extracted, embedding, source_type, write_meta, content_hash)
 
 
-async def _find_similar(embedding, session_factory):
-    """Find the most similar existing memory and its similarity grade."""
+async def _find_similar(embedding, session_factory, limit: int = 3) -> list[tuple[float, dict]]:
+    """Find up to *limit* similar existing memories, closest first.
+
+    Returns a list of ``(similarity, row)`` tuples ordered by similarity
+    descending — empty when nothing clears the supplement threshold.  The
+    first entry is the closest match used for merge/conflict grading; the
+    rest let ``write_memory`` fan out, so a new memory similar to several
+    existing ones supplements them all instead of only ever touching the
+    single nearest row.
+    """
     async with session_factory() as session:
         result = await session.execute(
             text(
                 """\
                 SELECT id, summary, entities, relations, recall_count, decay_factor,
+                       meta, content_hash,
                        1 - (embedding <=> :vec ::vector) AS similarity
                 FROM memories
                 WHERE embedding IS NOT NULL
                   AND deleted_at IS NULL
                   AND 1 - (embedding <=> :vec ::vector) > :threshold
                 ORDER BY embedding <=> :vec ::vector
-                LIMIT 1
+                LIMIT :limit
                 """
             ),
-            {"vec": str(embedding), "threshold": SUPPLEMENT_THRESHOLD},
+            {"vec": str(embedding), "threshold": SUPPLEMENT_THRESHOLD, "limit": limit},
         )
-        row = result.fetchone()
-        if row is None:
-            return 0.0, None
-        return row.similarity, dict(row._mapping)
+        rows = result.fetchall()
+        if not rows:
+            return []
+        return [(row.similarity, dict(row._mapping)) for row in rows]
 
 
 async def _find_by_content_hash(content_hash: str, session_factory) -> dict | None:
-    """Find a non-deleted memory already stored for this exact content hash."""
+    """Find a non-deleted memory already stored for this exact content hash.
+
+    Matches both the live ``content_hash`` column and any hash recorded in
+    ``meta.prior_hashes`` — merge/overwrite rewrite the live hash but keep the
+    superseded ones there, so re-ingesting the original content still hits the
+    idempotency gate instead of re-running extract → grade → merge (version
+    drift).
+    """
     async with session_factory() as session:
         result = await session.execute(
             text(
                 """\
                 SELECT id, summary FROM memories
-                WHERE content_hash = :hash AND deleted_at IS NULL
+                WHERE deleted_at IS NULL
+                  AND (content_hash = :hash OR meta->'prior_hashes' ? :hash)
                 LIMIT 1
                 """
             ),
@@ -154,10 +231,12 @@ async def _find_by_content_hash(content_hash: str, session_factory) -> dict | No
 async def _detect_conflict(existing: dict, extracted: dict) -> bool:
     """Ask the LLM whether *extracted* contradicts *existing*.
 
-    Structured output is enforced and retried.  This is correctness-critical:
-    on persistent failure the conflict is *not* silently assumed away.
-    :class:`LLMStructuredError` propagates, so ``write_memory`` fails rather
-    than storing a possibly-contradictory memory unmarked.
+    Structured output is enforced and retried.  On persistent failure
+    :class:`LLMStructuredError` propagates; when the circuit breaker is open
+    :class:`CircuitOpenError` fails fast and propagates too.  ``write_memory``
+    catches both and degrades to a supplement write: detection failed ⇒ never
+    assume a contradiction (which would drop or misroute the content), but do
+    not write the new content unmarked into the conflicting memory either.
     """
     from backend.service.structured import chat_structured
 
@@ -180,6 +259,42 @@ _CONFLICT_SCHEMA = {
     "required": ["conflict"],
     "properties": {"conflict": {"type": "boolean"}},
 }
+
+
+def _parse_meta(value: Any) -> dict[str, Any]:
+    """Tolerate JSONB meta forms (parsed dict, raw JSON string, or None)."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _record_prior_hash(meta: dict[str, Any], content_hash: str | None) -> dict[str, Any]:
+    """Return *meta* with *content_hash* appended to ``prior_hashes`` (idempotent).
+
+    Merge/overwrite rewrite a memory's live ``content_hash``; the superseded
+    hash is preserved here so ``_find_by_content_hash`` still matches it —
+    re-ingesting the original content is gated as a duplicate instead of
+    drifting the version through extract → grade → merge again.
+    """
+    if not content_hash:
+        return meta
+    prior = meta.get("prior_hashes")
+    if isinstance(prior, str):
+        prior = [prior]
+    prior = [str(h) for h in (prior or [])]
+    if content_hash not in prior:
+        prior.append(content_hash)
+    meta = dict(meta)
+    meta["prior_hashes"] = prior
+    return meta
 
 
 def _merge_entities(existing_entities, new_entities) -> list[dict]:
@@ -259,19 +374,14 @@ async def _merge_memory(existing, extracted, embedding, source_type, metadata, c
     try:
         async with session_factory() as session:
             # Merge metadata — new keys overwrite existing, preserving old keys
-            existing_meta: dict[str, Any] = {}
-            if existing.get("meta"):
-                if isinstance(existing["meta"], str):
-                    try:
-                        existing_meta = json.loads(existing["meta"])
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                elif isinstance(existing["meta"], dict):
-                    existing_meta = existing["meta"]
+            existing_meta = _parse_meta(existing.get("meta"))
             tid = current_thread_id.get("")
             if tid:
                 metadata = (metadata or {}) | {"thread_id": tid}
             merged_meta = existing_meta | (metadata or {})
+            # Preserve the superseded content hash so re-ingestion of the
+            # original content is still gated as a duplicate (idempotency).
+            merged_meta = _record_prior_hash(merged_meta, existing.get("content_hash"))
 
             await session.execute(
                 text(
@@ -367,6 +477,13 @@ async def _mark_conflict(existing, extracted, embedding, source_type, metadata, 
 _NORMALIZATION_MAX_CONCURRENCY = 4
 _normalization_semaphore = asyncio.Semaphore(_NORMALIZATION_MAX_CONCURRENCY)
 
+# Strong references to in-flight normalisation tasks.  ``asyncio.create_task``
+# is not enough on its own: the event loop does not keep a strong reference,
+# so a fire-and-forget task can be garbage-collected at its first await and
+# the memory_entities link sync silently vanishes.  Holding the task here
+# extends its lifetime until it finishes, then the ``finally`` below drops it.
+_normalization_tasks: set[asyncio.Task] = set()
+
 
 def _schedule_normalization(memory_id: str, entities: list[dict]) -> None:
     """Fire-and-forget entity normalisation — never blocks the caller.
@@ -383,25 +500,37 @@ def _schedule_normalization(memory_id: str, entities: list[dict]) -> None:
     """
 
     async def _run() -> None:
-        async with _normalization_semaphore:
-            try:
+        try:
+            async with _normalization_semaphore:
                 await normalize_entities(memory_id, entities)
-            except Exception:
-                logger.exception("Entity normalisation failed for memory %s", memory_id)
+        except Exception:
+            logger.exception("Entity normalisation failed for memory %s", memory_id)
+        finally:
+            _normalization_tasks.discard(asyncio.current_task())
 
     try:
-        asyncio.create_task(_run())
+        task = asyncio.create_task(_run())
     except RuntimeError:
         # No running event loop (e.g. synchronous test context) — skip.
         logger.debug("No event loop available; skipping entity normalisation for %s", memory_id)
+        return
+    _normalization_tasks.add(task)
 
 
 async def _supplement_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Insert new memory, linked to existing as a supplement."""
-    enriched_meta = (metadata or {}) | {
-        "supplements": str(existing["id"]),
-        "parent_summary": existing["summary"],
-    }
+    enriched_meta = dict(metadata or {})
+    # Fan-out: write_memory may list several related memories under
+    # ``supplements`` (a new memory similar to multiple existing ones); the
+    # closest / primary parent goes first in the list.
+    related = enriched_meta.get("supplements")
+    if isinstance(related, str):
+        related = [related]
+    related = [str(x) for x in (related or [])]
+    if str(existing["id"]) not in related:
+        related.insert(0, str(existing["id"]))
+    enriched_meta["supplements"] = related
+    enriched_meta["parent_summary"] = existing["summary"]
     return await _insert_memory(extracted, embedding, source_type, enriched_meta, content_hash)
 
 
@@ -418,7 +547,7 @@ async def _insert_memory(extracted, embedding, source_type, metadata, content_ha
                 """\
                 INSERT INTO memories (source_type, summary, entities, relations, embedding, meta, content_hash)
                 VALUES (:source_type, :summary, :entities, :relations, :embedding, :meta, :content_hash)
-                ON CONFLICT (content_hash) DO NOTHING
+                ON CONFLICT (content_hash) WHERE deleted_at IS NULL DO NOTHING
                 RETURNING id
                 """
             ),
@@ -488,6 +617,23 @@ async def resolve_conflict(
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
 
     elif resolution == "overwrite":
+        # Read the existing meta + content_hash before rewriting, so the
+        # resolution preserves the memory's provenance (thread_id, commit_id,
+        # source, ...) instead of wiping it, and records the replaced hash in
+        # prior_hashes (idempotency gate) — same semantics as _merge_memory.
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text("SELECT meta, content_hash FROM memories WHERE id = :id"),
+                    {"id": existing_id},
+                )
+            ).fetchone()
+            existing_meta = _parse_meta(row[0]) if row else {}
+            old_content_hash = row[1] if row else None
+
+        merged_meta = existing_meta | (metadata or {})
+        merged_meta = _record_prior_hash(merged_meta, old_content_hash)
+
         try:
             async with session_factory() as session:
                 await session.execute(
@@ -510,7 +656,7 @@ async def resolve_conflict(
                         "entities": json.dumps(extracted.get("entities") or [], ensure_ascii=False),
                         "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
                         "embedding": str(embedding),
-                        "meta": json.dumps(metadata or {}),
+                        "meta": json.dumps(merged_meta),
                         "content_hash": content_hash,
                     },
                 )
@@ -534,6 +680,9 @@ async def resolve_conflict(
                 "resolution": "overwrite",
                 "summary": winner["summary"],
             }
+        # Sync the memory_entities link table for the overwritten content's
+        # entities (same fire-and-forget as _insert_memory/_merge_memory).
+        _schedule_normalization(str(existing_id), extracted.get("entities") or [])
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "overwrite"}
 
     elif resolution == "merge":
@@ -541,7 +690,10 @@ async def resolve_conflict(
 
         async with session_factory() as session:
             result = await session.execute(
-                text("SELECT summary, entities, relations FROM memories WHERE id = :id"),
+                text(
+                    "SELECT summary, entities, relations, meta, content_hash "
+                    "FROM memories WHERE id = :id"
+                ),
                 {"id": existing_id},
             )
             row = result.fetchone()
@@ -553,10 +705,20 @@ async def resolve_conflict(
                 existing_relations: list[dict] = (
                     json.loads(row[2]) if isinstance(row[2], str) else (row[2] or [])
                 )
+                existing_meta = _parse_meta(row[3])
+                old_content_hash = row[4]
             else:
                 existing_summary = extracted["summary"]
                 existing_entities = []
                 existing_relations = []
+                existing_meta = {}
+                old_content_hash = None
+
+        # Merge metadata — preserve the existing memory's provenance, add the
+        # conflict tags, and keep the superseded content hash for the
+        # idempotency gate (same semantics as _merge_memory).
+        merged_meta = existing_meta | (metadata or {})
+        merged_meta = _record_prior_hash(merged_meta, old_content_hash)
 
         try:
             llm = get_llm_provider()
@@ -607,7 +769,7 @@ async def resolve_conflict(
                         "entities": json.dumps(merged_entities, ensure_ascii=False),
                         "relations": json.dumps(merged_relations, ensure_ascii=False),
                         "embedding": str(merged_embedding),
-                        "meta": json.dumps(metadata or {}),
+                        "meta": json.dumps(merged_meta),
                         "content_hash": content_hash,
                     },
                 )
@@ -629,6 +791,9 @@ async def resolve_conflict(
                 "resolution": "merge",
                 "summary": winner["summary"],
             }
+        # Sync the memory_entities link table for the merged entities (same
+        # fire-and-forget as _merge_memory).
+        _schedule_normalization(str(existing_id), merged_entities)
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "merge"}
 
     elif resolution == "keep_both":

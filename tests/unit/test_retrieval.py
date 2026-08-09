@@ -205,6 +205,31 @@ class TestSparseSearch:
         assert all(r["rank"] > 0.0 for r in result)
 
     @pytest.mark.asyncio
+    async def test_overlap_fetch_is_limit_capped(self) -> None:
+        """Stage-1 overlap fetch carries a LIMIT so a hot token can't pull
+        an unbounded hit set into Python."""
+        from backend.service import retrieval as mod
+
+        rows = [_row("c1", "pgvector 向量检索 chunk")]
+        mock_session = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.__iter__ = lambda self: iter(rows)
+        mock_session.execute.return_value = mock_result
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        with patch.object(
+            mod, "get_session_factory", return_value=MagicMock(return_value=ctx)
+        ):
+            await mod.sparse_search("pgvector 向量检索", top_k=5)
+
+        # First execute is the overlap fetch (id + tokens); it must carry a
+        # candidate_limit bound, not pull the whole match set.
+        first_sql, params = mock_session.execute.call_args_list[0][0]
+        assert "LIMIT" in str(first_sql)
+        assert params["candidate_limit"] == max(5 * 4, 20)
+
+    @pytest.mark.asyncio
     async def test_ranking_descending_by_jaccard(self) -> None:
         """Chunks with higher token overlap rank higher."""
         from backend.service import retrieval as mod
@@ -377,6 +402,22 @@ class TestRetrieveHybrid:
         results = await mod.retrieve_hybrid("query", top_k=5)
         assert results == []
 
+    @pytest.mark.asyncio
+    async def test_dense_recall_applies_recall_threshold(self, monkeypatch) -> None:
+        """The dense recall must pass ``_RECALL_THRESHOLD`` to vector_search
+        so garbage queries (cosine ≈ 0) are filtered before RRF ranking."""
+        from backend.service import retrieval as mod
+
+        vs = AsyncMock(return_value=[])
+        monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
+        monkeypatch.setattr(mod, "vector_search", vs)
+        monkeypatch.setattr(mod, "sparse_search", AsyncMock(return_value=[]))
+
+        await mod.retrieve_hybrid("query", top_k=5)
+
+        assert vs.await_count == 1
+        assert vs.await_args.kwargs["threshold"] == mod._RECALL_THRESHOLD
+
 
 class TestRetrieve:
     """``retrieve`` ranks by raw recall similarity by default; cross-encoder
@@ -458,6 +499,21 @@ class TestRetrieve:
         self._patch_sources(monkeypatch, [])
         results = await mod.retrieve("query", top_k=5)
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_vector_recall_applies_recall_threshold(self, monkeypatch) -> None:
+        """``retrieve`` must pass ``_RECALL_THRESHOLD`` to vector_search so a
+        junk query returning only near-zero cosine matches yields no results."""
+        from backend.service import retrieval as mod
+
+        vs = AsyncMock(return_value=[])
+        monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
+        monkeypatch.setattr(mod, "vector_search", vs)
+
+        await mod.retrieve("query", top_k=5)
+
+        assert vs.await_count == 1
+        assert vs.await_args.kwargs["threshold"] == mod._RECALL_THRESHOLD
 
 
 class TestQueryMemoriesDecayBatch:
@@ -591,6 +647,30 @@ class TestQueryMemoriesDecayBatch:
 
         assert [r["id"] for r in results] == ["m1"]
         decay_mod.update_decay_batch.assert_awaited_once_with(["m1"])
+
+    @pytest.mark.asyncio
+    async def test_repeat_query_hits_embed_query_cache(self, monkeypatch) -> None:
+        """query_memories must embed through ``embed_query``'s LRU cache — a
+        repeat query (SSE reconnect / re-ask / eval re-run) skips the provider
+        after the first call."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        mod.clear_embed_query_cache()
+        provider = MagicMock()
+        provider.embed = AsyncMock(return_value=[[0.1]])
+        monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
+        cands = [self._candidate("m1", 0.8)]
+        monkeypatch.setattr(mod, "search_memories", AsyncMock(return_value=cands))
+        monkeypatch.setattr(
+            decay_mod, "update_decay_batch", AsyncMock(return_value={"m1": 0.99})
+        )
+
+        await mod.query_memories("同一问题", top_k=5)
+        await mod.query_memories("同一问题", top_k=5)
+
+        # Both searches shared one provider call — the second came from cache.
+        provider.embed.assert_awaited_once()
 
 
 class TestRetrieveMultiQuery:

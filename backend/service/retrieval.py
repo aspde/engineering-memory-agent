@@ -31,6 +31,14 @@ _ALLOWED_FILTER_COLS = {"document_id", "chunk_index"}
 # Shared by every read path so the threshold stays tunable in one place.
 _RERANK_FLOOR = 0.15
 
+# Recall-stage floor for the vector recall in ``retrieve`` / ``retrieve_hybrid``:
+# a low, conservative cutoff that drops obviously-irrelevant garbage queries
+# before ranking/reranking.  Deliberately below ``_RERANK_FLOOR`` (0.15) — the
+# recall stage must never prune a result the (optional) rerank stage could save.
+# ``vector_search`` keeps its own default of 0.0 for raw callers; the two read
+# paths that return to users pass this explicitly.
+_RECALL_THRESHOLD = 0.1
+
 # Reciprocal-rank fusion constant for the skip_rerank hybrid path — the
 # standard k=60 from Cormack et al.  RRF fuses *ranks* rather than raw
 # scores, so dense cosine and sparse jaccard never have to be normalised
@@ -407,7 +415,9 @@ async def retrieve(
             and drop results below the relevance floor.
     """
     query_vec = await embed_query(query)
-    candidates = await vector_search(query_vec, top_k=max(top_k * 4, 20))
+    candidates = await vector_search(
+        query_vec, top_k=max(top_k * 4, 20), threshold=_RECALL_THRESHOLD
+    )
 
     if not candidates:
         return []
@@ -439,6 +449,15 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
     #      (PG's ``&`` array-intersection operator is int[]-only, so inter
     #      cardinality can't be computed DB-side for text[]);
     #   2. fetch full rows for the surviving top-k by primary key.
+    # A LIMIT bounds stage 1: a hot token (or a query full of hot tokens) could
+    # otherwise match a large share of the table and pull it all into Python.
+    # Jaccard is then scored only on this capped candidate set — an acceptable
+    # conservative cap, since scoring happens Python-side anyway and the
+    # candidate window (top_k * 4) is a generous multiple of the requested k.
+    # ``ORDER BY id`` makes that capped set deterministic: without it the rows
+    # PG happens to return first (e.g. heap order on a hot token) could vary
+    # between runs, giving non-reproducible results.
+    candidate_limit = max(top_k * 4, 20)
     session_factory = get_session_factory()
     async with session_factory() as session:
         result = await session.execute(
@@ -447,9 +466,11 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict[str, Any]]:
                 SELECT id, tokens
                 FROM chunks
                 WHERE tokens && :q_tokens ::text[]
+                ORDER BY id
+                LIMIT :candidate_limit
                 """
             ),
-            {"q_tokens": list(q_tokens)},
+            {"q_tokens": list(q_tokens), "candidate_limit": candidate_limit},
         )
         scored: list[tuple[float, Any]] = []  # (jaccard, chunk_id)
         for row in result:
@@ -515,7 +536,9 @@ async def retrieve_hybrid(
     signal, not an absolute similarity measure.
     """
     query_vec = await embed_query(query)
-    dense = await vector_search(query_vec, top_k=max(top_k * 4, 20))
+    dense = await vector_search(
+        query_vec, top_k=max(top_k * 4, 20), threshold=_RECALL_THRESHOLD
+    )
     sparse = await sparse_search(query, top_k=max(top_k * 4, 20))
 
     # Rank position within each list — RRF fuses *ranks* so the two
@@ -605,7 +628,12 @@ async def retrieve_multi_query(
     # Multi-query union, dedup by chunk id.
     seen: dict[str, dict[str, Any]] = {}
     for q, vec in zip(queries, vectors):
-        results = await vector_search(vec, top_k=max(top_k * 2, 10))
+        # Same _RECALL_THRESHOLD gate as retrieve / retrieve_hybrid: a
+        # rewritten variation must still clear the low recall floor before
+        # its hits enter the union.
+        results = await vector_search(
+            vec, top_k=max(top_k * 2, 10), threshold=_RECALL_THRESHOLD
+        )
         for r in results:
             cid = str(r["id"])
             if cid not in seen:
@@ -647,9 +675,7 @@ async def query_memories(
 
     t0 = time.perf_counter()
 
-    provider = get_embedding_provider()
-    vectors = await provider.embed([query])
-    query_vec = vectors[0]
+    query_vec = await embed_query(query)
     t_embed = time.perf_counter()
 
     candidates = await search_memories(query_vec, top_k=max(top_k * 4, 20), threshold=threshold)

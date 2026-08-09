@@ -139,3 +139,24 @@ class TestModuleReExports:
         assert not hasattr(memory_mod, "_MERGE_PROMPT")
         assert not hasattr(memory_mod, "_CONFLICT_PROMPT")
         assert not hasattr(qr_mod, "_REWRITE_PROMPT")
+
+
+class TestInjectionIsolationDeclarations:
+    """Patrol/scenario templates run with their own system message
+    (``has_system=True``) and replace agent.system entirely, so each must
+    carry its own untrusted-data isolation declaration — the same defence
+    agent.system provides for chat (see ``agent.system`` lines ~116-121)."""
+
+    def test_patrol_and_scenario_prompts_declare_untrusted_data(self) -> None:
+        from backend.service import prompts as mod
+
+        targets = [
+            k for k in mod._PROMPTS
+            if k.startswith("patrol.") or k.startswith("scenario.")
+        ]
+        assert targets, "expected patrol/scenario prompts to be registered"
+        for key in targets:
+            text = mod._PROMPTS[key].text
+            assert "不可信" in text, f"{key} missing untrusted-data declaration"
+            assert "忽略" in text, f"{key} missing ignore-instructions declaration"
+            assert "绝不执行" in text, f"{key} missing never-execute declaration"

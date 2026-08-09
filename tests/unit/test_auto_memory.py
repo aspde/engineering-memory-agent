@@ -16,6 +16,17 @@ from agent.state import AgentState
 from backend.shared import config as config_mod
 
 
+@pytest.fixture(autouse=True)
+def _llm_gate_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run most auto-memory tests through the keyword-heuristic gate.
+
+    AUTO_MEMORY_LLM_GATE now defaults on; these tests exercise the zero-cost
+    keyword mode (gate off) so they stay hermetic.  ``TestAutoMemoryLlmGate``
+    re-enables the gate and mocks the judge instead.
+    """
+    monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", False)
+
+
 def _make_state(messages: list) -> AgentState:
     return AgentState(
         messages=messages,
@@ -358,7 +369,8 @@ class TestAutoMemoryWiring:
 
 
 class TestAutoMemoryQualityGate:
-    """Declarative-knowledge gate — questions, requests, and filler skip
+    """Declarative-knowledge gate in keyword-heuristic mode
+    (AUTO_MEMORY_LLM_GATE=false) — questions, requests, and filler skip
     before any LLM call is made."""
 
     @pytest.mark.asyncio
@@ -455,11 +467,15 @@ class TestAutoMemoryQualityGate:
 
 
 class TestAutoMemoryLlmGate:
-    """AUTO_MEMORY_LLM_GATE=true adds one LLM call to the quality gate —
-    a turn that passes the keyword heuristic is judged again before extraction."""
+    """AUTO_MEMORY_LLM_GATE=true (the default) adds one LLM call to the
+    quality gate — a fast-path-passing turn is judged again before extraction."""
 
-    def test_gate_off_by_default(self) -> None:
-        assert config_mod.config.auto_memory_llm_gate is False
+    def test_gate_on_by_default(self, monkeypatch) -> None:
+        """The LLM gate is the production default; false opts back to keywords."""
+        monkeypatch.delenv("AUTO_MEMORY_LLM_GATE", raising=False)
+        from backend.shared.config import AppConfig
+
+        assert AppConfig().auto_memory_llm_gate is True
 
     @pytest.mark.asyncio
     async def test_gate_worthy_true_still_extracts(self, monkeypatch) -> None:
@@ -541,6 +557,58 @@ class TestAutoMemoryLlmGate:
         sent = mock_provider.chat_json.call_args.args[0][0]["content"]
         assert "{{ctx}}" in sent  # content braces escaped for .format()
         assert '{"worthy": true}' in sent  # template's JSON example stays intact
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_complex_declarative_with_question_marker_captured(
+        self, monkeypatch
+    ) -> None:
+        """The fast path does NOT kill a declarative statement that carries a
+        question marker — the LLM gate judges it worthy and capture proceeds.
+
+        Under the old keyword heuristic (gate off) this message would have
+        been rejected for containing 为什么/？ — a false negative this gate
+        fixes."""
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": true}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state(
+                [HumanMessage(content="为什么 pgvector 索引会失效？后来查明是没建索引导致全表扫描")]
+            )
+        )
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_long_chatty_filler_rejected_by_gate(self, monkeypatch) -> None:
+        """Long filler that passes the fast path is rejected by the LLM gate.
+
+        "今天天气不错…" carries no question marker, so the keyword heuristic
+        let it through to extraction — a false positive the gate fixes."""
+        import agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state(
+                [HumanMessage(content="今天天气真不错啊，阳光很温暖，我心情很好")]
+            )
+        )
         mock_extract.assert_not_awaited()
         mock_write.assert_not_awaited()
 

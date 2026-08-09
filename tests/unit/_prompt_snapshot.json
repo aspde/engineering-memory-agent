@@ -8,8 +8,8 @@
     "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b"
   },
   "agent.system": {
-    "version": "3",
-    "sha256": "a7520b68895232af41fe26a3e5b8bdcd4c7ea2d456d67589b3eb85640dfac448"
+    "version": "4",
+    "sha256": "fe84c4860dd9c2572c6993f05123f724e7bf737818ef0c40e9b35583e49b7c68"
   },
   "extraction.entities": {
     "version": "1",
@@ -32,39 +32,39 @@
     "sha256": "879bcc0e26baddfefb07efc4e99ab4aedece8d2d3976c9cc2cdf80c1eb9664e5"
   },
   "patrol.ci_failure": {
-    "version": "1",
-    "sha256": "c59453b7d4660a426fddcafb498954aa11eccbd99738d278f7bd24803adb14dd"
+    "version": "2",
+    "sha256": "60a826b86a906508f8b5a9b62813d05cf471ceb94dd245a4f3dda64a3fb63508"
   },
   "patrol.daily": {
-    "version": "1",
-    "sha256": "14920da666875adef7975d634a57a2cf17eeb708028fd8a7655f288d70d69d21"
+    "version": "2",
+    "sha256": "7089907f310ca098065c8417f7e4eea176300cc4d1405798600a727d8bcf1e19"
   },
   "patrol.jira_resolved": {
-    "version": "1",
-    "sha256": "7d31ec666862cdf7679e26498fe623c8d0a28af025bc0ac0ee083fb6e07eea76"
+    "version": "2",
+    "sha256": "7581fcad8bbb3199305eb8ba73b475f4836d65c5f8138e780bd94b4e53776102"
   },
   "patrol.weekly": {
-    "version": "1",
-    "sha256": "8a43b8519f6f978eb1da3e7569ebea968e064e26391aadb94efa7174eaa6dd9b"
+    "version": "2",
+    "sha256": "0621fc793846e0fdd91191123c1c7b414e102ee5837f6f53131443dfa82a168f"
   },
   "query_rewrite": {
     "version": "1",
     "sha256": "9969cc4e3006b01310a6cf2416a64913910086d2fae1baeba24f25574bede9a1"
   },
   "scenario.code_review": {
-    "version": "1",
-    "sha256": "0168ee825bcd072fd8ee1344b1d9b94753d2c292e26e1e73060f055296f5bf6a"
+    "version": "2",
+    "sha256": "8586ceb622faebfbac5f8274b6b04523ce0ace12a5afd8311f038332fb423107"
   },
   "scenario.onboarding": {
-    "version": "1",
-    "sha256": "6510f19152c3667cc54078a9e7cfaf9629756b2dac41952eee97628973a8bbca"
+    "version": "2",
+    "sha256": "5a90e5d2b72e2e9a698aac910ba7d3a2775f3471cd7507e08267690937c93963"
   },
   "scenario.postmortem": {
-    "version": "1",
-    "sha256": "4b3461cf885503da36c5f70d6e3207786dd91bda7ab426ec68b211e0768e58a9"
+    "version": "2",
+    "sha256": "51ccb7dfb6e02f21b7474fbff80a210b36b81be2f7ae38f515d127758fee350c"
   },
   "scenario.tech_debt": {
-    "version": "1",
-    "sha256": "f2856899a916c817d4a5e0d677aa3d2ac7e8b0ea8f08bf7da6451ca3b50679d3"
+    "version": "2",
+    "sha256": "5ef685175da8dc104f8201b264b0d6ab7cacfd29c823a06454e47f395e5cc55c"
   }
 }

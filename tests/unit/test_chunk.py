@@ -54,3 +54,33 @@ def bar():
         code = "".join(lines)
         chunks = chunk_code(code, max_lines=50)
         assert len(chunks) >= 2
+
+
+class TestHardSplitFallback:
+    """A run with no usable separator must never overflow max_size.
+
+    Regression guard for the bug where a single token/word longer than
+    ``max_size`` (with no separator left to recurse into) was emitted as an
+    oversized chunk — the fallback hard-cuts it into fixed-size pieces.
+    """
+
+    def test_no_space_run_split_to_max_size(self) -> None:
+        text = "A" * 2000
+        chunks = chunk_text(text, max_size=512, overlap=0)
+        assert len(chunks) >= 4  # 2000 chars / 512 → at least 4 pieces
+        assert all(len(c) <= 512 for c in chunks)
+        # Hard-cut preserves every character (no separator to drop).
+        assert "".join(chunks) == text
+
+    def test_oversized_token_with_overlap_stays_bounded(self) -> None:
+        # Default overlap=64 must not push a hard-cut chunk past max_size.
+        chunks = chunk_text("A" * 2000, max_size=512)
+        assert len(chunks) > 0
+        assert all(len(c) <= 512 for c in chunks)
+
+    def test_oversized_word_mixed_with_separators(self) -> None:
+        # A normal phrase followed by a single token far longer than max_size.
+        text = "正常句子内容 " + "B" * 1000
+        chunks = chunk_text(text, max_size=512, overlap=0)
+        assert all(len(c) <= 512 for c in chunks)
+        assert "".join(chunks) == text

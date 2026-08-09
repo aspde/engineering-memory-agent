@@ -26,6 +26,15 @@ def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
 
 
+@pytest.fixture(autouse=True)
+def _heuristic_token_estimator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the heuristic token estimate — compaction triggers depend on
+    exact token counts that tiktoken (when available) would shift."""
+    import agent.nodes as mod
+
+    monkeypatch.setattr(mod, "_get_tokenizer", lambda: None)
+
+
 def _set_compaction(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
     monkeypatch.setattr(config_mod.config, "conversation_compaction_enabled", enabled)
 
