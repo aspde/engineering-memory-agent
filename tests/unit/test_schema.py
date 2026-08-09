@@ -61,6 +61,27 @@ class TestDimensionParameterization:
         assert _plain(s1024) == _plain(s3072)
 
 
+class TestLlmUsageCacheColumns:
+    """llm_usage carries prompt-cache accounting columns (create + migrate)."""
+
+    def test_create_table_has_cache_columns(self) -> None:
+        s = _statements(1024)
+        create = next(
+            x for x in s if "CREATE TABLE IF NOT EXISTS llm_usage" in x
+        )
+        assert "cache_read_tokens" in create
+        assert "cache_creation_tokens" in create
+
+    def test_cache_columns_added_idempotently_for_existing_db(self) -> None:
+        s = _statements(1024)
+        for col in ("cache_read_tokens", "cache_creation_tokens"):
+            alters = [
+                x for x in s if f"ALTER TABLE llm_usage ADD COLUMN {col}" in x
+            ]
+            assert len(alters) == 1, f"expected one ALTER block for {col}"
+            assert "duplicate_column" in alters[0]
+
+
 class TestResizeMigration:
     def test_resize_statement_clears_then_resizes(self) -> None:
         from backend.db.schema import _resize_statement

@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import threading
 import time
 from typing import Any
@@ -39,7 +40,7 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from backend.shared.config import config, current_thread_id, current_trace_id
-from backend.shared.metrics import _extract_total_tokens
+from backend.shared.metrics import extract_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,10 @@ def pending_rows() -> list[dict[str, Any]]:
 
 def reset_usage_buffer() -> None:
     """Drop all buffered observations — tests use this to isolate state."""
+    global _consecutive_flush_failures
     with _pending_lock:
         _pending.clear()
+        _consecutive_flush_failures = 0
 
 
 # ── Call observation helpers (used by the provider layer) ─────────────
@@ -123,18 +126,26 @@ def record_call(
     try:
         if not config.usage_enabled:
             return
-        input_tokens, output_tokens, total_tokens = _extract_tokens(usage)
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+        ) = extract_tokens(usage)
         latency_ms = round((time.perf_counter() - ctx["t0"]) * 1000)
 
         # Sample prompt/response text for post-hoc quality analysis (see the
         # module note above _SAMPLE_MAX_CHARS).  NULL columns mean "not
-        # sampled" — no separate flag needed.
+        # sampled" — no separate flag needed.  Sampled text is redacted before
+        # it is stored so a credential a tool echoed back (an API key, a
+        # captured Authorization header) never lands in llm_usage in the clear.
         prompt_sample = response_sample = None
         if status == "error" or random.random() < config.usage_sample_rate:
             prompt_text = (ctx.get("prompt_text") or "").strip()
             resp_text = str(response_text or "").strip()
-            prompt_sample = prompt_text[:_SAMPLE_MAX_CHARS] or None
-            response_sample = resp_text[:_SAMPLE_MAX_CHARS] or None
+            prompt_sample = _redact(prompt_text[:_SAMPLE_MAX_CHARS]) or None
+            response_sample = _redact(resp_text[:_SAMPLE_MAX_CHARS]) or None
 
         row: dict[str, Any] = {
             "trace_id": ctx.get("trace_id") or None,
@@ -145,9 +156,11 @@ def record_call(
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_creation_tokens": cache_creation_tokens,
             "latency_ms": latency_ms,
             "status": status,
-            "error": (error or "")[:500] if error else None,
+            "error": _redact((error or "")[:500]) if error else None,
             "prompt_chars": ctx.get("prompt_chars", 0),
             "response_chars": len(str(response_text)),
             "prompt_sample": prompt_sample,
@@ -165,7 +178,8 @@ def record_call(
 
         logger.info(
             "llm_call trace=%s thread=%s scenario=%s provider=%s model=%s "
-            "in=%d out=%d total=%d latency_ms=%d status=%s",
+            "in=%d out=%d total=%d cache_read=%d cache_creation=%d "
+            "latency_ms=%d status=%s",
             row["trace_id"],
             row["thread_id"],
             scenario,
@@ -174,6 +188,8 @@ def record_call(
             input_tokens,
             output_tokens,
             total_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
             latency_ms,
             status,
         )
@@ -181,44 +197,80 @@ def record_call(
         logger.exception("Failed to record LLM usage observation (swallowed)")
 
 
-def _extract_tokens(usage: Any) -> tuple[int, int, int]:
-    """Return ``(input, output, total)`` tokens from a provider usage object.
+# ── Sample redaction ─────────────────────────────────────────────────
+# Sampled prompt/response text can carry credentials (an API key a tool
+# echoed back, an Authorization header captured in an error response).  A
+# lightweight regex pass masks the obvious secret shapes before the text is
+# stored or returned — pragmatic, not a replacement for secrets management.
 
-    Accepts OpenAI ``CompletionUsage`` (``prompt_tokens``/``completion_tokens``),
-    Anthropic ``Usage`` (``input_tokens``/``output_tokens``), and plain dicts.
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)((?:api[_-]?key|access[_-]?token|auth[_-]?token|authorization|"
+    r"client[_-]?secret|private[_-]?key|password|passwd|secret|token)\b"
+    r"[^\n]{0,40}?[:=]\s*[\"']?)[A-Za-z0-9_\-\./+=]{8,}"
+)
+_BEARER_VALUE_RE = re.compile(
+    r"(?i)((?:authorization|proxy-authorization)\s*[:=]\s*(?:[\"']?bearer\s+)"
+    r"|\bbearer\s+)[A-Za-z0-9_\-\.=+/]{8,}"
+)
+_TOKEN_PREFIX_RE = re.compile(
+    r"\b(sk-[A-Za-z0-9_\-]{12,}|ghp_[A-Za-z0-9_\-]{12,}|AKIA[A-Za-z0-9]{12,}|"
+    r"hf_[A-Za-z0-9]{12,}|xox[baprs]-[A-Za-z0-9-]{10,})"
+)
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+    r".*?-----END (?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    re.DOTALL,
+)
+
+
+def _redact(text: str) -> str:
+    """Mask obvious secrets in sampled prompt/response text.
+
+    Replaces the value of secret-shaped ``key=value`` / ``key: value``
+    patterns, ``Authorization: Bearer …`` headers, well-known token prefixes
+    (``sk-``, ``ghp_``, ``AKIA``, …) and PEM private-key blocks with ``***``.
+    Best-effort: bounds accidental PII in ``llm_usage`` without pretending to
+    hide every possible secret.
     """
-    if usage is None:
-        return 0, 0, 0
-    if hasattr(usage, "prompt_tokens") and hasattr(usage, "completion_tokens"):
-        i = int(usage.prompt_tokens)
-        o = int(usage.completion_tokens)
-        return i, o, i + o
-    if hasattr(usage, "input_tokens") and hasattr(usage, "output_tokens"):
-        i = int(usage.input_tokens)
-        o = int(usage.output_tokens)
-        return i, o, i + o
-    if isinstance(usage, dict):
-        i = int(usage.get("prompt_tokens") or 0) + int(usage.get("input_tokens") or 0)
-        o = int(usage.get("completion_tokens") or 0) + int(usage.get("output_tokens") or 0)
-        total = int(usage.get("total_tokens") or 0)
-        return i, o, total if total else i + o
-    # Unknown shape — fall back to the shared total-token extractor so the
-    # call is still counted; input/output stay 0.
-    return 0, 0, _extract_total_tokens(usage)
+    if not text:
+        return text
+    text = _BEARER_VALUE_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _SECRET_VALUE_RE.sub(lambda m: f"{m.group(1)}***", text)
+    text = _TOKEN_PREFIX_RE.sub("***", text)
+    return _PRIVATE_KEY_RE.sub("***", text)
 
 
 # ── Flush: buffer → llm_usage table ──────────────────────────────────
+
+# A failed flush requeues its rows at the head of the buffer and retries on
+# the next tick, up to _FLUSH_MAX_ATTEMPTS per row — a transient DB hiccup
+# no longer silently loses every buffered observation, while a persistent
+# outage still caps memory growth (rows are dropped with an ERROR log, never
+# blocking the LLM hot path, whose synchronous append stays unaffected).
+_FLUSH_MAX_ATTEMPTS = 5           # drop a row after this many failed flushes
+_FLUSH_ATTEMPT_KEY = "_flush_attempts"  # internal per-row retry counter
+_FLUSH_BACKOFF_MAX_SECONDS = 60.0  # cap on the flusher's exponential backoff
+
+# Consecutive flush failures drive the flusher loop's backoff (see
+# usage_flusher_loop); reset to 0 on the first successful drain.
+_consecutive_flush_failures = 0
 
 
 async def flush_usage_buffer() -> int:
     """Drain the buffer into ``llm_usage`` with one batched INSERT.
 
-    Returns the number of rows inserted (0 when the buffer was empty).  A DB
-    failure logs a warning and drops the drained rows — observability is
-    best-effort and must never back-pressure the LLM path.
+    Returns the number of rows inserted (0 when the buffer was empty).  On a
+    DB failure the drained rows are requeued at the head of the buffer (see
+    :func:`_requeue_failed_rows`) so the next flush retries them — observability
+    stays best-effort and must never back-pressure the LLM path, but a single
+    failed batch is not simply discarded.
     """
+    global _consecutive_flush_failures
     with _pending_lock:
         if not _pending:
+            # Nothing drained — leave the failure counter untouched so a
+            # series of empty flushes doesn't masquerade as recovery and
+            # weaken the backoff.  Only a successful non-empty drain resets it.
             return 0
         rows = list(_pending)
         _pending.clear()
@@ -228,11 +280,13 @@ async def flush_usage_buffer() -> int:
         INSERT INTO llm_usage (
             trace_id, thread_id, scenario, provider, model,
             input_tokens, output_tokens, total_tokens, latency_ms,
+            cache_read_tokens, cache_creation_tokens,
             status, error, prompt_chars, response_chars,
             prompt_sample, response_sample
         ) VALUES (
             :trace_id, :thread_id, :scenario, :provider, :model,
             :input_tokens, :output_tokens, :total_tokens, :latency_ms,
+            :cache_read_tokens, :cache_creation_tokens,
             :status, :error, :prompt_chars, :response_chars,
             :prompt_sample, :response_sample
         )"""
@@ -241,13 +295,54 @@ async def flush_usage_buffer() -> int:
         async with get_session_factory()() as session:
             await session.execute(stmt, rows)
             await session.commit()
+    except asyncio.CancelledError:
+        # Shutdown can cancel the flusher while it awaits the DB.  ``except
+        # Exception`` never sees CancelledError (a BaseException in 3.8+), so
+        # without this branch the already-drained rows would be silently
+        # discarded.  Requeue them for a later flush, then propagate the
+        # cancellation — the per-row retry counters are preserved so a
+        # persistent outage still caps memory growth.
+        _consecutive_flush_failures += 1
+        _requeue_failed_rows(rows)
+        raise
     except Exception:
-        logger.warning(
-            "Failed to flush %d usage rows (dropped)", len(rows), exc_info=True
-        )
+        _consecutive_flush_failures += 1
+        _requeue_failed_rows(rows)
         return 0
+    _consecutive_flush_failures = 0
     logger.info("Flushed %d LLM usage rows to llm_usage", len(rows))
     return len(rows)
+
+
+def _requeue_failed_rows(rows: list[dict[str, Any]]) -> None:
+    """Put *rows* back at the head of ``_pending``, dropping over-cap rows.
+
+    Each failed flush increments the row's internal ``_flush_attempts``
+    counter; rows past ``_FLUSH_MAX_ATTEMPTS`` are dropped with an ERROR log
+    rather than growing the buffer without bound.  The extra key is harmless
+    on insert — the batched INSERT names its columns explicitly.
+    """
+    with _pending_lock:
+        retained: list[dict[str, Any]] = []
+        for row in rows:
+            row[_FLUSH_ATTEMPT_KEY] = row.get(_FLUSH_ATTEMPT_KEY, 0) + 1
+            if row[_FLUSH_ATTEMPT_KEY] < _FLUSH_MAX_ATTEMPTS:
+                retained.append(row)
+        if retained:
+            _pending[:0] = retained
+    dropped = len(rows) - len(retained)
+    if dropped:
+        logger.error(
+            "Dropping %d LLM usage rows after %d failed flush attempts",
+            dropped,
+            _FLUSH_MAX_ATTEMPTS,
+        )
+    else:
+        logger.warning(
+            "Failed to flush %d usage rows — requeued for retry",
+            len(rows),
+            exc_info=True,
+        )
 
 
 # Sampled prompt/response text is released after ``usage_sample_retention_days``
@@ -285,7 +380,10 @@ async def _purge_expired_samples() -> int:
 async def usage_flusher_loop() -> None:
     """Background task: periodically drain the buffer into the DB.
 
-    Also purges expired sample text at most once a day (see
+    When a flush fails, waits an exponentially-growing extra interval (capped
+    at ``_FLUSH_BACKOFF_MAX_SECONDS``) so a down database is not hammered with
+    a drain attempt every tick; the counter resets on the first successful
+    flush.  Also purges expired sample text at most once a day (see
     ``_purge_expired_samples``) — the metadata rows stay for usage summaries,
     only the sampled prompt/response columns are released.
     """
@@ -293,6 +391,21 @@ async def usage_flusher_loop() -> None:
     while True:
         await asyncio.sleep(config.usage_flush_interval_seconds)
         await flush_usage_buffer()
+        failures = _consecutive_flush_failures
+        if failures > 0:
+            # 2^(failures-1) * base, capped — a persistent outage backs off to
+            # a retry every ~2 minutes instead of spinning every tick.
+            backoff = min(
+                config.usage_flush_interval_seconds * (2 ** min(failures - 1, 5)),
+                _FLUSH_BACKOFF_MAX_SECONDS,
+            )
+            if backoff > 0:
+                logger.warning(
+                    "Usage flush failing (%d consecutive) — backing off %.0fs",
+                    failures,
+                    backoff,
+                )
+                await asyncio.sleep(backoff)
         if time.monotonic() - _last_sample_purge >= _SAMPLE_PURGE_INTERVAL_SECONDS:
             _last_sample_purge = time.monotonic()
             try:
@@ -320,13 +433,37 @@ _PRICE_RULES: list[tuple[str, tuple[float, float]]] = [
     ("deepseek", (0.27, 1.1)),
 ]
 _DEFAULT_PRICE = (1.0, 3.0)
+# Cached input tokens are billed at a fraction of the input price; the
+# fraction is provider-specific — Anthropic prompt caching and DeepSeek cache
+# hits discount to ~10% of the input price, OpenAI-family cache reads to ~50%.
+# The stored ``provider`` column uses "openai-compatible" for both DeepSeek
+# and OpenAI, so DeepSeek is recognised by its model name (the Anthropic
+# "claude" model-name fallback only matters for direct callers that omit
+# *provider*).  Cache-creation tokens are billed at full input price — they
+# are the tokens that populated the cache.
+def _cache_read_price_factor(provider: str | None, model: str) -> float:
+    key = (model or "").lower()
+    if provider == "anthropic" or "claude" in key or "deepseek" in key:
+        return 0.1
+    return 0.5
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+def estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_creation_tokens: int = 0,
+    provider: str | None = None,
+) -> float:
     """Estimate USD cost for one call from its token counts.
 
     ``model`` is matched by substring against a small built-in price table
     (input/output $ per 1M tokens); unknown models use ``_DEFAULT_PRICE``.
+    ``input_tokens`` is the full-price input (see ``metrics.extract_tokens``);
+    ``cache_read_tokens`` are billed at a provider-specific fraction of the
+    input price (see :func:`_cache_read_price_factor`) and
+    ``cache_creation_tokens`` at the full input price.
     """
     key = (model or "").lower()
     price_in, price_out = _DEFAULT_PRICE
@@ -334,7 +471,12 @@ def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
         if fragment in key:
             price_in, price_out = p_in, p_out
             break
-    return input_tokens / 1_000_000 * price_in + output_tokens / 1_000_000 * price_out
+    return (
+        input_tokens / 1_000_000 * price_in
+        + output_tokens / 1_000_000 * price_out
+        + cache_read_tokens / 1_000_000 * price_in * _cache_read_price_factor(provider, model)
+        + cache_creation_tokens / 1_000_000 * price_in
+    )
 
 
 # ── Query API ─────────────────────────────────────────────────────────
@@ -347,6 +489,8 @@ _GROUPED_COLUMNS = (
     "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
     "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
     "COALESCE(SUM(total_tokens), 0) AS total_tokens, "
+    "COALESCE(SUM(cache_read_tokens), 0) AS cache_read_tokens, "
+    "COALESCE(SUM(cache_creation_tokens), 0) AS cache_creation_tokens, "
     "COUNT(*) FILTER (WHERE status = 'error') AS error_calls, "
     "COALESCE(SUM(latency_ms), 0) AS latency_ms"
 )
@@ -389,6 +533,8 @@ def _fold_summary(
                 "input_tokens": 0,
                 "output_tokens": 0,
                 "total_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
                 "error_calls": 0,
                 "latency_ms": 0,
                 "est_cost": 0.0,
@@ -398,9 +544,18 @@ def _fold_summary(
         agg["input_tokens"] += r["input_tokens"]
         agg["output_tokens"] += r["output_tokens"]
         agg["total_tokens"] += r["total_tokens"]
+        agg["cache_read_tokens"] += r["cache_read_tokens"]
+        agg["cache_creation_tokens"] += r["cache_creation_tokens"]
         agg["error_calls"] += r["error_calls"]
         agg["latency_ms"] += r["latency_ms"]
-        agg["est_cost"] += estimate_cost(r["model"], r["input_tokens"], r["output_tokens"])
+        agg["est_cost"] += estimate_cost(
+            r["model"],
+            r["input_tokens"],
+            r["output_tokens"],
+            r["cache_read_tokens"],
+            r["cache_creation_tokens"],
+            provider=r["provider"],
+        )
     return list(merged.values())
 
 
@@ -416,6 +571,8 @@ async def get_daily_summary(days: int = 7) -> list[dict[str, Any]]:
                 "input_tokens": r["input_tokens"],
                 "output_tokens": r["output_tokens"],
                 "total_tokens": r["total_tokens"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
                 "error_calls": r["error_calls"],
                 "avg_latency_ms": round(r["latency_ms"] / r["calls"]) if r["calls"] else 0,
                 "est_cost": round(r["est_cost"], 4),
@@ -436,6 +593,8 @@ async def get_scenario_summary(days: int = 7) -> list[dict[str, Any]]:
                 "input_tokens": r["input_tokens"],
                 "output_tokens": r["output_tokens"],
                 "total_tokens": r["total_tokens"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
                 "error_calls": r["error_calls"],
                 "avg_latency_ms": round(r["latency_ms"] / r["calls"]) if r["calls"] else 0,
                 "est_cost": round(r["est_cost"], 4),
@@ -456,6 +615,8 @@ async def get_model_summary(days: int = 7) -> list[dict[str, Any]]:
                 "input_tokens": r["input_tokens"],
                 "output_tokens": r["output_tokens"],
                 "total_tokens": r["total_tokens"],
+                "cache_read_tokens": r["cache_read_tokens"],
+                "cache_creation_tokens": r["cache_creation_tokens"],
                 "error_calls": r["error_calls"],
                 "avg_latency_ms": round(r["latency_ms"] / r["calls"]) if r["calls"] else 0,
                 "est_cost": round(r["est_cost"], 4),
@@ -471,8 +632,10 @@ async def get_thread_usage(thread_id: str, limit: int = 50) -> list[dict[str, An
             text(
                 """\
                 SELECT trace_id, thread_id, scenario, provider, model,
-                       input_tokens, output_tokens, total_tokens, latency_ms,
-                       status, error, prompt_chars, response_chars, created_at
+                       input_tokens, output_tokens, total_tokens,
+                       cache_read_tokens, cache_creation_tokens,
+                       latency_ms, status, error, prompt_chars,
+                       response_chars, created_at
                 FROM llm_usage
                 WHERE thread_id = :tid
                 ORDER BY seq DESC
@@ -484,21 +647,28 @@ async def get_thread_usage(thread_id: str, limit: int = 50) -> list[dict[str, An
         return [dict(r._mapping) for r in result]
 
 
-async def get_trace(trace_id: str) -> list[dict[str, Any]]:
-    """All LLM calls in one trace — replay a single agent run end-to-end."""
+async def get_trace(trace_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    """All LLM calls in one trace — replay a single agent run end-to-end.
+
+    ``limit`` mirrors :func:`get_thread_usage`; pass a larger value to replay
+    a run that exceeded the default window.
+    """
     async with get_session_factory()() as session:
         result = await session.execute(
             text(
                 """\
                 SELECT trace_id, thread_id, scenario, provider, model,
-                       input_tokens, output_tokens, total_tokens, latency_ms,
-                       status, error, prompt_chars, response_chars, created_at
+                       input_tokens, output_tokens, total_tokens,
+                       cache_read_tokens, cache_creation_tokens,
+                       latency_ms, status, error, prompt_chars,
+                       response_chars, created_at
                 FROM llm_usage
                 WHERE trace_id = :tid
                 ORDER BY seq ASC
+                LIMIT :limit
                 """
             ),
-            {"tid": trace_id},
+            {"tid": trace_id, "limit": limit},
         )
         return [dict(r._mapping) for r in result]
 

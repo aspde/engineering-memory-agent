@@ -39,6 +39,42 @@ _EVENT_PROMPTS: dict[str, str] = {
 # Valid patrol_type values for manual trigger
 VALID_PATROL_TYPES = {"daily", "weekly", "contradiction_scan"}
 
+# Minimal structural contract per patrol type (see prompts.py templates):
+# the daily/weekly templates instruct the model to emit every category key —
+# an empty array when a category has nothing to report — so a missing key
+# means the model deviated from the JSON contract, not that the category is
+# empty.  The ci_failure / jira_resolved templates share the "matches" key
+# plus a decision key.
+_PATROL_REQUIRED_KEYS: dict[str, set[str]] = {
+    "daily": {"pattern_matches", "knowledge_gaps", "new_entities"},
+    "weekly": {"contradictions", "decay_alerts", "entity_coverage"},
+    "contradiction_scan": {"contradictions", "decay_alerts", "entity_coverage"},
+    "ci_failure": {"matches", "should_alert"},
+    "jira_resolved": {"matches", "is_repeat"},
+    "event_driven": {"matches"},
+}
+
+
+def _validate_findings(findings: dict | None, patrol_type: str) -> str | None:
+    """Return a parse_error string when *findings* are unusable for this
+    patrol type, else None.
+
+    Unknown patrol types have no contract to validate against and pass
+    through unchanged.  A malformed scan must never persist as 'completed' —
+    downstream consumers (e.g. ``persist_patrol_conflict`` reads
+    ``memory_a_id`` from weekly contradiction findings) would crash on the
+    resulting None.
+    """
+    required = _PATROL_REQUIRED_KEYS.get(patrol_type)
+    if required is None:
+        return None
+    if not isinstance(findings, dict):
+        return f"findings must be a JSON object, got {type(findings).__name__}"
+    missing = sorted(required - set(findings.keys()))
+    if missing:
+        return f"findings missing required keys: {', '.join(missing)}"
+    return None
+
 
 def _parse_findings(raw_text: str) -> dict | None:
     """Try to parse the agent's final response as JSON findings.
@@ -186,7 +222,12 @@ async def run_patrol(
         trace_token = current_trace_id.set(patrol_id)
 
         try:
-            agent = get_agent()
+            # Automated patrol runs are unattended — no human can approve a
+            # paused write/ingest call, so pass an empty approval set and let
+            # write tools execute directly.  The conflict HITL gate
+            # (check_conflict_node) still pauses on a write conflict — that
+            # interrupt is surfaced below, not swallowed.
+            agent = get_agent(approval_required_tools=frozenset())
             # Bounded by PATROL_TIMEOUT (default 600s) — a hung provider or a
             # runaway ReAct loop must not leave the patrol in 'running' forever.
             async with asyncio.timeout(config.patrol_timeout):
@@ -209,17 +250,50 @@ async def run_patrol(
                     },
                 )
 
-            # Extract findings from the agent's final response
-            final_response = result.get("final_response", "")
-            if final_response:
-                findings = _parse_findings(final_response)
+            # A HITL gate paused the graph: ``ainvoke`` returns *normally*
+            # with ``__interrupt__`` set — it is not an exception.  Without
+            # this check the pause was silently swallowed and the patrol was
+            # persisted as 'completed' with no findings (the empty
+            # final_response fell back to the last AIMessage).  Mark the run
+            # interrupted so the pause is visible instead of pretending the
+            # scan completed.
+            interrupts = result.get("__interrupt__")
+            if interrupts:
+                status = "interrupted"
+                interrupt_payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                findings = {"interrupt": interrupt_payload}
+                logger.warning(
+                    "Patrol %s (%s) interrupted for human review: %r",
+                    patrol_id, patrol_type, interrupt_payload,
+                )
             else:
-                # Fallback: check last AIMessage content
-                messages = result.get("messages", [])
-                for m in reversed(messages):
-                    if hasattr(m, "content") and m.content:
-                        findings = _parse_findings(str(m.content))
-                        break
+                # Extract findings from the agent's final response
+                raw_text = ""
+                final_response = result.get("final_response", "")
+                if final_response:
+                    raw_text = str(final_response)
+                else:
+                    # Fallback: check last AIMessage content
+                    messages = result.get("messages", [])
+                    for m in reversed(messages):
+                        if hasattr(m, "content") and m.content:
+                            raw_text = str(m.content)
+                            break
+                findings = _parse_findings(raw_text) if raw_text else None
+                parse_error = _validate_findings(findings, patrol_type)
+                if parse_error:
+                    # A malformed scan must never persist as 'completed' — the
+                    # UI would render "done" while every finding click fails.
+                    status = "failed"
+                    error_msg = parse_error
+                    if not isinstance(findings, dict):
+                        findings = {"raw_output": raw_text[:5000]}
+                    findings.setdefault("raw_output", raw_text[:5000])
+                    findings["parse_error"] = parse_error
+                    logger.warning(
+                        "Patrol %s (%s) findings failed validation: %s",
+                        patrol_id, patrol_type, parse_error,
+                    )
         finally:
             current_thread_id.reset(token)
             current_trace_id.reset(trace_token)
@@ -243,6 +317,17 @@ async def run_patrol(
 
     # ── Update log entry with results ──
     completed_at = datetime.now(timezone.utc)
+    try:
+        findings_json = json.dumps(findings) if findings else None
+    except (TypeError, ValueError) as exc:
+        # A payload that JSON can't serialise (e.g. an interrupt value
+        # carrying an unserialisable object) must not leave the patrol stuck
+        # in 'running' — record it as failed instead.
+        logger.exception("Patrol %s findings are not JSON-serialisable", patrol_id)
+        status = "failed"
+        error_msg = f"findings not JSON-serialisable: {exc}"
+        findings_json = None
+
     async with session_factory() as session:
         from sqlalchemy import text
 
@@ -257,7 +342,7 @@ async def run_patrol(
             {
                 "id": patrol_id,
                 "status": status,
-                "findings": json.dumps(findings) if findings else None,
+                "findings": findings_json,
                 "completed_at": completed_at,
             },
         )
@@ -266,6 +351,12 @@ async def run_patrol(
     if cancelled:
         logger.warning(
             "Patrol %s cancelled after %.1fs — marked failed",
+            patrol_id,
+            (completed_at - started_at).total_seconds(),
+        )
+    elif status == "interrupted":
+        logger.warning(
+            "Patrol %s interrupted after %.1fs — awaiting human review",
             patrol_id,
             (completed_at - started_at).total_seconds(),
         )

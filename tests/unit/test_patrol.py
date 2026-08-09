@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.service.patrol import _parse_findings, mark_stale_patrols_failed, run_patrol
+from backend.service.patrol import (
+    _parse_findings,
+    _validate_findings,
+    mark_stale_patrols_failed,
+    run_patrol,
+)
 
 
 class TestParseFindings:
@@ -39,6 +44,49 @@ class TestParseFindings:
     def test_parse_empty_json_object(self) -> None:
         result = _parse_findings("{}")
         assert result == {}
+
+
+class TestValidateFindings:
+    """Unit tests for the per-patrol-type structural validation."""
+
+    def test_daily_requires_all_three_keys(self) -> None:
+        err = _validate_findings(
+            {"pattern_matches": [], "knowledge_gaps": []}, "daily"
+        )
+        assert err is not None and "new_entities" in err
+        assert (
+            _validate_findings(
+                {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []},
+                "daily",
+            )
+            is None
+        )
+
+    def test_weekly_requires_contradiction_keys(self) -> None:
+        err = _validate_findings({}, "weekly")
+        assert err is not None and "contradictions" in err
+        assert "decay_alerts" in err and "entity_coverage" in err
+
+    def test_contradiction_scan_uses_weekly_contract(self) -> None:
+        assert (
+            _validate_findings(
+                {"contradictions": [], "decay_alerts": [], "entity_coverage": []},
+                "contradiction_scan",
+            )
+            is None
+        )
+
+    def test_event_driven_requires_matches(self) -> None:
+        assert _validate_findings({}, "event_driven") is not None
+        assert _validate_findings({"matches": []}, "event_driven") is None
+
+    def test_non_dict_findings_rejected(self) -> None:
+        err = _validate_findings([], "weekly")
+        assert err is not None and "JSON object" in err
+        assert _validate_findings(None, "weekly") is not None
+
+    def test_unknown_type_has_no_contract(self) -> None:
+        assert _validate_findings({"anything": 1}, "future_type") is None
 
 
 def _make_mock_session(*, running_row=None) -> MagicMock:
@@ -115,6 +163,186 @@ class TestRunPatrol:
         # Verify patrol_id is a valid UUID string
         assert len(patrol_id) == 36
         assert patrol_id.count("-") == 4
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_bypasses_approval_gate(self) -> None:
+        """Automated patrols pass an empty approval set to get_agent().
+
+        A patrol is unattended — no human can approve a paused write/ingest
+        call, so gating on approval would stall the scan indefinitely.
+        """
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": json.dumps(
+                {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []}
+            ),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch(
+                "backend.service.patrol.get_agent", return_value=mock_agent
+            ) as mock_get_agent,
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        mock_get_agent.assert_called_once_with(approval_required_tools=frozenset())
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_marks_interrupted_on_interrupt(self) -> None:
+        """A HITL interrupt (approval / conflict pause) persists 'interrupted',
+        never a silent 'completed' with fabricated findings."""
+        interrupt = MagicMock()
+        interrupt.value = {
+            "tool_name": "write_memory_tool",
+            "tool_args": {"content": "x"},
+        }
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "__interrupt__": [interrupt],
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert len(patrol_id) == 36
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls, "expected a patrol_logs UPDATE"
+        assert update_calls[0].args[1]["status"] == "interrupted"
+        findings = json.loads(update_calls[0].args[1]["findings"])
+        assert findings["interrupt"]["tool_name"] == "write_memory_tool"
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_marks_failed_on_unserialisable_findings(self) -> None:
+        """A findings payload that JSON can't serialise persists 'failed' —
+        it must never leave the patrol stuck in 'running'."""
+        interrupt = MagicMock()
+        interrupt.value = {"tool_name": "write_memory_tool", "blob": object()}
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "__interrupt__": [interrupt],
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert len(patrol_id) == 36
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls, "expected a patrol_logs UPDATE"
+        assert update_calls[0].args[1]["status"] == "failed"
+        assert update_calls[0].args[1]["findings"] is None
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_marks_failed_on_malformed_findings(self) -> None:
+        """Findings that fail the structural contract persist as 'failed' with
+        a parse_error — a malformed scan must never be recorded 'completed'."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "This is not the JSON contract at all.",
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="weekly",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert len(patrol_id) == 36
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "failed"
+        findings = json.loads(update_calls[0].args[1]["findings"])
+        assert "parse_error" in findings
+        assert "raw_output" in findings
+        assert "contradictions" in findings["parse_error"]
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_valid_findings_stay_completed(self) -> None:
+        """A contract-shaped findings JSON still persists as 'completed'."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": json.dumps(
+                {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []}
+            ),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "completed"
+        assert "parse_error" not in json.loads(update_calls[0].args[1]["findings"])
 
     @pytest.mark.asyncio
     async def test_run_patrol_marks_failed_on_error(self) -> None:

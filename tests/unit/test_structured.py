@@ -57,7 +57,9 @@ class TestChatStructured:
 
     @pytest.mark.asyncio
     async def test_retries_on_schema_mismatch(self, mock_llm) -> None:
-        """Valid JSON that violates the schema (wrong type) is retried."""
+        """Valid JSON that violates the schema (wrong type) is retried — and
+        the retry carries a corrective user message instead of a blind replay
+        of the same prompt."""
         mock_llm.chat_json.side_effect = [
             json.dumps({"ok": "yes"}),  # string, not boolean → ValidationError
             json.dumps({"ok": True}),
@@ -67,6 +69,49 @@ class TestChatStructured:
         )
         assert result == {"ok": True}
         assert mock_llm.chat_json.await_count == 2
+        retry_msgs = mock_llm.chat_json.await_args.args[0]
+        assert len(retry_msgs) == 2  # original prompt + one feedback message
+        assert retry_msgs[1]["role"] == "user"
+        # Validation message + JSON path of the offending field are fed back
+        assert "'yes' is not of type 'boolean'" in retry_msgs[1]["content"]
+        assert "$.ok" in retry_msgs[1]["content"]
+        assert '{"ok": "yes"}' in retry_msgs[1]["content"]  # offending raw snippet
+
+    @pytest.mark.asyncio
+    async def test_retry_feedback_does_not_mutate_caller_messages(
+        self, mock_llm
+    ) -> None:
+        """The feedback message is appended to a copy — the caller's original
+        ``messages`` list must stay untouched."""
+        msgs = _messages()
+        before = list(msgs)
+        mock_llm.chat_json.side_effect = [
+            "not json at all",
+            json.dumps({"ok": True}),
+        ]
+        await chat_structured(
+            msgs, json_schema=SCHEMA, scenario="test", max_attempts=3, backoff=0
+        )
+        assert msgs == before
+        # The provider call saw the original plus one feedback message.
+        assert len(mock_llm.chat_json.await_args.args[0]) == 2
+
+    @pytest.mark.asyncio
+    async def test_multiple_failures_accumulate_feedback(self, mock_llm) -> None:
+        """Each parse/validation failure appends one corrective message, so the
+        model sees every prior mistake on the last attempt."""
+        mock_llm.chat_json.side_effect = [
+            "not json at all",
+            json.dumps({"ok": "yes"}),
+            json.dumps({"ok": True}),
+        ]
+        result = await chat_structured(
+            _messages(), json_schema=SCHEMA, scenario="test", max_attempts=3, backoff=0
+        )
+        assert result == {"ok": True}
+        msgs = mock_llm.chat_json.await_args.args[0]
+        assert len(msgs) == 3  # original + feedback for each failed attempt
+        assert all(m["role"] == "user" for m in msgs[1:])
 
     @pytest.mark.asyncio
     async def test_retries_on_transient_provider_error(self, mock_llm) -> None:
@@ -128,3 +173,24 @@ class TestChatStructured:
             _messages(), json_schema=SCHEMA, scenario="test", temperature=0.7
         )
         assert mock_llm.chat_json.await_args.kwargs["temperature"] == 0.7
+
+    @pytest.mark.asyncio
+    async def test_custom_provider_overrides_default(self, monkeypatch) -> None:
+        """A caller-supplied provider is used instead of the get_llm_provider
+        singleton — the eval's LLM-as-judge injects get_judge_provider() here.
+        """
+        injected = AsyncMock()
+        injected.chat_json.return_value = json.dumps({"ok": True})
+        default = AsyncMock()
+        default.chat_json.return_value = json.dumps({"ok": True})
+        monkeypatch.setattr(
+            "backend.service.structured.get_llm_provider", lambda: default
+        )
+
+        result = await chat_structured(
+            _messages(), json_schema=SCHEMA, scenario="test", provider=injected
+        )
+
+        assert result == {"ok": True}
+        injected.chat_json.assert_awaited_once()
+        default.chat_json.assert_not_awaited()

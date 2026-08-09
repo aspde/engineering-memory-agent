@@ -8,6 +8,7 @@ observation per LLM call).
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -83,6 +84,44 @@ class TestEstimateCost:
 
     def test_zero_tokens_is_zero(self) -> None:
         assert estimate_cost("deepseek-chat", 0, 0) == 0.0
+
+    def test_cache_read_discounted_cache_creation_full(self) -> None:
+        # claude-sonnet input price $3.0 / 1M; cache reads at 10%, creation
+        # at full input price.
+        cost = estimate_cost(
+            "claude-sonnet",
+            0,
+            0,
+            cache_read_tokens=1_000_000,
+            cache_creation_tokens=500_000,
+        )
+        assert cost == pytest.approx(1.8, abs=1e-6)
+
+    def test_cache_fields_ignored_when_zero(self) -> None:
+        assert estimate_cost("deepseek-chat", 0, 0) == estimate_cost(
+            "deepseek-chat", 0, 0, cache_read_tokens=0, cache_creation_tokens=0
+        )
+
+    def test_cache_read_factor_dispatches_by_provider(self) -> None:
+        # OpenAI-family cache reads bill at 0.5x input price (gpt-4o in $2.5/1M).
+        openai_cost = estimate_cost(
+            "gpt-4o", 0, 0, cache_read_tokens=1_000_000,
+            provider="openai-compatible",
+        )
+        assert openai_cost == pytest.approx(1.25, abs=1e-6)
+        # DeepSeek cache hits bill at 0.1x input price (deepseek in $0.27/1M),
+        # even though its stored provider column is "openai-compatible".
+        deepseek_cost = estimate_cost(
+            "deepseek-chat", 0, 0, cache_read_tokens=1_000_000,
+            provider="openai-compatible",
+        )
+        assert deepseek_cost == pytest.approx(0.027, abs=1e-6)
+        # Anthropic prompt-cache reads bill at 0.1x input price.
+        anthropic_cost = estimate_cost(
+            "claude-sonnet", 0, 0, cache_read_tokens=1_000_000,
+            provider="anthropic",
+        )
+        assert anthropic_cost == pytest.approx(0.3, abs=1e-6)
 
 
 # ── Recording context ──────────────────────────────────────────────────
@@ -186,6 +225,22 @@ class TestRecordCall:
         assert row["error"] == "boom"
         assert row["total_tokens"] == 0
 
+    def test_error_text_redacted_before_storage(self) -> None:
+        """Provider error strings that echo a secret are masked on the way in."""
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="m",
+            provider="p",
+            scenario="agent_chat",
+            status="error",
+            error="Authorization: Bearer sk-abc123XYZ987 boom",
+        )
+        row = pending_rows()[0]
+        assert "sk-abc123XYZ987" not in row["error"]
+        assert "Bearer ***" in row["error"]
+        assert "boom" in row["error"]  # the non-secret tail survives
+
     def test_disabled_when_usage_enabled_false(self, monkeypatch) -> None:
         monkeypatch.setattr(usage.config, "usage_enabled", False)
         ctx = _ctx("t", "th")
@@ -200,6 +255,183 @@ class TestRecordCall:
         assert len(rows) == 2
         assert rows[0]["trace_id"] == "t2"
         assert rows[1]["trace_id"] == "t3"
+
+
+# ── Prompt-cache token accounting ─────────────────────────────────────
+# Cached input tokens (read from / created into a provider cache) are tracked
+# separately so cost summaries can apply the discounted cache-read rate.
+
+
+class TestCacheTokenAccounting:
+    def test_openai_cached_tokens_recorded(self) -> None:
+        ctx = _ctx("trace-1", "thread-1")
+        record_call(
+            ctx,
+            model="gpt-4o",
+            provider="openai-compatible",
+            scenario="agent_chat",
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=20,
+                prompt_tokens_details=SimpleNamespace(cached_tokens=60),
+            ),
+        )
+        row = pending_rows()[0]
+        # input is the full-price portion: prompt_tokens minus its cached subset
+        assert row["input_tokens"] == 40
+        assert row["output_tokens"] == 20
+        assert row["total_tokens"] == 120
+        assert row["cache_read_tokens"] == 60
+        assert row["cache_creation_tokens"] == 0
+
+    def test_anthropic_cached_tokens_recorded(self) -> None:
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="claude-sonnet",
+            provider="anthropic",
+            scenario="agent_chat",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_read_input_tokens=80,
+                cache_creation_input_tokens=30,
+            ),
+        )
+        row = pending_rows()[0]
+        assert row["input_tokens"] == 10
+        assert row["output_tokens"] == 5
+        assert row["total_tokens"] == 125  # input + output + both cache buckets
+        assert row["cache_read_tokens"] == 80
+        assert row["cache_creation_tokens"] == 30
+
+    def test_dict_cache_hit_tokens_recorded(self) -> None:
+        # DeepSeek-style usage: prompt_tokens = cache_hit + cache_miss.
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="deepseek-chat",
+            provider="openai-compatible",
+            scenario="agent_chat",
+            usage={
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "prompt_cache_hit_tokens": 60,
+                "prompt_cache_miss_tokens": 40,
+            },
+        )
+        row = pending_rows()[0]
+        assert row["input_tokens"] == 40  # cache-miss (full-price) tokens
+        assert row["total_tokens"] == 120
+        assert row["cache_read_tokens"] == 60
+        assert row["cache_creation_tokens"] == 0
+
+    def test_object_cache_hit_tokens_recorded(self) -> None:
+        # DeepSeek's SDK returns an *object* shape whose cache hits live at the
+        # top level (prompt_cache_hit_tokens) with empty prompt_tokens_details —
+        # the object branch must not report every hit at full price.
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="deepseek-chat",
+            provider="openai-compatible",
+            scenario="agent_chat",
+            usage=SimpleNamespace(
+                prompt_tokens=100,
+                completion_tokens=20,
+                prompt_cache_hit_tokens=60,
+                prompt_cache_miss_tokens=40,
+                prompt_tokens_details=None,
+            ),
+        )
+        row = pending_rows()[0]
+        assert row["input_tokens"] == 40  # cache-miss (full-price) tokens
+        assert row["total_tokens"] == 120
+        assert row["cache_read_tokens"] == 60
+        assert row["cache_creation_tokens"] == 0
+
+    def test_dict_alias_fields_not_double_counted(self) -> None:
+        # A proxy returning both prompt_tokens and input_tokens must not have
+        # its input summed twice (the old dict branch did).
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="m",
+            provider="p",
+            scenario="s",
+            usage={
+                "prompt_tokens": 10,
+                "input_tokens": 99,
+                "completion_tokens": 5,
+                "output_tokens": 88,
+            },
+        )
+        row = pending_rows()[0]
+        assert row["input_tokens"] == 10
+        assert row["output_tokens"] == 5
+        assert row["total_tokens"] == 15
+
+    def test_total_only_object_still_counted(self) -> None:
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="m",
+            provider="p",
+            scenario="s",
+            usage=SimpleNamespace(total_tokens=42),
+        )
+        row = pending_rows()[0]
+        assert row["total_tokens"] == 42
+        assert row["input_tokens"] == 0
+
+
+# ── Sample redaction ──────────────────────────────────────────────────
+
+
+class TestRedaction:
+    def test_masks_json_api_key(self) -> None:
+        out = usage._redact('{"api_key": "sk-abc123XYZ987"}')
+        assert "sk-abc123XYZ987" not in out
+        assert 'api_key": "***"' in out
+
+    def test_masks_authorization_bearer(self) -> None:
+        out = usage._redact("Authorization: Bearer sk-abc123XYZ987")
+        assert "sk-abc123XYZ987" not in out
+        assert "Bearer ***" in out
+
+    def test_masks_bare_bearer_token(self) -> None:
+        out = usage._redact("use Bearer sk-abc123XYZ987 for auth")
+        assert "sk-abc123XYZ987" not in out
+
+    def test_masks_key_value_pair(self) -> None:
+        assert usage._redact("token=abcdefgh12345678") == "token=***"
+
+    def test_masks_token_prefix_in_plain_text(self) -> None:
+        assert "sk-abc123XYZ987" not in usage._redact("key is sk-abc123XYZ987 ok")
+
+    def test_masks_private_key_block(self) -> None:
+        text = "-----BEGIN PRIVATE KEY-----\nZm9vYmFyCg==\n-----END PRIVATE KEY-----"
+        out = usage._redact(text)
+        assert "PRIVATE KEY" not in out
+        assert "Zm9vYmFy" not in out
+
+    def test_leaves_plain_text_unchanged(self) -> None:
+        assert usage._redact("ordinary prompt text") == "ordinary prompt text"
+
+    def test_empty_string(self) -> None:
+        assert usage._redact("") == ""
+
+    def test_record_call_stores_redacted_samples(self, monkeypatch) -> None:
+        monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
+        record_call(
+            _ctx("t", "th"),
+            model="m", provider="p", scenario="s",
+            response_text="Answer with api_key=sk-abc123XYZ987 inside",
+        )
+        row = pending_rows()[0]
+        assert row["response_sample"] is not None
+        assert "sk-abc123XYZ987" not in row["response_sample"]
+        assert "api_key=***" in row["response_sample"]
 
 
 # ── Flush + query (test DB) ────────────────────────────────────────────
@@ -279,6 +511,22 @@ class TestFlushAndQuery:
         assert [c["scenario"] for c in trace] == ["agent_chat", "agent_final"]
 
     @pytest.mark.asyncio
+    async def test_trace_respects_limit(self) -> None:
+        t = current_trace_id.set("trace-limit")
+        try:
+            for i in range(3):
+                record_call(
+                    begin_call([{"role": "user", "content": str(i)}]),
+                    model="m", provider="p", scenario="agent_chat",
+                )
+        finally:
+            current_trace_id.reset(t)
+        await flush_usage_buffer()
+
+        assert len(await get_trace("trace-limit")) == 3
+        assert len(await get_trace("trace-limit", limit=2)) == 2
+
+    @pytest.mark.asyncio
     async def test_empty_window_returns_empty(self) -> None:
         assert await get_daily_summary(1) == []
         assert await get_scenario_summary(1) == []
@@ -289,6 +537,30 @@ class TestFlushAndQuery:
     @pytest.mark.asyncio
     async def test_flush_returns_zero_when_buffer_empty(self) -> None:
         assert await flush_usage_buffer() == 0
+
+    @pytest.mark.asyncio
+    async def test_summary_reports_cache_tokens(self) -> None:
+        record_call(
+            _ctx("t", "th"),
+            model="claude-sonnet",
+            provider="anthropic",
+            scenario="agent_chat",
+            usage=SimpleNamespace(
+                input_tokens=10,
+                output_tokens=5,
+                cache_read_input_tokens=80,
+                cache_creation_input_tokens=30,
+            ),
+        )
+        await flush_usage_buffer()
+
+        daily = await get_daily_summary(1)
+        assert daily[0]["cache_read_tokens"] == 80
+        assert daily[0]["cache_creation_tokens"] == 30
+
+        scenarios = {s["scenario"]: s for s in await get_scenario_summary(1)}
+        assert scenarios["agent_chat"]["cache_read_tokens"] == 80
+        assert scenarios["agent_chat"]["cache_creation_tokens"] == 30
 
     @pytest.mark.asyncio
     async def test_model_summary_includes_estimated_cost(self) -> None:
@@ -306,6 +578,95 @@ class TestFlushAndQuery:
         assert models["openai-compatible/deepseek-chat"]["est_cost"] == pytest.approx(
             0.27, abs=0.001
         )
+
+
+class TestFlushRetry:
+    """A failed flush requeues its rows for retry, capped per row."""
+
+    class _BoomSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+        async def execute(self, *args, **kwargs):
+            raise RuntimeError("db down")
+
+        async def commit(self):
+            raise RuntimeError("db down")
+
+    @pytest.mark.asyncio
+    async def test_failed_flush_requeues_rows(self, monkeypatch) -> None:
+        record_call(_ctx("t1", "th"), model="m", provider="p", scenario="s")
+        real_factory = usage.get_session_factory
+        monkeypatch.setattr(usage, "get_session_factory", lambda: self._BoomSession)
+
+        assert await usage.flush_usage_buffer() == 0
+        # rows came back to the head of the buffer, attempt counter incremented
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["trace_id"] == "t1"
+        assert rows[0]["_flush_attempts"] == 1
+        assert usage._consecutive_flush_failures == 1
+
+        # a subsequent success drains them (the internal key is ignored by INSERT)
+        monkeypatch.setattr(usage, "get_session_factory", real_factory)
+        assert await usage.flush_usage_buffer() == 1
+        assert pending_count() == 0
+        assert usage._consecutive_flush_failures == 0
+
+    @pytest.mark.asyncio
+    async def test_rows_dropped_after_max_attempts(self, monkeypatch) -> None:
+        record_call(_ctx("t1", "th"), model="m", provider="p", scenario="s")
+        monkeypatch.setattr(usage, "get_session_factory", lambda: self._BoomSession)
+
+        for _ in range(usage._FLUSH_MAX_ATTEMPTS):
+            await usage.flush_usage_buffer()
+        # past the cap the row is dropped rather than requeued forever
+        assert pending_count() == 0
+
+    @pytest.mark.asyncio
+    async def test_failed_flush_counts_consecutive_failures(self, monkeypatch) -> None:
+        record_call(_ctx("t1", "th"), model="m", provider="p", scenario="s")
+        monkeypatch.setattr(usage, "get_session_factory", lambda: self._BoomSession)
+
+        await usage.flush_usage_buffer()
+        assert usage._consecutive_flush_failures == 1
+        await usage.flush_usage_buffer()
+        assert usage._consecutive_flush_failures == 2
+
+    class _CancelSession(_BoomSession):
+        """A session that is cancelled mid-await (shutdown path)."""
+
+        async def execute(self, *args, **kwargs):
+            raise asyncio.CancelledError
+
+        async def commit(self):
+            raise asyncio.CancelledError
+
+    @pytest.mark.asyncio
+    async def test_cancelled_flush_requeues_and_propagates(self, monkeypatch) -> None:
+        """A cancelled flush requeues its drained rows, then re-raises — the
+        rows are never silently discarded (except Exception misses CancelledError)."""
+        record_call(_ctx("t1", "th"), model="m", provider="p", scenario="s")
+        monkeypatch.setattr(usage, "get_session_factory", lambda: self._CancelSession)
+
+        with pytest.raises(asyncio.CancelledError):
+            await usage.flush_usage_buffer()
+
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["trace_id"] == "t1"
+        assert rows[0]["_flush_attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_flush_does_not_reset_consecutive_failures(self) -> None:
+        """An empty buffer is not a successful drain — it must not clear the
+        backoff counter (only a non-empty successful flush does)."""
+        usage._consecutive_flush_failures = 3
+        assert await usage.flush_usage_buffer() == 0
+        assert usage._consecutive_flush_failures == 3
 
 
 # ── Sampled prompt/response text ───────────────────────────────────────

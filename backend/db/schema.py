@@ -348,6 +348,8 @@ def build_schema_statements(dimension: int) -> list[str]:
             input_tokens   INT,
             output_tokens  INT,
             total_tokens   INT,
+            cache_read_tokens     INT,
+            cache_creation_tokens INT,
             latency_ms     INT,
             status         TEXT NOT NULL DEFAULT 'success',
             error          TEXT,
@@ -383,6 +385,24 @@ def build_schema_statements(dimension: int) -> list[str]:
         DO $$
         BEGIN
             ALTER TABLE llm_usage ADD COLUMN response_sample TEXT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        # Prompt-cache accounting columns (see ``metrics.extract_tokens``):
+        # cached input tokens read from / created into a provider cache, so
+        # cost summaries can apply the discounted cache-read rate.  Added via
+        # ALTER so databases created before the columns existed stay valid.
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE llm_usage ADD COLUMN cache_read_tokens INT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE llm_usage ADD COLUMN cache_creation_tokens INT;
         EXCEPTION WHEN duplicate_column THEN NULL;
         END $$;
         """,

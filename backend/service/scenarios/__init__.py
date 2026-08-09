@@ -44,7 +44,11 @@ async def invoke_scenario_agent(
 
     from backend.service.agent_service import get_agent
 
-    agent = get_agent()
+    # Scenario runs are unattended (manual trigger / scheduled scan) — no
+    # human can approve a paused write/ingest call, so pass an empty approval
+    # set.  The conflict HITL gate still pauses on a write conflict; that
+    # interrupt is surfaced below instead of being swallowed.
+    agent = get_agent(approval_required_tools=frozenset())
     tid = scenario_thread_id.get() or f"scenario-{uuid.uuid4()}"
     try:
         result = await agent.ainvoke(
@@ -62,6 +66,18 @@ async def invoke_scenario_agent(
     except Exception as exc:
         logger.exception("Scenario agent invocation failed")
         return f"场景执行失败: {exc}"
+
+    # A HITL gate paused the run — ``ainvoke`` returns normally with
+    # ``__interrupt__`` set, it is not an exception.  Without this check the
+    # pause fell through to the last-message fallback and the scenario
+    # reported a fabricated result.  Surface it truthfully instead.
+    interrupts = result.get("__interrupt__")
+    if interrupts:
+        payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        logger.warning(
+            "Scenario interrupted for human review (thread=%s): %r", tid, payload,
+        )
+        return f"场景执行被中断，等待人工审批: {payload}"
 
     final = result.get("final_response", "") or ""
     if not final:

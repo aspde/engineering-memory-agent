@@ -10,12 +10,16 @@ Checks (independent):
 
 1. **LLM error rate** — error calls / total calls in the last window (10 min)
    at/above ``ALERT_ERROR_RATE_THRESHOLD``.  A minimum-calls guard prevents a
-   tiny sample (e.g. 1/2) from firing.
+   tiny sample (e.g. 1/2) from firing.  When the ``llm_usage`` DB query itself
+   fails, an explicit ``observability_degraded`` alert fires instead of a
+   silent zero — a blind error-rate signal is itself an incident.
 2. **Structured-output failures** — the in-memory failure counters in
    ``metrics.py`` grew by 5+ since the previous check.  These are extraction
    degradations that ``chat_structured`` logged as failures.
-3. **Circuit breaker** — the primary LLM provider's breaker is open (provider
-   failing fast).
+3. **Circuit breakers** — the primary LLM provider's breaker is open, plus the
+   fallback and judge providers' breakers when those are configured (an open
+   fallback breaker means the last-ditch route is failing fast; an open judge
+   breaker silently degrades eval verdicts).
 
 Cooldown: an alert *kind* is notified at most once per cooldown window (1 h),
 so a persistent condition is reported once instead of spamming every cycle.
@@ -35,7 +39,7 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.service.llm_service import primary_breaker_name
+from backend.service.llm_service import breaker_name, primary_breaker_name
 from backend.shared.config import config
 from backend.shared.metrics import get_structured_failures
 from backend.shared.resilience import get_circuit_breaker
@@ -171,6 +175,19 @@ async def check_alerts() -> list[dict[str, Any]]:
                 fired.append(alert)
     except Exception:
         logger.exception("Error-rate alert check failed")
+        # The DB is down — the error-rate signal is blind, which is exactly
+        # when a silent zero (0 rows) would hide an outage.  Surface the
+        # degraded observability instead of pretending everything is fine.
+        alert = {
+            "key": "observability_degraded",
+            "severity": "warning",
+            "detail": (
+                "llm_usage DB query failed — error-rate alerts are blind "
+                "until the DB recovers"
+            ),
+        }
+        if _cooldown_ok(alert["key"]):
+            fired.append(alert)
 
     # 2. Structured-output failures (in-memory counters, growth since last).
     try:
@@ -188,19 +205,50 @@ async def check_alerts() -> list[dict[str, Any]]:
     except Exception:
         logger.exception("Structured-failure alert check failed")
 
-    # 3. Primary LLM circuit breaker open.
-    try:
-        if get_circuit_breaker(primary_breaker_name()).is_open:
-            alert = {
-                "key": "llm_circuit_open",
-                "severity": "critical",
-                "detail": "primary LLM provider circuit breaker is open — "
-                "provider calls are failing fast",
-            }
-            if _cooldown_ok(alert["key"]):
-                fired.append(alert)
-    except Exception:
-        logger.exception("Circuit-breaker alert check failed")
+    # 3. LLM circuit breakers open — primary, plus fallback/judge when
+    # configured.  Each breaker gets its own alert key + cooldown, so an open
+    # fallback (last-ditch route failing fast) or judge (silently degraded
+    # eval verdicts) is visible rather than hidden behind the primary's state.
+    breaker_targets = [
+        ("llm_circuit_open", "primary LLM provider", primary_breaker_name()),
+    ]
+    if config.llm.fallback_provider:
+        breaker_targets.append(
+            (
+                "llm_circuit_open:fallback",
+                "fallback LLM provider",
+                breaker_name(
+                    config.llm.fallback_provider,
+                    config.llm.fallback_base_url,
+                    config.llm.fallback_model,
+                ),
+            )
+        )
+    if config.llm.judge_provider:
+        breaker_targets.append(
+            (
+                "llm_circuit_open:judge",
+                "judge LLM provider",
+                breaker_name(
+                    config.llm.judge_provider,
+                    config.llm.judge_base_url,
+                    config.llm.judge_model,
+                ),
+            )
+        )
+    for alert_key, label, name in breaker_targets:
+        try:
+            if get_circuit_breaker(name).is_open:
+                alert = {
+                    "key": alert_key,
+                    "severity": "critical",
+                    "detail": f"{label} circuit breaker is open — "
+                    "calls to it are failing fast",
+                }
+                if _cooldown_ok(alert["key"]):
+                    fired.append(alert)
+        except Exception:
+            logger.exception("Circuit-breaker alert check failed (%s)", label)
 
     # Notify every fired alert: WARNING log always; 飞书 when opted in.
     for alert in fired:

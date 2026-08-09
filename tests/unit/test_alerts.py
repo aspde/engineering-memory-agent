@@ -138,6 +138,86 @@ class TestCircuitAlert:
         assert not any(a["key"] == "llm_circuit_open" for a in fired)
 
 
+class TestFallbackJudgeCircuitAlert:
+    """Fallback and judge breakers are checked when those providers are set."""
+
+    @pytest.mark.asyncio
+    async def test_open_fallback_breaker_fires(self, monkeypatch) -> None:
+        mock_breaker = MagicMock()
+        mock_breaker.is_open = True
+        monkeypatch.setattr(alerts.config.llm, "fallback_provider", "deepseek")
+        monkeypatch.setattr(alerts.config.llm, "fallback_base_url", "https://fb.test/v1")
+        monkeypatch.setattr(alerts.config.llm, "fallback_model", "fb-model")
+        monkeypatch.setattr(alerts.config.llm, "judge_provider", "")
+
+        names: list[str] = []
+
+        def _get_breaker(name: str) -> MagicMock:
+            names.append(name)
+            return mock_breaker
+
+        monkeypatch.setattr(alerts, "get_circuit_breaker", _get_breaker)
+
+        fired = await alerts.check_alerts()
+        assert any(a["key"] == "llm_circuit_open:fallback" for a in fired)
+        # The fallback breaker is read through llm_service's single naming
+        # source (was a duplicated "kept in lockstep" derivation).
+        from backend.service.llm_service import breaker_name
+
+        assert names and names[-1] == breaker_name(
+            "deepseek", "https://fb.test/v1", "fb-model"
+        )
+
+    @pytest.mark.asyncio
+    async def test_open_judge_breaker_fires(self, monkeypatch) -> None:
+        mock_breaker = MagicMock()
+        mock_breaker.is_open = True
+        monkeypatch.setattr(alerts.config.llm, "judge_provider", "anthropic")
+        monkeypatch.setattr(alerts.config.llm, "judge_model", "claude-judge")
+        monkeypatch.setattr(alerts.config.llm, "judge_api_key", "k")
+        monkeypatch.setattr(alerts.config.llm, "fallback_provider", "")
+
+        names: list[str] = []
+
+        def _get_breaker(name: str) -> MagicMock:
+            names.append(name)
+            return mock_breaker
+
+        monkeypatch.setattr(alerts, "get_circuit_breaker", _get_breaker)
+
+        fired = await alerts.check_alerts()
+        assert any(a["key"] == "llm_circuit_open:judge" for a in fired)
+        from backend.service.llm_service import breaker_name
+
+        assert names and names[-1] == breaker_name("anthropic", "", "claude-judge")
+
+    def test_breaker_name_follows_llm_service_naming(self) -> None:
+        """alerts.py derives breaker names from llm_service's public helper —
+        a naming change there propagates to the alert checks automatically."""
+        from backend.service.llm_service import breaker_name
+
+        assert breaker_name("anthropic", "", "claude-x") == "llm:anthropic:claude-x"
+        assert (
+            breaker_name("deepseek", "https://api.test/v1", "m")
+            == "llm:openai:https://api.test/v1|m"
+        )
+
+
+class TestObservabilityDegraded:
+    """A failing llm_usage DB query must alert, not silently read as 0 rows."""
+
+    @pytest.mark.asyncio
+    async def test_db_failure_fires_observability_degraded(self, monkeypatch) -> None:
+        async def _boom() -> dict:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(alerts, "_error_window_stats", _boom)
+
+        fired = await alerts.check_alerts()
+        assert any(a["key"] == "observability_degraded" for a in fired)
+        assert not any(a["key"] == "llm_error_rate" for a in fired)
+
+
 class TestFeishuNotification:
     """飞书 push only happens when explicitly opted in (default off)."""
 

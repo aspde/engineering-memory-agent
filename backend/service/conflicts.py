@@ -31,6 +31,9 @@ from backend.service.memory import (
     _merge_entities,
     _merge_relations,
     _find_by_content_hash,
+    _parse_meta,
+    _record_prior_hash,
+    _schedule_normalization,
     resolve_conflict,
 )
 from backend.service.prompts import get_prompt
@@ -468,10 +471,24 @@ async def resolve_patrol_conflict(
     # The surviving side (A) must still be live before any resolution is
     # applied (see ``_require_live_memory``).  overwrite/merge additionally
     # check the affected-row count in the write transaction to close the race
-    # with a concurrent deletion.
+    # with a concurrent deletion.  For overwrite/merge we also read A's meta +
+    # content_hash so the write preserves its provenance and records the
+    # replaced hash in prior_hashes — same semantics as resolve_conflict.
     session_factory = get_session_factory()
+    existing_meta: dict[str, Any] = {}
+    old_content_hash: str | None = None
     async with session_factory() as session:
         await _require_live_memory(session, existing_id, "surviving")
+        if resolution in ("overwrite", "merge"):
+            row = (
+                await session.execute(
+                    text("SELECT meta, content_hash FROM memories WHERE id = :id"),
+                    {"id": existing_id},
+                )
+            ).fetchone()
+            if row:
+                existing_meta = _parse_meta(row[0])
+                old_content_hash = row[1]
 
     if resolution == "keep_existing":
         # A survives unchanged; B is dropped.
@@ -490,6 +507,9 @@ async def resolve_patrol_conflict(
         }
 
     elif resolution == "overwrite":
+        # A keeps its provenance (thread_id, commit_id, ...) and gains the
+        # patrol tags; its old content_hash moves to prior_hashes.
+        merged_meta = _record_prior_hash(existing_meta | (metadata or {}), old_content_hash)
         try:
             # Soft-delete B BEFORE updating A: A adopts B's content_hash, and
             # the live-content-hash unique index is enforced per statement —
@@ -522,7 +542,7 @@ async def resolve_patrol_conflict(
                         "entities": json.dumps(_as_list(extracted.get("entities")), ensure_ascii=False),
                         "relations": json.dumps(_as_list(extracted.get("relations")), ensure_ascii=False),
                         "embedding": str(embedding),
-                        "meta": json.dumps(metadata or {}),
+                        "meta": json.dumps(merged_meta),
                         "content_hash": content_hash,
                     },
                 )
@@ -546,6 +566,9 @@ async def resolve_patrol_conflict(
                 "resolution": "overwrite",
                 "summary": winner["summary"],
             }
+        # Sync the memory_entities link table for the overwritten content's
+        # entities (same fire-and-forget as the ingestion paths).
+        _schedule_normalization(str(existing_id), _as_list(extracted.get("entities")))
         return {
             "id": existing_id,
             "action": "conflict_resolved",
@@ -594,6 +617,10 @@ async def resolve_patrol_conflict(
         vectors = await get_embedding_provider().embed([merged_summary.strip()])
         merged_embedding = vectors[0]
 
+        # A keeps its provenance and gains the patrol tags; its old hash moves
+        # to prior_hashes (same semantics as resolve_conflict's merge branch).
+        merged_meta = _record_prior_hash(existing_meta | (metadata or {}), old_content_hash)
+
         try:
             async with session_factory() as session:
                 await session.execute(
@@ -622,7 +649,7 @@ async def resolve_patrol_conflict(
                         "entities": json.dumps(merged_entities, ensure_ascii=False),
                         "relations": json.dumps(merged_relations, ensure_ascii=False),
                         "embedding": str(merged_embedding),
-                        "meta": json.dumps(metadata or {}),
+                        "meta": json.dumps(merged_meta),
                         "content_hash": content_hash,
                     },
                 )
@@ -646,6 +673,9 @@ async def resolve_patrol_conflict(
                 "resolution": "merge",
                 "summary": winner["summary"],
             }
+        # Sync the memory_entities link table for the merged entities (same
+        # fire-and-forget as the ingestion paths).
+        _schedule_normalization(str(existing_id), merged_entities)
         return {
             "id": existing_id,
             "action": "conflict_resolved",

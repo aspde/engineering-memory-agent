@@ -100,6 +100,18 @@ def _memory_query_result(*rows) -> MagicMock:
     return result
 
 
+def _meta_select_result(meta: dict | None = None, content_hash: str | None = "hash-a") -> MagicMock:
+    """A ``SELECT meta, content_hash`` result for the surviving memory (A).
+
+    resolve_patrol_conflict reads A's meta + content_hash before an
+    overwrite/merge write so it can preserve provenance and record the
+    superseded hash (prior_hashes).
+    """
+    r = MagicMock()
+    r.fetchone.return_value = (json.dumps(meta or {}), content_hash)
+    return r
+
+
 class TestPersistPatrolConflict:
     @pytest.mark.asyncio
     async def test_builds_deferred_payload(self) -> None:
@@ -286,11 +298,19 @@ class TestResolvePatrolConflict:
         update_result = MagicMock()
         update_result.rowcount = 1
         mock_session = AsyncMock()
-        mock_session.execute.side_effect = [MagicMock(), MagicMock(), update_result]
+        mock_session.execute.side_effect = [
+            MagicMock(),  # call 0: surviving-memory (A) liveness check
+            _meta_select_result({"thread_id": "t-a"}),  # call 1: A meta + content_hash
+            MagicMock(),  # call 2: soft-delete B
+            update_result,  # call 3: update A with B's content
+        ]
 
-        with patch(
-            "backend.service.conflicts.get_session_factory",
-            return_value=_make_session_factory(mock_session),
+        with (
+            patch(
+                "backend.service.conflicts.get_session_factory",
+                return_value=_make_session_factory(mock_session),
+            ),
+            patch("backend.service.conflicts._schedule_normalization"),
         ):
             outcome = await resolve_patrol_conflict(
                 "overwrite", A_ID, B_ID, _patrol_deferred()
@@ -301,15 +321,24 @@ class TestResolvePatrolConflict:
         sql0, params0 = mock_session.execute.call_args_list[0][0]
         assert "deleted_at" in str(sql0)
         assert params0["id"] == A_ID
-        # Call 1: soft-delete B.
+        # Call 1: read A's meta + content_hash before the write.
         sql1, params1 = mock_session.execute.call_args_list[1][0]
-        assert "deleted_at" in str(sql1)
-        assert params1["id"] == B_ID
-        # Call 2: update A with B's content.
+        assert params1["id"] == A_ID
+        assert "content_hash" in str(sql1)
+        # Call 2: soft-delete B.
         sql2, params2 = mock_session.execute.call_args_list[2][0]
-        assert params2["id"] == A_ID
-        assert params2["summary"] == "Migrate away from PostgreSQL"
-        assert params2["content_hash"] == "hash-b"
+        assert "deleted_at" in str(sql2)
+        assert params2["id"] == B_ID
+        # Call 3: update A with B's content — A's provenance preserved, old
+        # hash recorded for the idempotency gate.
+        sql3, params3 = mock_session.execute.call_args_list[3][0]
+        assert params3["id"] == A_ID
+        assert params3["summary"] == "Migrate away from PostgreSQL"
+        assert params3["content_hash"] == "hash-b"
+        stored_meta = json.loads(params3["meta"])
+        assert stored_meta["thread_id"] == "t-a"
+        assert stored_meta["conflicts_with"] == A_ID
+        assert stored_meta["prior_hashes"] == ["hash-a"]
 
     @pytest.mark.asyncio
     async def test_merge_writes_merged_summary_and_soft_deletes_peer(self) -> None:
@@ -324,9 +353,10 @@ class TestResolvePatrolConflict:
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [
             MagicMock(),  # call 0: surviving-memory (A) liveness check
-            select_result,  # call 1: read A's current content
-            MagicMock(),  # call 2: soft-delete B
-            update_result,  # call 3: write merged summary to A
+            _meta_select_result({"thread_id": "t-a"}),  # call 1: A meta + content_hash
+            select_result,  # call 2: read A's current content
+            MagicMock(),  # call 3: soft-delete B
+            update_result,  # call 4: write merged summary to A
         ]
 
         mock_llm = AsyncMock()
@@ -341,22 +371,28 @@ class TestResolvePatrolConflict:
             ),
             patch("backend.service.llm_service.get_llm_provider", return_value=mock_llm),
             patch("backend.service.conflicts.get_embedding_provider", return_value=mock_embed),
+            patch("backend.service.conflicts._schedule_normalization"),
         ):
             outcome = await resolve_patrol_conflict(
                 "merge", A_ID, B_ID, _patrol_deferred()
             )
 
         assert outcome["action"] == "conflict_resolved"
-        # Call 1: read A's current content.
+        # Call 1: read A's meta + content_hash.
         assert mock_session.execute.call_args_list[1][0][1]["id"] == A_ID
-        # Call 2: soft-delete B.
-        sql2, params2 = mock_session.execute.call_args_list[2][0]
-        assert "deleted_at" in str(sql2)
-        assert params2["id"] == B_ID
-        # Call 3: write merged summary to A.
+        # Call 2: read A's current content.
+        assert mock_session.execute.call_args_list[2][0][1]["id"] == A_ID
+        # Call 3: soft-delete B.
         sql3, params3 = mock_session.execute.call_args_list[3][0]
-        assert params3["id"] == A_ID
-        assert params3["summary"] == "PostgreSQL with a migration exit plan"
+        assert "deleted_at" in str(sql3)
+        assert params3["id"] == B_ID
+        # Call 4: write merged summary to A — provenance preserved, old hash kept.
+        sql4, params4 = mock_session.execute.call_args_list[4][0]
+        assert params4["id"] == A_ID
+        assert params4["summary"] == "PostgreSQL with a migration exit plan"
+        stored_meta = json.loads(params4["meta"])
+        assert stored_meta["thread_id"] == "t-a"
+        assert stored_meta["prior_hashes"] == ["hash-a"]
         # Re-embedded merged text.
         assert mock_embed.embed.await_args.args == (["PostgreSQL with a migration exit plan"],)
 
@@ -411,7 +447,12 @@ class TestResolvePatrolConflict:
         update_result = MagicMock()
         update_result.rowcount = 0  # A no longer live when the UPDATE runs
         mock_session = AsyncMock()
-        mock_session.execute.side_effect = [MagicMock(), MagicMock(), update_result]
+        mock_session.execute.side_effect = [
+            MagicMock(),  # call 0: liveness check passes
+            _meta_select_result(),  # call 1: A meta + content_hash
+            MagicMock(),  # call 2: soft-delete B
+            update_result,  # call 3: UPDATE hits zero rows → refused
+        ]
 
         with patch(
             "backend.service.conflicts.get_session_factory",

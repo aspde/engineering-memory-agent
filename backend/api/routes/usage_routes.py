@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import APIRouter, Query
 
 from backend.service.usage import (
+    _redact,
     get_daily_summary,
     get_model_summary,
     get_samples,
@@ -33,8 +34,26 @@ def _with_totals(items: list[dict[str, Any]]) -> dict[str, Any]:
         "items": items,
         "total_calls": sum(i.get("calls", 0) for i in items),
         "total_tokens": sum(i.get("total_tokens", 0) for i in items),
+        "total_cache_read_tokens": sum(i.get("cache_read_tokens", 0) for i in items),
+        "total_cache_creation_tokens": sum(
+            i.get("cache_creation_tokens", 0) for i in items
+        ),
         "est_cost": round(sum(i.get("est_cost", 0.0) for i in items), 4),
     }
+
+
+def _redact_row_errors(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Re-redact persisted ``error`` text on read (defense in depth).
+
+    Provider error strings can echo back an Authorization header / ``sk-``
+    key; ``record_call`` now redacts before storing, but rows written before
+    that landed still never surface a secret.  Mutates the dicts in place and
+    returns the list for chaining.
+    """
+    for c in calls:
+        if c.get("error"):
+            c["error"] = _redact(c["error"])
+    return calls
 
 
 @router.get("/summary")
@@ -64,13 +83,22 @@ async def usage_models(
 @router.get("/threads/{thread_id}")
 async def usage_thread(thread_id: str) -> dict[str, Any]:
     """Recent LLM calls for one conversation thread."""
-    return {"thread_id": thread_id, "calls": await get_thread_usage(thread_id)}
+    return {
+        "thread_id": thread_id,
+        "calls": _redact_row_errors(await get_thread_usage(thread_id)),
+    }
 
 
 @router.get("/trace/{trace_id}")
-async def usage_trace(trace_id: str) -> dict[str, Any]:
+async def usage_trace(
+    trace_id: str,
+    limit: int = Query(50, ge=1, le=1000),
+) -> dict[str, Any]:
     """All LLM calls in one trace — replay a single agent run end-to-end."""
-    return {"trace_id": trace_id, "calls": await get_trace(trace_id)}
+    return {
+        "trace_id": trace_id,
+        "calls": _redact_row_errors(await get_trace(trace_id, limit=limit)),
+    }
 
 
 @router.get("/samples")
@@ -86,12 +114,19 @@ async def usage_samples(
     at ``USAGE_SAMPLE_RATE``) are returned.  This is the surface for "which
     prompt produced that hallucinated answer" or "which tool call had
     malformed JSON" — the metadata summaries can't answer those.
+
+    Samples are re-redacted on read (defense in depth): rows persisted before
+    write-time redaction landed still never surface a secret.
     """
-    return {
-        "samples": await get_samples(
-            scenario=scenario,
-            status=status,
-            trace_id=trace_id,
-            limit=limit,
-        )
-    }
+    samples = await get_samples(
+        scenario=scenario,
+        status=status,
+        trace_id=trace_id,
+        limit=limit,
+    )
+    for s in _redact_row_errors(samples):
+        if s.get("prompt_sample"):
+            s["prompt_sample"] = _redact(s["prompt_sample"])
+        if s.get("response_sample"):
+            s["response_sample"] = _redact(s["response_sample"])
+    return {"samples": samples}
