@@ -17,7 +17,7 @@
 
 **追问预案**：
 - Q：LangGraph 学习曲线陡吗？→ A：图模型概念简单，难点在 interrupt/Command 的状态恢复机制，文档不算特别清晰，我踩过坑——interrupt 后 state 里的字段不会自动同步，要手动管理
-- Q：为什么不用多 Agent？→ A：工程记忆场景不需要角色分离，一个 Agent + 8 个 tool 覆盖所有场景。多 Agent 增加协调复杂度，没有收益
+- Q：为什么不用多 Agent？→ A：工程记忆场景不需要角色分离，一个 Agent + 9 个 tool 覆盖所有场景。多 Agent 增加协调复杂度，没有收益
 
 ### Q1.2 ReAct 循环是什么？你的实现里怎么防止死循环？
 
@@ -45,8 +45,8 @@
 
 ### Q1.4 你的 Agent 有几个 tool？怎么决定 tool 粒度？
 
-**答题要点**：8 个 tool，分四类：
-- 检索类：search_memories_tool（记忆）、retrieve_chunks_tool（文档分块）、query_entity_tool（实体关系）
+**答题要点**：9 个 tool，分四类：
+- 检索类：search_memories_tool（记忆）、retrieve_chunks_tool（文档分块）、query_entity_tool（实体关系）、query_rewrite_and_search_tool（LLM 改写多路召回）
 - 写入类：write_memory_tool（含冲突检测）、extract_memory_tool（仅提取不持久化）
 - 摄取类：ingest_git_repo_tool（Git 历史）、ingest_document_tool（文档 AST chunk）
 - 通知类：notify_feishu_tool（飞书推送）
@@ -268,8 +268,23 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 5. **传输韧性**：LLM/Embedding 调用统一走 tenacity 指数退避重试 + 熔断器（[resilience.py](../../backend/shared/resilience.py)），429/5xx 自动重试、连续失败熔断快速失败；重复投递靠 content-hash 幂等去重，不重复入库
 
 **追问预案**：
-- Q：怎么知道哪次调用贵？→ A：目前没有精细的成本监控。改进项是加 token 计数日志，按 tool 和场景统计
+- Q：怎么知道哪次调用贵？→ A：有成本监控。provider 层是唯一咽喉点，每次调用写 `llm_usage` 表（scenario / tokens / latency / 成本估算），`/api/usage/*` 按天、按场景、按模型汇总，trace_id 能回放单轮 agent 的调用链
 - Q：缓存做了吗？→ A：没做。记忆检索是动态的，相同 query 召回结果会因 decay 变化，缓存意义不大
+
+### Q5.5 系统健康怎么监控？（运行指标）
+
+**答题要点**：
+1. **分工**：成本（`llm_usage` 表，历史查询）与健康（Prometheus 时序，实时抓取）是两个独立通道——`GET /metrics` 暴露文本格式，`METRICS_ENABLED` 开关
+2. **HTTP 层**：ASGI 中间件按**路由模板路径**记录请求数、延迟直方图、状态码分布——用 route path 不用原始 URL，标签基数有界（不会一个 thread_id 一个序列）
+3. **LLM 层**：和成本行同一咽喉点打点——按 scenario 的调用数（success/error）、延迟、token
+4. **韧性层**：熔断器状态 gauge + 打开次数 + open 期间快速拒绝次数
+5. **Agent 层**：并发槽位占用 + 503 拒绝计数；每次 chat 完成记录 **ReAct 步数分布**——task eval 在评测里发现的过度调用问题，产线用这个直方图持续观测
+6. **实现原则**：所有埋点异常吞掉、开关关闭时 no-op，绝不给热路径加阻塞
+
+**追问预案**：
+- Q：为什么不用 OpenTelemetry？→ A：单实例部署 + 需要的指标就这几类，prometheus_client 轻量直接暴露文本格式，一个库搞定；要接 otel 迁移成本低（埋点已收敛在咽喉点）
+- Q：步数直方图有什么用？→ A：task eval 发现 DeepSeek 过度调用工具（单任务调 4 次、概念查询撞 max_steps），`ema_agent_steps` 直方图把同一个信号搬到产线——不用等每周评测就能看到平均步数/长尾分布有没有恶化
+- Q：监控会拖慢请求吗？→ A：记录函数是纯内存计数器（prometheus_client 线程安全），异常全吞掉；`METRICS_ENABLED=false` 完全 no-op
 
 ---
 
@@ -306,14 +321,28 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 ### Q6.3 怎么评估 RAG 系统的质量？
 
 **答题要点**：
-1. **检索质量**：人工标注 query-doc 相关性，算 Recall@K、MRR
-2. **生成质量**：人工评估答案准确性、完整性、是否有幻觉
+1. **检索质量**：人工标注 query-doc 相关性，算 Recall@K、MRR、NDCG@K——EMA 有 30 条标注集（5 类 × 6 条，含 easy/medium/hard 难度分级），实测 Recall@5 1.00 / MRR 0.98
+2. **生成质量**：LLM-as-judge 从准确性、完整性、相关性打分；EMA 用 `chat_structured`（JSON Schema 校验）输出覆盖事实/忠实度/幻觉论断，四套件（工具选择 / 知识抽取 / 最终答案 / 端到端）见 [llm-eval.md](./llm-eval.md)
 3. **端到端**：用户反馈（点赞/点踩）+ 后续追问率（追问多说明没答好）
-4. **EMA 现状**：老实说没有系统化评估，主要靠用户反馈和 case by case 调优。这是改进项
+4. **EMA 现状**：检索与生成质量都有自动化评估（`python -m tests.eval.run_eval` / `run_llm_eval`），评估集 CI 每周自动跑
 
 **追问预案**：
-- Q：有没有自动化评估？→ A：可以用 LLM-as-judge，让 LLM 评估答案质量。但 LLM 评估有偏差，只能做粗筛
-- Q：怎么知道是检索问题还是生成问题？→ A：分开测——先看检索召回的 doc 相关不相关，再看 LLM 基于这些 doc 的答案准不准。EMA 我加了 sources 面板前端展示检索来源，方便定位
+- Q：LLM 评估可靠吗？→ A：有偏差，只做粗筛——裁判输出结构化事实而非 1-5 分，覆盖率/忠实度从判决直接算；关键改动仍会人工抽检
+- Q：怎么知道是检索问题还是生成问题？→ A：分开测——检索跑 run_eval 看 Recall/MRR，生成跑 run_llm_eval 看答案覆盖度与幻觉。EMA 还加了 sources 面板前端展示检索来源，方便定位
+
+### Q6.4 你的 Agent 整体效果怎么量化？（Agent 岗位必问）
+
+**答题要点**：
+1. **任务级端到端评测**（`run_task_eval`）：8 个真实多步任务驱动**完整 Agent 图**——ReAct 循环 + 真实工具执行 + HITL 门，测的不是单次决策而是整条轨迹
+2. **指标**：`completed`（调齐必备工具 + 实质答案 + 无错误）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）
+3. **实测**（DeepSeek，2026-08-09）：tool_recall 0.94、groundedness 1.00、0 执行错误；但 **completed 只有 0.5**——`unexpected_rate 0.375` 说明模型过度调用工具，这是组件级评测永远看不到的轨迹级问题
+4. **HITL 处理**：评测自动放行（审批通过、冲突 keep_existing），隔离"人的决策"与"Agent 能力"；要测拒绝路径就注入自定义 resume 策略
+
+**追问预案**：
+- Q：为什么 completed 只有 0.5？→ A：不是工具选不对（tool_recall 0.94 说明该调的几乎都调了），而是**过度调用**——task-006 回答一个记忆问题调了 4 次工具（search×2 + retrieve_chunks + query_entity），task-004 概念查询循环 8 次撞 max_steps。这是真实的行为短板
+- Q：过度调用怎么改进？→ A：① 强化工具描述边界（search_memories 与 retrieve_chunks 的决策标准写得更明确，让 LLM 少做"顺手再查一下"）；② 轨迹级节流（检索结果已覆盖就停手）；③ max_steps 已兜底但 5 步对概念查询仍偏松。任何一个都能拉高 completed
+- Q：评测里 HITL 怎么办？→ A：默认自动放行——测的是"如果人总是同意，Agent 能不能把任务做完"。resume 策略可注入，测试里模拟过拒绝路径
+- Q：这个评估有什么额外收获？→ A：**抓出一个生产 bug**——拒绝审批后写操作仍被执行。根因是 LangGraph 1.2.10 resume 被 interrupt 暂停的节点时，Command(goto) 和节点的静态边会同时生效，拒绝路径的静态边把路由拉到 tools。删掉静态边、Command 唯一路由，加了图级回归测试。这就是任务级评估的价值：单测和组件评测都发现不了这种跨节点编排问题
 
 ---
 
@@ -327,7 +356,8 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 | 四级阈值？ | 0.92合并 / 0.75冲突 / 0.60关联 / <0.60新增 |
 | Agent 几个节点？ | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |
 | 几个 HITL 卡点？ | 2 个：写前审批 + 冲突仲裁 |
-| 几个 tool？ | 8 个 |
+| Agent 任务级指标？ | 8 任务 completed 0.5 / tool_recall 0.94 / grounded 1.0（过度调用是短板） |
+| 几个 tool？ | 9 个 |
 | 冲突解决几选项？ | 4 个：keep_existing/overwrite/merge/keep_both |
 | LangGraph 持久化？ | PostgresSaver，thread_id 关联 |
 | 为什么不用 Neo4j？ | 一度关系 SQL 够用，避免双写一致性 |

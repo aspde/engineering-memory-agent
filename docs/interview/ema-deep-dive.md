@@ -30,7 +30,7 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 
 ### 我的角色
 
-[需要你补充：如"独立完成，从架构设计到全栈实现"]。技术选型、ADR 决策记录、代码实现都是我做的。
+[需要你补充：如"端到端主导，从架构设计到全栈实现"]。技术选型、ADR 决策记录、代码实现都是我做的。项目没有团队兜底，所以我从第一天就用团队工程的纪律约束自己：每个架构决策写 ADR 记录依据、每次提交过 CI、每个检索改动跑评估集对比——用可追溯的流程替代缺失的 code review，保证项目经得起追问。
 
 ---
 
@@ -52,7 +52,7 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 
 | 层 | 技术 | 职责 |
 |----|------|------|
-| 前端 | React + TS + Vite + Tailwind | 5 个页面：聊天、记忆库、实体图谱、连接器、巡检 |
+| 前端 | React + TS + Vite + Tailwind | 6 个页面：聊天、记忆库、实体图谱、连接器、巡检、冲突解决 |
 | 后端 | FastAPI + Python 3.12 + async | API、生命周期、调用 Agent |
 | Agent | LangGraph 手动 StateGraph | ReAct 循环 + 2 个 HITL 卡点 |
 | 记忆 | 自实现 service 函数 | 提取、去重、衰减、检索——不用 LangChain Retriever |
@@ -91,7 +91,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 ```
 
 **追问预案**：
-- Q：为什么不用多 Agent？→ A：约束明确单 Agent。多 Agent 在工程记忆场景没有收益，反而增加协调复杂度。一个 Agent + 8 个 tool 足够覆盖所有场景。
+- Q：为什么不用多 Agent？→ A：约束明确单 Agent。多 Agent 在工程记忆场景没有收益，反而增加协调复杂度。一个 Agent + 9 个 tool 足够覆盖所有场景。
 - Q：max_steps 为什么默认 5？→ A：实测下来 95% 的对话在 3 步内结束，5 是兜底防循环，env 可配。
 
 ### 决策 2：为什么 PostgreSQL + pgvector，不用专用向量库（ADR-002）
@@ -244,14 +244,18 @@ S = 1 + recall_count × 2   (相对强度)
 | 检索 MRR | **0.983** | tests/eval 实测；29/30 query rank-1 命中 |
 | 检索 NDCG@5 | **0.988** | tests/eval 实测 |
 | 检索 MAP@5 | 0.983 | tests/eval 实测 |
-| 检索延迟（稳态） | ~235ms（embed 150-230ms + sparse + sort，无 rerank） | 实测；hybrid+rerank ~20s（cross-encoder CPU 瓶颈） |
-| cross-encoder rerank 延迟 | 50s/query（CPU 瓶颈） | 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
-| 代码量 | 后端 6490 行（纯后端，无前端） | cloc |
-| 测试覆盖 | 452 测试用例（含 101 检索评估单测） | pytest --collect-only |
+| 检索延迟（稳态） | ~190ms（hybrid 无 rerank：embed + sparse + sort） | tests/eval 实测（hybrid:norank@k5 190ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
+| cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | tests/eval 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
+| 代码量 | backend 13916 行 + agent 2497 行（纯 Python，无前端） | wc -l |
+| 测试覆盖 | 1281 测试用例（unit 1147 + api 129 + integration 5，含 task_eval 50） | pytest --collect-only |
+| Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875 | run_task_eval 8 任务实测（DeepSeek，deterministic judge，2026-08-09） |
+| Agent 任务轨迹质量 | groundedness 1.000 / citation 0.875 / **0 执行错误**；unexpected_rate 0.375 暴露过度调用 | 同上次运行，详见 [llm-eval.md](llm-eval.md) |
 | 日均检索次数 | [待生产部署后统计] | — |
-| Agent 单轮平均 tool 调用 | [待生产部署后统计] | — |
+| Agent 单轮平均 tool 调用 | 2.6 次（任务级实测，task 轨迹均值） | run_task_eval 8 任务 n_steps 均值 |
 | 对话 P95 延迟 | [待生产部署后统计] | — |
-| 项目周期 | [需要你补充：如 3 个月，独立完成] | — |
+| 项目周期 | [需要你补充：如 3 个月，端到端主导] | — |
+
+**任务级评估设计**（面试加分点，Agent 岗位对口）：8 个真实多步任务驱动**完整 Agent 图**（ReAct 循环 + 真实工具执行 + HITL 自动放行），测的不是单次决策而是整条轨迹——`completed`（调齐必备工具 + 实质答案）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）。HITL 自动放行是为了隔离"人的决策"与"Agent 能力"。**实测最有价值的不是分数，而是它暴露了组件级评测看不到的轨迹级问题**：DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了 4 次），概念查询甚至撞 max_steps——`unexpected_rate 0.375` 是 completed 掉到 0.5 的主因，改进方向是强化工具描述边界与轨迹节流。这套评估还顺带抓出并修复了一个生产 HITL 正确性 bug（拒绝审批后写操作仍被静态边路由执行），见 [llm-eval.md](llm-eval.md) 末尾。
 
 **评估集设计**（面试加分点）：30 条标注 query，5 类 × 6 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard 暴露向量质量短板。按 category 看：技术决策/代码实现 recall@5=1.000，故障复盘/历史背景=0.667（最弱，概念查询短板）；按 difficulty 看 medium 最高（0.929），easy 反而最低（0.714，部分 easy query 词重合但向量区分度不足）。完整报告见 [eval-report.md](eval-report.md)。
 
@@ -266,6 +270,7 @@ S = 1 + recall_count × 2   (相对强度)
 - **ADR 驱动决策**：每个关键选型都有 ADR 记录"为什么做、为什么不、拐点是什么"，回头复盘和对外讲解都很清晰
 - **简单优先**：每个 Phase 只做解锁下一步的最小能力，不过度设计。比如不做多租户（用 project 字段软隔离）、不做 Neo4j（用 SQL 一度关系）
 - **容错降级**：所有 LLM 调用都有失败降级路径，不阻塞主流程
+- **可观测性分层**：成本（`llm_usage` 表持久化）+ 健康（`/metrics` Prometheus 时序：HTTP 延迟/状态、LLM 调用/token、熔断器、Agent 并发槽位、ReAct 步数分布）两套通道，埋点都收敛在咽喉点（provider 调用、熔断器、槽位、路由结束）——task eval 测到的过度调用信号在产线用 `ema_agent_steps` 直方图持续观测
 
 ### 可以更好的
 
@@ -292,7 +297,7 @@ S = 1 + recall_count × 2   (相对强度)
 │  │      ↓                                          │ │
 │  │  generate_final → END                           │ │
 │  └────────────────────────────────────────────────┘ │
-│  8 个 tool: search/query/write/extract/ingest×2/notify│
+│  9 个 tool: search×3/entity/write/extract/ingest×2/notify│
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐

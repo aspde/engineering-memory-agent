@@ -11,28 +11,27 @@
 
 | 短板 | 代码证据 | 危险度 |
 |------|---------|--------|
-| 无用户认证 | [ADR-004](../decisions/ADR-004-no-multi-tenancy.md) 明确"当前无用户认证系统" | 🟡 有 ADR 撑腰 |
-| 无监控指标 | grep 未发现 prometheus/opentelemetry，仅 `logging.warning` | 🔴 真实疏漏 |
-| 未容器化 | [deployment.md](../deployment.md) "backend 待容器化" | 🔴 真实疏漏 |
-| 无 CI/CD | 项目自身无 CI（虽接了 CI 连接器） | 🔴 真实疏漏 |
+| 无用户级认证（登录/角色/权限） | 接入认证已有 API key：所有 `/api` 请求须携带 `Authorization: Bearer <EMA_API_KEY>`（[auth.py](../../backend/api/auth.py) `secrets.compare_digest` 常量时间比较 + 通用 401，全局挂载于 [router.py](../../backend/api/router.py)，`APP_ENV=test` 豁免），单 key 共享、无用户身份 | 🟢 有意取舍 + 已实现兜底 |
+| 未容器化 | 已解决：根目录 [Dockerfile](../../Dockerfile)（后端 + 前端单镜像）+ `docker compose up -d` 一键启动（[deployment.md](../deployment.md)） | ✅ 已补 |
 | 巡检内嵌主进程 | [main.py:122-194](../../backend/main.py) 调度器在 FastAPI 主进程 | 🟡 有意取舍 |
 | Windows 降级 | [main.py:24-30](../../backend/main.py) PostgresSaver 降级 InMemorySaver | 🟢 已知平台差异 |
-| 无评估体系 | 未发现 Recall@K / MRR / LLM-as-judge 实现 | 🔴 对口岗位核心短板 |
-| 无成本监控 | [metrics.py](../../backend/shared/metrics.py) 进程内计数器——重启清零、`/usage/reset` 无鉴权、无持久化、无告警 | 🔴 AI 工程化短板 |
-| Prompt 散落代码 | [extraction.py](../../backend/service/extraction.py) / [memory.py](../../backend/service/memory.py) 内嵌字符串 | 🟡 中等 |
 | 连接池写死 | [db/__init__.py](../../backend/db/__init__.py) 5+10 | 🟢 低 |
+
+> **已补齐（相对本文档初版）**：评估体系（Recall@K/MRR/NDCG + LLM-as-judge，见 §2.4）、成本监控（`llm_usage` 表 + `/api/usage/*` 端点 + 成本估算，见 [architecture.md](../architecture.md)）、CI/CD（`.github/workflows/ci.yml` 跑后端 pytest + 前端 vitest + `eval.yml` 每周检索评估）、Prompt 版本管理（[prompts.py](../../backend/service/prompts.py) 中央注册表 + 版本号）、**运行监控指标**（[runtime_metrics.py](../../backend/shared/runtime_metrics.py) + `GET /metrics` 暴露 Prometheus 时序：HTTP 请求/延迟、LLM 调用/token、熔断器状态、Agent 并发槽位与 ReAct 步数分布，见 [architecture.md](../architecture.md) Observability）。这些不再列为短板。
 
 ### 1.2 优先补全顺序
 
 ```
 评估体系（§2） → 关键数字实测（§3） → 成本监控（§4） → 压测（§5）
-     ↑                                              ↑
-   最危险，对口岗位必问                          面试官最爱追问
+     ↑              ↑                     ↑              ↑
+   已补齐        数字已部分回填       已补齐（llm_usage 表）  已补齐（locust，见 §5.3）
 ```
+
+> **进度更新**：评估体系（§2）与成本监控（§4）已按方案落地——评估见 §2.4，成本监控的 `llm_usage` 表 + `/api/usage/*` 已在 [architecture.md](../architecture.md) 文档化。容器化已补：根目录 Dockerfile + `docker compose up -d`（见 [deployment.md](../deployment.md)）。压测已补：`tests/perf/locustfile.py` + 实测数字（§5.3）。当前剩余短板聚焦：无监控指标（prometheus/otel）、对话 P95 与 token 成本待实测。
 
 ---
 
-## 二、评估体系补全方案（最高优先级）
+## 二、评估体系（已交付）
 
 ### 2.1 为什么这是最危险的短板
 
@@ -41,7 +40,7 @@ AI/LLM 应用工程师岗位面试**必问**的三连击：
 2. 「换了个 reranker，效果变好还是变差？怎么量化？」
 3. 「你的记忆衰减加权有没有让检索变好？」
 
-没有评估体系 = 这三问全部答不上来 = AI 工程化能力直接被质疑。
+评估体系已交付（见 §2.4）——现在这三问都有数字可答，而非只讲设计。§2.2-2.3 保留最初的设计草案与实现说明，供回顾演进过程。
 
 ### 2.2 最小可行评估体系设计
 
@@ -180,6 +179,11 @@ if __name__ == "__main__":
 
 > 状态：✅ 已交付。工具选择 / 知识抽取 / 最终答案三套 LLM 行为评测见
 > [llm-eval.md](./llm-eval.md)，CLI 为 `python -m tests.eval.run_llm_eval`。
+> 2026-08-09 新增第四套 **任务级端到端评测**（`python -m tests.eval.run_task_eval`）——
+> 驱动真实 Agent 图（ReAct 循环 + 真实工具执行 + HITL 自动放行）完成多步任务，测
+> `completed` / `tool_recall` / `within_budget` 与答案接地。它顺带抓出并修复了一个
+> 生产 bug：拒绝审批后写操作仍被静态边路由执行（LangGraph 1.2.10 resume 时 Command
+> 与静态边同时生效），见 [llm-eval.md](./llm-eval.md) 末尾。
 > 下方是最初的最小草案，实际实现有三处演进：
 > 1. 评测面从"答案质量"扩到**工具选择 + 知识抽取 + 最终答案**三个维度；
 > 2. 裁判输出改用 `chat_structured`（JSON Schema 校验 + 语义重试），放弃裸
@@ -227,7 +231,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 
 ### 2.4 实施完成记录（阶段 B 已交付）
 
-> 状态：✅ 已完成（101 单测全过，CLI 可跑）。下方为实际交付物，替代 §2.2 的最小草案。
+> 状态：✅ 已完成（342 单测全过——检索评估 + LLM 行为评测，CLI 可跑）。下方为实际交付物，替代 §2.2 的最小草案。
 
 **交付目录**：`tests/eval/`
 
@@ -268,11 +272,11 @@ python -m tests.eval.run_eval --retriever memory
 **待回填数字**（跑完后填入 self-introduction.md / ema-deep-dive.md；**注**：以下 chunks 路径数字为 08-06 06:11 旧 baseline，基于重新播种前语料——当前语料下 vector 单独即 Recall@5=1.000，见 §11 更正）：
 - chunks 路径（vector_search，无 rerank）：Recall@5=**0.833** / MRR=**0.817** / NDCG@5=**0.819** / MAP@5=0.811（30 query，旧 baseline，当前语料已 1.000）
 - memory 路径：[待跑，需先 `python -m tests.eval.seed --memories` 灌结构化记忆]
-- LLM rerank vs CE Δ recall@5：[待跑，cross-encoder rerank 单 query 50s（CPU 瓶颈），30 query 需 25min，建议 GPU 环境或降候选数后跑]
+- cross-encoder rerank vs 无 rerank Δ recall@5：**-0.033**（hybrid:ce 0.967 vs hybrid:norank 1.000，30 query 全量实测——rerank 在小语料下有害，见 §11.5） | LLM rerank vs CE：[待跑，cross-encoder rerank 单 query 17.5s（CPU 瓶颈），30 query 需 ~9min]
 - easy/medium/hard recall@5：**0.714 / 0.929 / 0.778**（medium 最高，easy 反而最低——部分 easy query 词重合但向量区分度不足；hard 概念查询 0.778 优于预期）
 - 按 category：技术决策 1.000 / 代码实现 1.000 / 架构设计 0.833 / 故障复盘 0.667 / 历史背景 0.667（故障复盘+历史背景是短板，概念查询多）
 
-**性能瓶颈实测**（面试可讲）：cross-encoder rerank（BGE-reranker-v2-m3，568M 参数）在 CPU 上单 query rerank 20 候选耗时 20s，加 embed+search 单 query 总 50s。这是 EMA 单机 CPU 部署的已知瓶颈，优化方向：① embed/rerank 服务化接 GPU；② 降过采样倍数（top_k×4→top_k×2）；③ 高频 query 缓存 rerank 结果。当前评估默认走 vector_search 路径绕过此瓶颈。
+**性能瓶颈实测**（面试可讲）：cross-encoder rerank（BGE-reranker-v2-m3，568M 参数）在 CPU 上单 query 总耗时 **17.5s**（含 embed+search+rerank，见 [eval-report.md](./eval-report.md) hybrid:ce 行）。这是 EMA 单机 CPU 部署的已知瓶颈，优化方向：① embed/rerank 服务化接 GPU；② 降过采样倍数（top_k×4→top_k×2）；③ 高频 query 缓存 rerank 结果。当前评估默认走 hybrid 无 rerank 路径绕过此瓶颈。
 
 ---
 
@@ -286,15 +290,19 @@ python -m tests.eval.run_eval --retriever memory
 |------|---------|--------|---------|
 | 记忆库总条数 | `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL` | 0（生产空）/ 30 条评估种子 | "评估集 30 条标注 query，生产待部署" |
 | chunks 总条数 | `SELECT COUNT(*) FROM chunks` | 30（评估种子） | "种子语料 30 条，覆盖 5 类记忆" |
-| 向量召回 P95 延迟 | 在 `/api/memory/search` 加计时日志 | ~230ms（embed 150-230ms + search） | "向量召回稳态 200ms，含 BGE-M3 embed" |
-| 完整检索 P95（含 rerank） | 同上，覆盖 rerank | 50s/query（CPU 瓶颈） | "cross-encoder rerank CPU 上 50s/query，是已知瓶颈，待 GPU 优化" |
+| 向量召回 P95 延迟 | 在 `/api/memory/search` 加计时日志 | ~190ms（hybrid 无 rerank，含 embed + sparse + sort） | "hybrid 稳态 190ms，含 BGE-M3 embed" |
+| 完整检索 P95（含 rerank） | 同上，覆盖 rerank | 17.5s/query（CPU 瓶颈） | "cross-encoder rerank CPU 上 17.5s/query，是已知瓶颈，待 GPU 优化" |
 | Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | [待测] | "对话 P95 [X]s" |
 | 单次对话平均 token 数 | LLMProvider 加计数（见 §4） | [待测] | "平均 [X] token/轮" |
-| 单次对话平均 tool 调用数 | 在 Agent 加计数 | [待测] | "平均调 [X] 个 tool" |
+| 单次对话平均 tool 调用数 | 在 Agent 加计数 | 2.6 次/任务（task 轨迹均值） | "任务级评测 8 任务平均 2.6 次 LLM 调用，概念查询会到 5" |
+| Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | "8 任务实测：工具选择意图准（0.94）但过度调用（unexpected 0.375）拉低严格完成率，是轨迹级真实短板" |
+| Agent 答案接地 | 同上（judge 对工具上下文判定） | groundedness 1.000 / citation 0.875 / 0 执行错误 | "答案全部接地、无捏造、零错误；过度调用而非幻觉是主要问题" |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms（CPU） | "embed 150-230ms/条，CPU 推理" |
 | 检索 Recall@5 | `python -m tests.eval.run_eval --retriever hybrid_norerank` | 1.000 | "hybrid+jieba 无 rerank Recall@5 1.00（当前语料下向量 baseline 亦 1.00），评估集 30 query" |
 | 检索 MRR | 同上 | 0.983 | "MRR 0.98" |
 | 检索 NDCG@5 | 同上 | 0.988 | "NDCG@5 0.99" |
+| 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | "QPS 随并发线性涨至 160 仍 0 失败，瓶颈在 BGE CPU embed" |
+| 检索 P95（压测） | 同上 | 10 并发 110ms / 80 并发 690ms / 160 并发 1.0s | "缓存热路径 P95 110ms@10 并发；冷查询单次 1.75s（含 embed）" |
 
 ### 3.2 计时日志埋点示例
 
@@ -318,13 +326,16 @@ async def query_memories(query: str, top_k: int = 5, use_llm_rerank: bool = Fals
 
 ---
 
-## 四、成本监控补全
+## 四、成本监控（已交付）
 
-### 4.1 LLMProvider 加 token 计数
+> **现状**：已按方案落地并超越——provider 层统一埋点（唯一咽喉点），观测值进内存缓冲 + 后台 flusher 批量 INSERT 到 `llm_usage` 表（持久化），暴露 `/api/usage/*` 端点（summary/scenarios/models/threads/trace），含 `estimate_cost` 按模型价格表估算成本。详见 [architecture.md](../architecture.md) 的 "Observability (LLM usage tracing)" 一节。下方的 §4.1-4.2 为最初的内存计数草案，现被持久化方案取代，仅保留作演进记录。
+
+### 4.1 （已实现替代）内存计数草案
 
 ```python
-# backend/service/llm_service.py —— 在现有 chat/chat_raw 方法加计数
-
+# 已被 backend/service/usage.py 的 llm_usage 持久化方案取代——
+# 原草案是进程内 dict 计数（重启清零），现方案是内存缓冲 + 后台落库。
+# 此处保留最初设计供回顾。
 from collections import defaultdict
 import logging
 
@@ -348,58 +359,52 @@ def get_token_usage() -> dict[str, int]:
     return dict(_token_usage)
 ```
 
-在 `chat()` / `chat_raw()` 返回前调 `_record_usage("memory_search", response.usage)`。
+> 该草案的计数逻辑现由 `backend/service/usage.py` 实现（`record_usage` + 有界内存缓冲 + 后台 flusher + `estimate_cost`），场景字段与 `llm_usage.scenario` 对齐。
 
 ### 4.2 面试话术
 
-> 「我在 LLMProvider 加了 token 计数，按场景统计——记忆提取、冲突检测、rerank、Agent 对话分开算。目前日均消耗 [X] token，其中 Agent 对话占 [Y]%，冲突检测占 [Z]%。
+> 「LLM 调用我做了统一埋点——provider 层是唯一咽喉点，每次调用写一行观测到 `llm_usage` 表，按场景统计（记忆提取、冲突检测、rerank、Agent 对话分开算），并通过 `/api/usage/*` 暴露按天/按场景/按模型的汇总和成本估算。trace_id 贯穿一次 agent 运行，能回放单轮对话的调用链。
 >
-> 成本控制策略：90% 写入只走向量（零 LLM 成本），只在 0.75-0.92 边界调 LLM；rerank 默认 cross-encoder 本地（零 API 成本）；max_steps=5 防止 Agent 失控烧 token。」
+> 成本控制策略：90% 写入只走向量（零 LLM 成本），只在 0.75-0.92 边界调 LLM；rerank 默认本地 cross-encoder（零 API 成本）；max_steps=5 防止 Agent 失控烧 token。」
 
 ---
 
 ## 五、压测补全（locust）
 
-### 5.1 最小压测脚本
+### 5.1 压测脚本（已交付）
 
-```python
-# tests/perf/locustfile.py
-"""locust 压测 /api/memory/search"""
-from locust import HttpUser, task, between
-import random
+`tests/perf/locustfile.py` 压测 `/api/memory/search`。相比最小草案的升级：
+- **带认证头**：读取 `.env` 的 `EMA_API_KEY`，每个请求带 `Authorization: Bearer`（`backend/api/auth.py` 全局守卫所有 `/api` 路由，不带 key 返回 401）
+- **真实查询集**：从 `tests/eval/ground_truth.py` 抽取 10 个查询，保证每个请求都命中真实检索（BGE embed + pgvector + sparse），不压空结果
 
-QUERIES = [
-    "PostgreSQL 连接池配置",
-    "之前怎么修的 OOM",
-    "微服务拆分决策",
-    "EMA 架构设计",
-    "技术债有哪些",
-]
-
-
-class MemorySearchUser(HttpUser):
-    wait_time = between(1, 3)
-    host = "http://localhost:8000"
-
-    @task
-    def search_memories(self):
-        self.client.post(
-            "/api/memory/search",
-            json={"query": random.choice(QUERIES), "top_k": 5},
-        )
-```
-
-### 5.2 跑压测
+### 5.2 跑压测（实测命令）
 
 ```bash
 pip install locust
-locust -f tests/perf/locustfile.py
-# 浏览器打开 http://localhost:8089，设 10 用户、爬升 10s、持续 60s
+cd G:\Projects\ema
+EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
+  --headless -u 10 -r 2 -t 60s --host http://127.0.0.1:8000 --only-summary
 ```
 
-### 5.3 面试话术
+需先 `python -m tests.eval.seed` 灌入 30 条评估种子，后端以 `.venv` 启动（Windows 见下注）。
 
-> 「我用 locust 压过检索接口，10 并发下 QPS [X]，P95 [Y]ms。瓶颈在 BGE-M3 CPU 推理，单机大概能扛 [Z] QPS。高并发要把 embedding 服务化成独立 batch 服务，用 GPU 推理。」
+### 5.3 实测结果（2026-08-09，本机 CPU）
+
+| 并发 | QPS | P50 | P95 | P99 | 失败率 |
+|------|-----|-----|-----|-----|--------|
+| 10 | 4.77 | 78ms | 110ms | 440ms | 0% |
+| 20 | 9.39 | 70ms | 100ms | 230ms | 0% |
+| 40 | 18.63 | 74ms | 240ms | 430ms | 0% |
+| 80 | 34.77 | 110ms | 690ms | 850ms | 0% |
+| 160 | 63.32 | 410ms | 1000ms | 1300ms | 0% |
+
+**瓶颈分析**：QPS 随并发线性增长（10→160 并发，4.8→63.3），直至 160 并发仍 **0 失败**，但 80→160 增幅减半、P95 从 690ms 恶化到 1.0s——这是典型的 **CPU 嵌入式（BGE-M3）绑定 + 无失败、延迟随并发恶化** 曲线。注意本压测查询命中 query-embedding LRU 缓存（10 个固定查询重复压），测出的是**缓存热路径**；冷查询每次需 BGE embed 150-230ms（单次 curl 实测 ~1.75s）。
+
+> **Windows 启动注**：Windows 上 uvicorn 默认 ProactorEventLoop 与 psycopg 异步不兼容，`_pool.wait()` 会无限重试挂起 lifespan。已修复：`_setup_checkpointer` 给 wait 加 10s 超时，超时降级 InMemorySaver（`backend/service/agent_service.py` + `tests/unit/test_checkpointer_fallback.py`）。Linux 容器（Dockerfile）无此问题。
+
+### 5.4 面试话术
+
+> 「我用 locust 压过检索接口：10 并发 QPS 4.8、P95 110ms；160 并发 QPS 63、P95 1.0s，全程 0 失败。瓶颈在 BGE-M3 CPU 推理——QPS 随并发线性涨但延迟恶化，冷查询还要加 150-230ms 嵌入。高并发要把 embedding 服务化成独立 batch 服务上 GPU。」
 
 ---
 
@@ -407,11 +412,11 @@ locust -f tests/perf/locustfile.py
 
 ### 6.1 评估体系类问题（必问）
 
-| 问题 | 没补评估前 | 补了评估后 |
-|------|-----------|-----------|
-| 「怎么知道检索准不准？」 | 老实承认没做 | 「我建了 20 条标注集，Recall@5 是 0.72」 |
-| 「换 reranker 效果如何？」 | 讲不出数字 | 「LLM rerank 让 Recall@5 从 0.72 升到 0.78，但成本 X 倍」 |
-| 「衰减加权有用吗？」 | 只能讲理论 | 「我对比过开关衰减，开了之后高频记忆的 MRR 提升了 Y」 |
+| 问题 | 补了评估后（实际数字） |
+|------|----------------------|
+| 「怎么知道检索准不准？」 | 「30 条标注集，5 类 × 6 条 + 难度分级；当前语料 hybrid 无 rerank Recall@5=1.00、MRR 0.98」 |
+| 「换 reranker 效果如何？」 | 「A/B 实测：cross-encoder 反而有害——hybrid:ce 0.967 vs 无 rerank 1.000，0.15 floor 误伤 q015；收益 scale-dependent」 |
+| 「记忆衰减加权有用吗？」 | 「衰减是检索排序的一部分，未单独 A/B——讲设计：常用记忆浮上来、过时沉底、不删除」 |
 
 ### 6.2 成本类问题
 
@@ -424,25 +429,27 @@ locust -f tests/perf/locustfile.py
 
 | 问题 | 没补前 | 补了后 |
 |------|--------|--------|
-| 「能扛多少并发？」 | 讲不出 | 「locust 压测 10 并发 QPS X，P95 Yms」 |
-| 「瓶颈在哪？」 | 推测 | 「实测瓶颈在 BGE-M3 CPU 推理」 |
+| 「能扛多少并发？」 | 讲不出 | 「locust 压测 10 并发 QPS 4.8、P95 110ms；160 并发 QPS 63、全程 0 失败」 |
+| 「瓶颈在哪？」 | 推测 | 「实测瓶颈在 BGE-M3 CPU 推理——QPS 线性涨但 P95 恶化（690ms@80 并发 → 1.0s@160），冷查询再加 150-230ms embed」 |
 
 ---
 
 ## 七、执行清单（面试前 2 天）
 
+> **进度**：评估体系、成本监控、CI、Dockerfile、locust 压测已交付。下方原清单保留待办项，已完成的标记 ✅。
+
 ### Day 1（约 6 小时）
 
-- [ ] 上午：构造 20 条标注集（从记忆库导出 + 人工标注）—— 2h
-- [ ] 上午：实现 metrics.py + run_eval.py，跑出 Recall@5 / MRR / NDCG —— 1h
-- [ ] 下午：对比 cross-encoder vs LLM rerank，对比开关衰减，记录数字 —— 1h
-- [ ] 下午：LLMProvider 加 token 计数，跑 10 轮对话算成本 —— 1h
-- [ ] 晚上：在 retrieval/agent 加计时日志，跑 20 次取 P95 —— 1h
+- [x] 上午：构造 20 条标注集（已建 30 条，5 类 × 6 条 + 难度分级）—— ✅ 完成
+- [x] 上午：实现 metrics.py + run_eval.py，跑出 Recall@5 / MRR / NDCG —— ✅ 完成（101→342 单测）
+- [x] 下午：对比 cross-encoder vs LLM rerank，对比开关衰减，记录数字 —— ✅ 部分（CE 对比已跑，LLM rerank 未跑；衰减开关未单独 A/B）
+- [x] 下午：LLMProvider 加 token 计数，跑 10 轮对话算成本 —— ✅ 完成（llm_usage 表）
+- [ ] 晚上：在 retrieval/agent 加计时日志，跑 20 次取 P95 —— 部分完成（检索延迟已测 190ms，对话 P95 待测）
 
 ### Day 2（约 4 小时）
 
-- [ ] 上午：写 Dockerfile + GitHub Actions CI（跑 pytest）—— 2h
-- [ ] 上午：locust 压测，拿 QPS + P95 数字 —— 1h
+- [x] 上午：写 Dockerfile（后端 + 前端单镜像，torch 分步安装）—— ✅ 完成（见 [deployment.md](../deployment.md)）
+- [x] 上午：locust 压测，拿 QPS + P95 数字 —— ✅ 完成（见 §5.3 实测表）
 - [ ] 下午：把所有实测数字填回 self-introduction.md / ema-deep-dive.md 占位符 —— 1h
 
 ### 完成后应能答
@@ -458,13 +465,12 @@ locust -f tests/perf/locustfile.py
 
 ## 八、如果时间不够（只补 P0）
 
-如果只有半天，按这个顺序补：
+> 评估体系、成本监控、容器化、locust 压测已交付，剩余高优先级动作：
 
-1. **实测记忆条数 + QPS + P95**（2h）—— 至少有"规模 + 性能"数字
-2. **token 计数 + 跑 10 轮算成本**（1h）—— 至少能答"一次对话多少钱"
-3. **填实所有占位符**（1h）—— 避免临场卡壳
+1. **实测对话 P95 + token 成本**（2h）—— 唯一还没实测的生产数字（检索已有 QPS/P95）
+2. **填实所有占位符**（1h）—— 避免临场卡壳
 
-评估体系（标注集）如果没时间，就用话术应对：「目前没有系统化评估，是已知改进项。如果做，我会建标注集算 Recall@K，用 LLM-as-judge 评生成质量。」—— 诚实 + 有方案，不扣大分。
+检索与生成评估数字已有（Recall@5 1.00 / MRR 0.98 / LLM 行为评测四套件 / locust QPS 63@160 并发），不用再补标注集。
 
 ---
 

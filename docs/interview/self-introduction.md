@@ -9,7 +9,7 @@
 
 面试官您好，我叫 [需要你补充：姓名]，[需要你补充：工作年限，如 4] 年开发经验，主要技术栈是 Python 后端和 LLM 应用工程。
 
-最近两年我重点在做 AI 应用落地，方向是 **LLM Agent + RAG + 向量检索** 这一块。之前在 [需要你补充：公司名] 担任 [需要你补充：角色，如后端开发 / AI 应用开发]，独立负责过一个叫 EMA 的工程项目，这是一个面向研发团队的长期记忆智能体，目前是面试想看 AI 应用工程师的方向。
+最近两年我重点在做 AI 应用落地，方向是 **LLM Agent + RAG + 向量检索** 这一块。之前在 [需要你补充：公司名] 担任 [需要你补充：角色，如后端开发 / AI 应用开发]。业余时间我主导了一个叫 EMA 的工程项目——一个面向研发团队的长期记忆智能体，也是我今天想重点聊的项目。
 
 ---
 
@@ -37,7 +37,7 @@ EMA 全称 Engineering Memory Agent，一句话讲就是把研发过程中的代
 
 ## EMA 的三个技术亮点（2 分钟，约 440 字）
 
-这个项目我从 0 到 1 独立完成，技术上有三个我比较得意的点：
+这个项目我从 0 到 1 端到端主导，技术上有三个我比较得意的点：
 
 **第一个是记忆系统的去重和冲突检测**。我设计了四级相似度分级：相似度 0.92 以上直接合并，0.75 到 0.92 之间调 LLM 检测是否矛盾，矛盾就走人机协同让用户仲裁，不矛盾就补充关联；0.6 到 0.75 插入新记忆但建立关联；0.6 以下才算全新。这样既能去重，又不会把矛盾信息粗暴合并掉。每个相似度阈值是经过调参的，0.92 是实测下来"几乎是同一条"的边界。
 
@@ -49,7 +49,7 @@ EMA 全称 Engineering Memory Agent，一句话讲就是把研发过程中的代
 
 ## 量化成果（30 秒，约 110 字）
 
-目前 EMA 已经接入了 4 个数据源——Git、PingCode、CI、飞书。检索上我建了 30 条标注 query 的评估集，当前语料下 BGE-M3 稠密召回 **Recall@5 1.00、MRR 0.98**。生产瓶颈上我重点处理了 sparse_search 的 O(N) 扫描——把 jieba 分词结果落到 chunks 表的 tokens 列 + GIN 索引，用 `tokens &&` 过滤把候选集限制在真实 token 重叠的行，1000 条语料实测延迟 -69%；rerank 经 A/B 验证在小语料下有害（0.15 floor 误伤低分相关结果），跳过 rerank 后延迟从 17.5s 降到 0.19s，收益 scale-dependent。工程上后端 6500 行、452 个测试用例。整个项目我独立完成，从架构设计到代码实现。
+目前 EMA 已经接入了 4 个数据源——Git、PingCode、CI、飞书。检索上我建了 30 条标注 query 的评估集，当前语料下 BGE-M3 稠密召回 **Recall@5 1.00、MRR 0.98**。生产瓶颈上我重点处理了 sparse_search 的 O(N) 扫描——把 jieba 分词结果落到 chunks 表的 tokens 列 + GIN 索引，用 `tokens &&` 过滤把候选集限制在真实 token 重叠的行，1000 条语料实测延迟 -69%；rerank 经 A/B 验证在小语料下有害（0.15 floor 误伤低分相关结果），跳过 rerank 后延迟从 17.5s 降到 0.19s，收益 scale-dependent。压测我用 locust 打 `/api/memory/search`：10 并发 QPS 4.8、P95 110ms，160 并发 QPS 63 全程 0 失败——瓶颈在 BGE-M3 CPU 嵌入，QPS 随并发线性涨但延迟恶化。Agent 行为我用任务级端到端评测量化——8 个多步任务驱动完整 Agent 图，实测工具召回 0.94、答案接地率 1.00，完成率 0.5 暴露了模型过度调用工具的轨迹级问题，这套评估还顺带抓出并修复了一个 HITL 拒绝路径的 bug。工程上后端加 agent 层 1.6 万行、1281 个测试用例。项目是我端到端主导的，没有团队兜底，所以从第一天我就用团队工程的纪律要求自己——每个架构决策写 ADR、每次提交过 CI、每个检索改动跑评估集对比——用可追溯的流程来替代我缺的那个 code review。
 
 ---
 
@@ -62,6 +62,8 @@ EMA 全称 Engineering Memory Agent，一句话讲就是把研发过程中的代
 真正要解决的工程瓶颈浮出来了：**中文 sparse 检索的 O(N) 扫描**。jieba 分词若在 Python 侧全表扫描，万级语料直接退化。我把 jieba 分词结果落到 chunks 表的 **tokens 列 + GIN 索引**，sparse_search 用 `tokens && :query` 把候选集限制在真实 token 重叠的行——O(log N) 发现候选，Jaccard 只在小候选集上算，1000 条语料实测延迟 -69%。
 
 rerank 单独 A/B：cross-encoder + 0.15 floor 在小语料下误伤低分相关结果（q015 打分 0.142 被滤掉），跳过 rerank 延迟从 17.5s 降到 0.19s。rerank 收益 scale-dependent，大语料候选池缩小时才值得重新开。第二课：**别假设"更重的模型一定更好"——先 A/B，再下结论**。
+
+Agent 行为层面我补了第五维评测：**任务级端到端**——8 个多步任务驱动完整 Agent 图（ReAct 循环 + 真实工具执行 + HITL 自动放行），测 `completed` / `tool_recall` / `within_budget`。实测 DeepSeek：工具召回 0.94、答案接地率 1.00、0 执行错误，但完成率只有 0.5——`unexpected_rate 0.375` 说明模型**过度调用工具**（回答一个记忆问题调 4 次工具、概念查询撞 max_steps），这是组件级评测永远看不到的轨迹级行为问题。第三课：**Agent 质量要靠"整条轨迹"测，单点指标测不出编排层面的毛病**。这套评测还顺带抓出并修复了一个生产 HITL bug——拒绝审批后写操作仍被执行（LangGraph resume 时 Command 与静态边同时生效），图级回归测试已加。
 
 ---
 
@@ -91,8 +93,8 @@ EMA 一句话：研发知识自动沉淀为长期记忆，解决"人走知识没
   1. 四级相似度去重(0.92合并/0.75冲突/0.60关联/<0.60新增)
   2. 艾宾浩斯衰减(R=e^(-t/S), S=1+recall×2, 相似度×decay排序)
   3. LangGraph 手动 StateGraph + 双 HITL 卡点(审批/仲裁) + PostgresSaver
-成果：4 数据源 / 评估集30条 dense 1.00 MRR 0.98 / sparse O(N)→jieba tokens+GIN(tokens&&) -69% / rerank可跳过(0.15 floor误伤q015) 17.5s→0.19s / 后端6500行 452测试 / 独立完成
-评估迭代：①score阈值不可行(hit/miss重叠 0.54 vs 0.69) ②tsvector simple切不了中文(0行)→jieba ③语料改真实→dense 1.00(瓶颈真假取决于评估语料质量) ④真瓶颈=sparse O(N)→jieba tokens落库+GIN ⑤rerank可跳过(0.15 floor误伤,17.5s→0.19s,scale-dependent)
+成果：4 数据源 / 评估集30条 dense 1.00 MRR 0.98 / sparse O(N)→jieba tokens+GIN(tokens&&) -69% / rerank可跳过(0.15 floor误伤q015) 17.5s→0.19s / task_eval 8任务 completed 0.5 tool_recall 0.94 grounded 1.0(过度调用是短板) / locust 10并发QPS 4.8 P95 110ms 160并发QPS 63 0失败 / 后端+agent 1.6万行 1281测试 / 端到端主导+工程纪律(ADR/CI/评估集替代无review)
+评估迭代：①score阈值不可行(hit/miss重叠 0.54 vs 0.69) ②tsvector simple切不了中文(0行)→jieba ③语料改真实→dense 1.00(瓶颈真假取决于评估语料质量) ④真瓶颈=sparse O(N)→jieba tokens落库+GIN ⑤rerank可跳过(0.15 floor误伤,17.5s→0.19s,scale-dependent) ⑥task_eval抓过度调用(unexpected 0.375)+HITL拒绝路径bug(Command与静态边同时生效)
 动机：JD 匹配 / 想做更大场景(万级记忆/多Agent/多租户) / 往 AI 工程专家走
 收尾：引导到项目深讲
 ```
@@ -107,8 +109,8 @@ EMA 一句话：研发知识自动沉淀为长期记忆，解决"人走知识没
 
 ### 8 分钟版（技术面主问）
 
-完整版 + 在"三亮点"每点后加 1 个具体技术细节（如衰减公式、相似度阈值来源、HITL 的 Command 路由机制）+ 展开"评估驱动的优化发现"段落（score 阈值不可行 → tsvector simple 切不了中文 → 语料改真实后 dense 1.00 → jieba 分词落库 + GIN 解决 sparse O(N) 瓶颈 → rerank 可跳过，scale-dependent）。
+完整版 + 在"三亮点"每点后加 1 个具体技术细节（如衰减公式、相似度阈值来源、HITL 的 Command 路由机制）+ 展开"评估驱动的优化发现"段落（score 阈值不可行 → tsvector simple 切不了中文 → 语料改真实后 dense 1.00 → jieba 分词落库 + GIN 解决 sparse O(N) 瓶颈 → rerank 可跳过，scale-dependent → 任务级评测抓出过度调用 + HITL 拒绝路径 bug）。
 
 ### 1 分钟电梯版
 
-"我做 LLM Agent 和 RAG 工程，最近独立做了一个研发记忆智能体 EMA，用 LangGraph + pgvector，把代码和故障经验自动沉淀成可检索的长期记忆，有四级去重和艾宾浩斯衰减。想找 AI 应用工程师方向的机会。"
+"我做 LLM Agent 和 RAG 工程，最近主导了一个研发记忆智能体 EMA，用 LangGraph + pgvector，把代码和故障经验自动沉淀成可检索的长期记忆，有四级去重和艾宾浩斯衰减。想找 AI 应用工程师方向的机会。"
