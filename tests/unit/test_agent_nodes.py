@@ -665,6 +665,51 @@ class TestGenerateFinalNode:
         assert "OLD-MEMORY-RESULT" not in system["content"]
 
     @pytest.mark.asyncio
+    async def test_harvest_includes_chunk_retrieval_results(self, monkeypatch) -> None:
+        """A retrieve_chunks_tool result must reach the synthesis prompt.
+
+        Regression: generate_final_node skipped retrieve_chunks_tool results
+        while folding in the identical query_rewrite_and_search_tool, so a
+        turn whose last tool call was a chunk search synthesized its answer
+        without the chunks it had retrieved.
+        """
+        import agent.nodes as mod
+        from tests._fake_llm import text_stream
+
+        from agent.tool_envelope import build_tool_envelope
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Final.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+        _disable_compaction(monkeypatch)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="chunk question"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "c1", "name": "retrieve_chunks_tool",
+                         "args": {"query": "x"}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content=build_tool_envelope(
+                        "CHUNK-RETRIEVED-CONTENT", [{"document_id": "doc.md"}]
+                    ),
+                    tool_call_id="c1",
+                    name="retrieve_chunks_tool",
+                ),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        system = next(p for p in result["final_prompt"] if p["role"] == "system")
+        assert "CHUNK-RETRIEVED-CONTENT" in system["content"]
+        # Tagged as doc-source data, consistent with _CONTEXT_DOC_TOOLS.
+        assert 'source="retrieve_chunks_tool"' in system["content"]
+
+    @pytest.mark.asyncio
     async def test_no_tools_produces_prompt(self, monkeypatch) -> None:
         """Without any tool results, still produces a valid prompt (no context block)."""
         import agent.nodes as mod

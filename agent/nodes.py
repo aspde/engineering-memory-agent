@@ -1300,10 +1300,14 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         if not isinstance(m, ToolMessage):
             continue
         tool_name = getattr(m, "name", "unknown")
-        # Chunk retrieval is noisy; the LLM's answer should rely on
-        # memory search results (which have stable IDs and summaries).
-        if tool_name == "retrieve_chunks_tool":
-            continue
+        # Chunk retrieval results are folded into the synthesis context like
+        # memory results.  Both ``retrieve_chunks_tool`` and
+        # ``query_rewrite_and_search_tool`` return document chunks (and both
+        # are tagged ``doc`` in ``_CONTEXT_DOC_TOOLS``); previously only
+        # ``retrieve_chunks_tool`` was skipped here, so a turn whose *last*
+        # tool call was a chunk search synthesized the answer without ever
+        # seeing the chunks it retrieved.  Content is envelope-truncated
+        # below, so a noisy dump can't crowd out the prompt.
         raw = str(m.content) if m.content else ""
         if not raw.strip():
             continue
