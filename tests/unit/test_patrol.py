@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.service.patrol import (
+    _interrupt_payload,
+    _is_conflict_interrupt,
     _parse_findings,
     _validate_findings,
     mark_stale_patrols_failed,
@@ -113,6 +115,28 @@ def _make_mock_session(*, running_row=None) -> MagicMock:
     ctx.__aexit__ = AsyncMock(return_value=None)
     factory = MagicMock(return_value=ctx)
     return factory
+
+
+class TestConflictInterruptHelpers:
+    """Conflict-pause detection used by run_patrol's auto-resolution."""
+
+    def test_conflict_payload_detected(self) -> None:
+        interrupt = MagicMock()
+        interrupt.value = {"type": "conflict", "new_summary": "x"}
+        assert _is_conflict_interrupt({"__interrupt__": [interrupt]})
+
+    def test_non_conflict_payload_not_detected(self) -> None:
+        interrupt = MagicMock()
+        interrupt.value = {"tool_name": "write_memory_tool"}
+        assert not _is_conflict_interrupt({"__interrupt__": [interrupt]})
+
+    def test_no_interrupt_not_detected(self) -> None:
+        assert not _is_conflict_interrupt({"messages": []})
+
+    def test_interrupt_payload_unwraps_value(self) -> None:
+        interrupt = MagicMock()
+        interrupt.value = {"type": "conflict"}
+        assert _interrupt_payload(interrupt) == {"type": "conflict"}
 
 
 class TestRunPatrol:
@@ -237,6 +261,104 @@ class TestRunPatrol:
         assert update_calls[0].args[1]["status"] == "interrupted"
         findings = json.loads(update_calls[0].args[1]["findings"])
         assert findings["interrupt"]["tool_name"] == "write_memory_tool"
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_auto_resolves_conflict_interrupt(self) -> None:
+        """A write-conflict pause is auto-resolved keep_both so an unattended
+        patrol completes instead of sitting 'interrupted' forever."""
+        conflict = MagicMock()
+        conflict.value = {
+            "type": "conflict",
+            "new_summary": "new",
+            "existing_id": "existing-1",
+            "existing_summary": "old",
+            "options": ["keep_existing", "overwrite", "merge", "keep_both"],
+        }
+        completed = {
+            "final_response": json.dumps(
+                {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []}
+            ),
+            "messages": [],
+        }
+
+        mock_agent = AsyncMock()
+        # First ainvoke pauses on conflict; the keep_both resume completes.
+        mock_agent.ainvoke.side_effect = [
+            {"__interrupt__": [conflict], "messages": []},
+            completed,
+        ]
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert len(patrol_id) == 36
+        # Initial run + one keep_both resume.
+        assert mock_agent.ainvoke.await_count == 2
+        resume_command = mock_agent.ainvoke.await_args_list[1].args[0]
+        assert resume_command.resume == {"resolution": "keep_both"}
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls
+        assert update_calls[0].args[1]["status"] == "completed"
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_conflict_loop_bounded(self) -> None:
+        """A patrol that keeps re-conflicting stops after the auto-resolve
+        bound and persists 'interrupted' rather than spinning forever."""
+        conflict = MagicMock()
+        conflict.value = {
+            "type": "conflict",
+            "new_summary": "new",
+            "existing_id": "existing-1",
+            "existing_summary": "old",
+            "options": ["keep_existing", "overwrite", "merge", "keep_both"],
+        }
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {"__interrupt__": [conflict], "messages": []}
+        mock_factory = _make_mock_session()
+
+        from backend.service.patrol import _MAX_AUTO_CONFLICT_RESOLUTIONS
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        # Bound + 1: the initial call plus one resume per bound, then it stops.
+        assert (
+            mock_agent.ainvoke.await_count
+            == _MAX_AUTO_CONFLICT_RESOLUTIONS + 1
+        )
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "interrupted"
 
     @pytest.mark.asyncio
     async def test_run_patrol_marks_failed_on_unserialisable_findings(self) -> None:

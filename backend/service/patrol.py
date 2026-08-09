@@ -11,6 +11,9 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
+from typing import Any
+
+from langgraph.types import Command
 
 from backend.db import get_session_factory
 from backend.service.agent_service import get_agent
@@ -23,6 +26,28 @@ from backend.service.patrol_prompts import (
 from backend.shared.config import config, current_thread_id, current_trace_id
 
 logger = logging.getLogger(__name__)
+
+# Unattended patrols auto-resolve write-conflict pauses (see run_patrol): a
+# conflict interrupt pauses the graph for a human, but no human is watching a
+# cron/webhook run, so without auto-resolution the patrol would sit
+# 'interrupted' forever.  keep_both inserts the new content alongside the
+# existing memory — nothing is dropped or overwritten — and the bound below
+# stops a loop of repeated conflicts from spinning the whole patrol.
+_MAX_AUTO_CONFLICT_RESOLUTIONS = 3
+
+
+def _interrupt_payload(interrupt: Any) -> Any:
+    """The payload carried by a LangGraph interrupt object."""
+    return interrupt.value if hasattr(interrupt, "value") else interrupt
+
+
+def _is_conflict_interrupt(result: dict) -> bool:
+    """True when the graph is paused on a write conflict (type='conflict')."""
+    interrupts = result.get("__interrupt__")
+    if not interrupts:
+        return False
+    payload = _interrupt_payload(interrupts[0])
+    return isinstance(payload, dict) and payload.get("type") == "conflict"
 
 _PATROL_PROMPTS: dict[str, str] = {
     "daily": DAILY_PATROL_PROMPT,
@@ -249,6 +274,32 @@ async def run_patrol(
                         "recursion_limit": 50,  # higher limit for patrol scans
                     },
                 )
+                # A write conflict pauses the graph (check_conflict_node), and
+                # patrols are unattended — no human can resolve the pause, so
+                # without this the run would sit 'interrupted' forever.
+                # Auto-resolve conflict pauses with keep_both (the new content
+                # is inserted alongside the existing memory — nothing is
+                # dropped or overwritten), bounded so a loop of repeated
+                # conflicts can't spin the whole patrol.
+                auto_resolved = 0
+                while (
+                    _is_conflict_interrupt(result)
+                    and auto_resolved < _MAX_AUTO_CONFLICT_RESOLUTIONS
+                ):
+                    auto_resolved += 1
+                    logger.warning(
+                        "Patrol %s (%s) hit a memory conflict — auto-resolving "
+                        "keep_both (%d/%d)",
+                        patrol_id, patrol_type, auto_resolved,
+                        _MAX_AUTO_CONFLICT_RESOLUTIONS,
+                    )
+                    result = await agent.ainvoke(
+                        Command(resume={"resolution": "keep_both"}),
+                        config={
+                            "configurable": {"thread_id": patrol_thread_id},
+                            "recursion_limit": 50,
+                        },
+                    )
 
             # A HITL gate paused the graph: ``ainvoke`` returns *normally*
             # with ``__interrupt__`` set — it is not an exception.  Without
@@ -260,7 +311,7 @@ async def run_patrol(
             interrupts = result.get("__interrupt__")
             if interrupts:
                 status = "interrupted"
-                interrupt_payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                interrupt_payload = _interrupt_payload(interrupts[0])
                 findings = {"interrupt": interrupt_payload}
                 logger.warning(
                     "Patrol %s (%s) interrupted for human review: %r",
