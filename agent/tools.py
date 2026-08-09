@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 from langchain_core.tools import tool
+from pydantic import Field
 
 from backend.service.chunk import chunk_code, chunk_text
 from backend.service.entity import (
@@ -32,7 +33,7 @@ from backend.service.retrieval import query_memories, retrieve_hybrid, write_chu
 @tool
 async def search_memories_tool(
     query: str,
-    top_k: int = 5,
+    top_k: int = Field(default=5, ge=1, le=20),
     use_llm_rerank: bool = False,
 ) -> str:
     """Search long-term engineering memories for knowledge, decisions,
@@ -105,7 +106,7 @@ async def search_memories_tool(
 @tool
 async def retrieve_chunks_tool(
     query: str,
-    top_k: int = 5,
+    top_k: int = Field(default=5, ge=1, le=20),
     use_llm_rerank: bool = False,
 ) -> str:
     """Hybrid search over ingested document chunks (dense vector + BM25 keyword).
@@ -151,7 +152,7 @@ async def retrieve_chunks_tool(
 @tool
 async def query_rewrite_and_search_tool(
     query: str,
-    top_k: int = 5,
+    top_k: int = Field(default=5, ge=1, le=20),
     use_llm_rerank: bool = False,
 ) -> str:
     """Multi-query retrieval: LLM rewrites the query into variations,
@@ -326,7 +327,7 @@ async def query_entity_tool(entity_name: str) -> str:
 @tool
 async def ingest_git_repo_tool(
     repo_path: str,
-    max_commits: int = 50,
+    max_commits: int = Field(default=50, ge=1, le=200),
     branch: str | None = None,
 ) -> str:
     """Ingest a local Git repository's commit history as memories.

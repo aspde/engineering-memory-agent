@@ -57,7 +57,7 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 
 ### 为什么上下文窗口按 token 预算而不是消息条数
 
-发送给 LLM 的对话历史由 `context_token_budget`（默认 12000，`CONTEXT_TOKEN_BUDGET` 可调）约束，而不是旧的固定 12 条窗口。长消息自动收窄窗口、短消息放宽，避免"12 条都超长逼近上下文上限"的硬编码问题。token 数量用 CJK 感知的粗略估算（`_estimate_tokens`，中文 ~1 token/字符、ASCII 字母数字 ~4 字符/token，ASCII 标点符号按 ~2 字符/token 加权——代码/JSON 里符号密集，低估会溢出预算），不引入 tokenizer 依赖。对话压缩（`CONVERSATION_COMPACTION_ENABLED`）的触发条件同样是预算：超预算的早期历史被折叠为一条 running-summary，保留尾部约占预算 60%，压缩调用自身的输入也被截断（`_COMPACTION_TRANSCRIPT_CHARS`），防止溢出历史把压缩调用本身撑爆。压缩的 transcript 除对话文本外还纳入被窗口化的工具结果（`tool (名称): 内容`，按 display 解包并截断），这样早期检索回合的摘要不会丢掉工具返回的记忆/文档上下文。压缩摘要按"prompt 版本 + 逐字 transcript"有界记忆化（加锁收口）：工具回合会两次界定量（`call_llm_node` 与 `generate_final_node`），相同的溢出前缀复用同一次压缩结果，既省一次 LLM 调用，也让同一回合内两处注入的摘要一致。
+发送给 LLM 的对话历史由 `context_token_budget`（默认 12000，`CONTEXT_TOKEN_BUDGET` 可调）约束，而不是旧的固定 12 条窗口。长消息自动收窄窗口、短消息放宽，避免"12 条都超长逼近上下文上限"的硬编码问题。token 数量用 `_estimate_tokens` 估算：tiktoken（`o200k_base`）可用时按真实 BPE 计数，更接近各 provider 的实际计费；tiktoken 取不到编码时（离线环境）回退到 CJK 感知的启发式（中文 ~1 token/字符、ASCII 字母数字 ~4 字符/token、ASCII 标点符号按 ~2 字符/token 加权——代码/JSON 里符号密集，低估会溢出预算）。对话压缩（`CONVERSATION_COMPACTION_ENABLED`）的触发条件同样是预算：超预算的早期历史被折叠为一条 running-summary，保留尾部约占预算 60%，压缩调用自身的输入也被截断（`_COMPACTION_TRANSCRIPT_CHARS`），防止溢出历史把压缩调用本身撑爆。压缩的 transcript 除对话文本外还纳入被窗口化的工具结果（`tool (名称): 内容`，按 display 解包并截断），这样早期检索回合的摘要不会丢掉工具返回的记忆/文档上下文。压缩摘要按"prompt 版本 + 逐字 transcript"有界记忆化（加锁收口）：工具回合会两次界定量（`call_llm_node` 与 `generate_final_node`），相同的溢出前缀复用同一次压缩结果，既省一次 LLM 调用，也让同一回合内两处注入的摘要一致。
 
 ## 文件结构
 

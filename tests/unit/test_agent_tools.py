@@ -412,3 +412,46 @@ class TestConnectorAwareness:
         from agent.tools import ALL_TOOLS
 
         assert len(ALL_TOOLS) == 9
+
+
+class TestToolParamBounds:
+    """Retrieval/ingestion parameters must have schema-level bounds so a
+    zero or negative top_k / max_commits never reaches the backend."""
+
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            search_memories_tool,
+            retrieve_chunks_tool,
+            query_rewrite_and_search_tool,
+        ],
+    )
+    def test_retrieval_top_k_bounds_in_schema(self, tool) -> None:
+        props = tool.args_schema.model_json_schema()["properties"]
+        assert props["top_k"]["minimum"] == 1, tool.name
+        assert props["top_k"]["maximum"] == 20, tool.name
+
+    def test_ingest_max_commits_bounds_in_schema(self) -> None:
+        props = ingest_git_repo_tool.args_schema.model_json_schema()["properties"]
+        assert props["max_commits"]["minimum"] == 1
+        assert props["max_commits"]["maximum"] == 200
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("top_k", [0, -5])
+    async def test_retrieval_rejects_out_of_range_top_k(self, monkeypatch, top_k) -> None:
+        """A below-bounds top_k is rejected before any backend call."""
+        from agent import tools as mod
+
+        monkeypatch.setattr(mod, "query_memories", AsyncMock())
+        with pytest.raises(Exception, match="greater than or equal to 1"):
+            await search_memories_tool.ainvoke({"query": "x", "top_k": top_k})
+        mod.query_memories.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_ingest_rejects_out_of_range_max_commits(self, monkeypatch) -> None:
+        from agent import tools as mod
+
+        monkeypatch.setattr(mod, "ingest_repo", AsyncMock())
+        with pytest.raises(Exception, match="greater than or equal to 1"):
+            await ingest_git_repo_tool.ainvoke({"repo_path": "/x", "max_commits": 0})
+        mod.ingest_repo.assert_not_awaited()

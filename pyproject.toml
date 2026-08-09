@@ -24,6 +24,7 @@ dependencies = [
     "pygit2>=1.19",
     "python-multipart>=0.0.30",
     "jieba>=0.42",
+    "tiktoken>=0.7",
 ]
 
 [build-system]

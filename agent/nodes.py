@@ -95,6 +95,21 @@ def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
     return list(schemas)
 
 
+# An AIMessage appended when ``call_llm`` hits a provider error is a terminal
+# error stub — not real assistant output.  It is marked so downstream history
+# building (tool-selection dicts, synthesis prompts, compaction transcripts)
+# never re-sends it to the model as assistant text on a later turn; it still
+# stays in the checkpoint so the thread history / client shows the error.
+_LLM_ERROR_MARKER = "__ema_llm_error"
+
+
+def _is_llm_error_message(message: BaseMessage) -> bool:
+    """True for the marked error stub appended after a failed LLM call."""
+    return isinstance(message, AIMessage) and bool(
+        getattr(message, "additional_kwargs", {}).get(_LLM_ERROR_MARKER)
+    )
+
+
 def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
     """Convert LangChain messages to OpenAI-compatible dicts.
 
@@ -117,6 +132,10 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
     # whose ``tool_call_id`` has no preceding assistant ``tool_calls``.
     emitted_tool_call_ids: set[str] = set()
     for m in messages:
+        if _is_llm_error_message(m):
+            # A marked error stub from a previous failed LLM call must not be
+            # resent to the model as assistant output.
+            continue
         # 1. Determine role
         if isinstance(m, SystemMessage):
             role = "system"
@@ -210,23 +229,88 @@ def _has_tool_results_this_turn(messages: list[BaseMessage]) -> bool:
     return False
 
 
+def _is_new_user_turn(messages: list[BaseMessage]) -> bool:
+    """True when the most recent message is a fresh HumanMessage.
+
+    ``step_count`` bounds the ReAct loop within ONE user turn, but the
+    checkpointer persists it across turns — without a reset, a thread whose
+    first turn exhausted ``MAX_AGENT_STEPS`` would route every later turn's
+    first ``call_llm`` straight to ``generate_final`` (tools silently
+    disabled).  A new turn is exactly when the latest message is a
+    HumanMessage; loopbacks within a turn end with a ToolMessage (tool
+    result, approval rejection, conflict-resolution note), so they never
+    match — those continue the current turn's count.
+    """
+    return bool(messages) and isinstance(messages[-1], HumanMessage)
+
+
 # ── Context bounding ───────────────────────────────────────────────
 # A long-lived thread must not resend unbounded history plus every full
-# ToolMessage on each turn.  The window is sized by a *token budget* (rough
-# CJK-aware estimate, see ``_estimate_tokens``) rather than a fixed message
-# count, and tool-result content is truncated per message.
+# ToolMessage on each turn.  The window is sized by a *token budget* (see
+# ``_estimate_tokens``) rather than a fixed message count, and tool-result
+# content is truncated per message.
 _MAX_TOOL_CONTENT_CHARS = 800  # per-ToolMessage content cap
+
+# Token estimation: tiktoken (o200k_base) when available — a real BPE count,
+# far closer to what the OpenAI-compatible / Anthropic providers charge than
+# a char heuristic — with the CJK-aware heuristic as the offline fallback.
+# tiktoken fetches its encoding file once and caches it; a process that could
+# not reach the blob store at first use stays on the heuristic for its life.
+_ESTIMATE_ENCODING = "o200k_base"
+
+_tokenizer: Any | None = None
+_tokenizer_attempted = False
+
+
+def _get_tokenizer() -> Any | None:
+    """Lazily load the tiktoken encoding, at most once.  None when unavailable."""
+    global _tokenizer, _tokenizer_attempted
+    if _tokenizer is not None or _tokenizer_attempted:
+        return _tokenizer
+    _tokenizer_attempted = True
+    try:
+        import tiktoken
+
+        _tokenizer = tiktoken.get_encoding(_ESTIMATE_ENCODING)
+        logger.info("Token estimation: tiktoken %s active", _ESTIMATE_ENCODING)
+    except Exception:
+        _tokenizer = None
+        logger.warning(
+            "tiktoken unavailable — falling back to heuristic token estimate",
+            exc_info=True,
+        )
+    return _tokenizer
+
+
+def reset_token_estimator() -> None:
+    """Drop the cached tokenizer and the load-attempt flag (tests / config)."""
+    global _tokenizer, _tokenizer_attempted
+    _tokenizer = None
+    _tokenizer_attempted = False
 
 
 def _estimate_tokens(text: str) -> int:
-    """Rough token count for CJK-mixed text — no tokenizer dependency.
+    """Token count for *text* — tiktoken when available, else the heuristic."""
+    enc = _get_tokenizer()
+    if enc is not None:
+        try:
+            return len(enc.encode(text))
+        except Exception:
+            logger.warning(
+                "tiktoken encode failed — using heuristic estimate", exc_info=True
+            )
+    return _heuristic_tokens(text)
+
+
+def _heuristic_tokens(text: str) -> int:
+    """Rough CJK-aware fallback estimate — no tokenizer dependency.
 
     Non-ASCII (CJK) characters cost ~1 token each; ASCII letters/digits and
     whitespace run ~4 chars per token; ASCII punctuation/symbols — the
     token-dense part of code and JSON — are weighted ~2 chars per token so a
-    symbols-heavy tool result never under-budgets.  Used only to size the
-    agent context window, so a coarse estimate is fine — it should
-    over-approximate rather than overflow the model's real context.
+    symbols-heavy tool result never under-budgets.  Used when tiktoken is
+    unavailable, and as the deterministic reference in tests.  Over-approximates
+    rather than overflows the model's real context.
     """
     if not text:
         return 0
@@ -376,6 +460,8 @@ def _overflow_transcript(messages: list[BaseMessage]) -> str:
     """
     lines: list[str] = []
     for m in messages:
+        if _is_llm_error_message(m):
+            continue  # a failed-call error stub is not real assistant output
         if isinstance(m, HumanMessage):
             lines.append(f"user: {_message_text(m)}")
         elif isinstance(m, AIMessage):
@@ -652,10 +738,12 @@ def _wrap_context_item(tool_name: str, content: str) -> str:
 _AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
 
 # Each capture costs 3 LLM extractions (summary + entities + relations) plus
-# embedding and a similarity scan, so a quality gate runs *before any LLM
-# call*: only declarative knowledge statements are captured — questions,
-# action requests, and chatty filler are skipped.  Deliberately conservative:
-# a missed capture is recoverable, a junk memory pollutes retrieval forever.
+# embedding and a similarity scan, so a quality gate decides *before the
+# expensive extraction pipeline* whether a turn is durable knowledge.  With
+# AUTO_MEMORY_LLM_GATE=true (default) the gate is one cheap structured LLM
+# call after a zero-cost fast-path; with it false, a free keyword heuristic
+# is the sole gate.  Deliberately conservative: a missed capture is
+# recoverable, a junk memory pollutes retrieval forever.
 _AUTO_MEMORY_MIN_CONTENT_LEN = 12  # raw user message must be this long
 # After stripping chatty words and symbols, this many informative characters
 # (CJK hanzi / ASCII letters & digits) must remain — emoji spam, symbol runs
@@ -721,14 +809,13 @@ def _is_symbol_noise(text: str) -> bool:
     return informative < _AUTO_MEMORY_MIN_INFORMATIVE_CHARS
 
 
-def _is_auto_memory_worthy(content: str) -> bool:
-    """True when *content* reads like a declarative knowledge statement.
+def _auto_memory_fast_worthy(content: str) -> bool:
+    """Cheap zero-cost pre-filter: length, exact chatty set, symbol noise.
 
-    Filters out questions, action requests, chatty filler, and symbol-only
-    noise before any LLM call.  ``记住…`` requests are deliberately NOT
-    filtered — they are the explicit-remember path, normally handled by
-    ``write_memory_tool``, and capturing them here when the tool was not
-    invoked is correct.
+    Deliberately does NOT apply the question/request heuristics — they misfire
+    on complex declarative statements ("为什么 X 会 Y？后来查明是……" carries a
+    question marker but is durable knowledge).  In LLM-gate mode (the default)
+    those cases are judged by ``_llm_gate_worthy`` instead.
     """
     text = content.strip()
     if len(text) < _AUTO_MEMORY_MIN_CONTENT_LEN:
@@ -737,6 +824,24 @@ def _is_auto_memory_worthy(content: str) -> bool:
         return False
     if _is_symbol_noise(text):
         return False
+    return True
+
+
+def _is_auto_memory_worthy(content: str) -> bool:
+    """Full keyword heuristic — the quality gate when AUTO_MEMORY_LLM_GATE=false.
+
+    Fast path plus question/request rejection.  Free but coarse, so it misfires
+    on complex phrasing (kills a declarative statement that contains a question
+    marker, lets long chatty filler through).  With the LLM gate enabled (the
+    default) only ``_auto_memory_fast_worthy`` runs before the LLM judge and
+    this full heuristic is bypassed.  ``记住…`` requests are deliberately NOT
+    filtered — they are the explicit-remember path, normally handled by
+    ``write_memory_tool``, and capturing them here when the tool was not
+    invoked is correct.
+    """
+    if not _auto_memory_fast_worthy(content):
+        return False
+    text = content.strip()
     if text.endswith(_AUTO_MEMORY_QUESTION_SUFFIXES):
         return False
     if any(marker in text for marker in _AUTO_MEMORY_QUESTION_MARKERS):
@@ -749,11 +854,12 @@ def _is_auto_memory_worthy(content: str) -> bool:
     return True
 
 
-# ── Optional LLM second pass on the quality gate (B3) ─────────────
-# The keyword heuristic above is free but coarse — it lets chatty-but-long
+# ── LLM quality gate (B3) ─────────────────────────────────────────
+# The keyword heuristic alone is free but coarse — it lets chatty-but-long
 # filler through and can misfire on complex phrasing.  AUTO_MEMORY_LLM_GATE=
-# true adds one cheap structured call per candidate turn asking whether the
-# message is durable knowledge; off by default so the default cost stays zero.
+# true (default) routes every fast-path-passing turn through one cheap
+# structured call asking whether the message is durable knowledge; setting it
+# false restores the zero-LLM-cost keyword gate.
 _AUTO_MEMORY_GATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["worthy"],
@@ -900,13 +1006,13 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     Runs only when both ``auto_memory_enabled`` and ``memory_enabled`` are set
     (the memory pipeline as a whole is opt-out via ``MEMORY_ENABLED=false`` —
     with no memory tools the agent is pure chat, so it must not keep writing
-    memories behind the scenes).  A turn is captured only when (1) the user's
-    message reads like a declarative knowledge statement
-    (``_is_auto_memory_worthy``), (2) capture is not throttled
-    (``_auto_memory_throttled``), (3) the agent did not already call
-    ``write_memory_tool`` this turn, and (4) extraction yields substantive
-    content.  Any failure is logged and swallowed — auto memory must never
-    break the chat response.
+    memories behind the scenes).  A turn is captured only when (1) it passes
+    the quality gate — the cheap fast-path plus, with ``AUTO_MEMORY_LLM_GATE``
+    on (the default), one LLM judge call; with it off, the full keyword
+    heuristic — (2) capture is not throttled (``_auto_memory_throttled``),
+    (3) the agent did not already call ``write_memory_tool`` this turn, and
+    (4) extraction yields substantive content.  Any failure is logged and
+    swallowed — auto memory must never break the chat response.
     """
     from backend.shared.config import config, current_thread_id
 
@@ -919,22 +1025,30 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     if _write_tool_used_this_turn(state["messages"]):
         return
 
-    # Quality gate — before any LLM call, so a question/request/filler turn
-    # never pays for extraction.
-    if not _is_auto_memory_worthy(user_content):
+    # Quality gate — with the LLM gate enabled (default) only the cheap
+    # fast-path applies here (length / chatty / symbol noise), so complex
+    # declarative statements that carry a question marker or request phrasing
+    # are NOT killed — they proceed to the LLM judge below.  With the LLM
+    # gate disabled, the full keyword heuristic is the sole gate (zero LLM
+    # cost per turn, coarser).
+    if config.auto_memory_llm_gate:
+        worthy = _auto_memory_fast_worthy(user_content)
+    else:
+        worthy = _is_auto_memory_worthy(user_content)
+    if not worthy:
         logger.info("Auto-memory: not a knowledge statement, skipping")
         return
 
-    # Frequency control — before extraction, so a throttled turn costs zero
-    # LLM calls.
+    # Frequency control — before the LLM gate, so a throttled turn never
+    # pays for the judge call.
     thread_id = current_thread_id.get("") or "_"
     if _auto_memory_throttled(thread_id, user_content):
         logger.info("Auto-memory: throttled (interval/cap/window), skipping")
         return
 
-    # Optional LLM second pass (AUTO_MEMORY_LLM_GATE) — the keyword heuristic
-    # above is free but coarse; this adds one cheap call per candidate turn,
-    # after the zero-cost throttle so a throttled turn never pays for it.
+    # LLM gate (AUTO_MEMORY_LLM_GATE=true, the default) — one cheap structured
+    # call judging durable knowledge, after the zero-cost throttle so a
+    # throttled turn pays nothing.
     if config.auto_memory_llm_gate and not await _llm_gate_worthy(user_content):
         logger.info("Auto-memory: LLM gate judged not worthy, skipping")
         return
@@ -980,6 +1094,16 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     """
     provider = get_llm_provider()
 
+    # A fresh HumanMessage starts a new conversation turn — restart the
+    # ReAct step budget from 0.  The checkpointer otherwise persists
+    # ``step_count`` session-wide, so a turn that exhausted MAX_AGENT_STEPS
+    # would silently disable tools for every later turn in the thread.
+    step_base = (
+        0
+        if _is_new_user_turn(state["messages"])
+        else (state.get("step_count", 0) or 0)
+    )
+
     # Prepend the system prompt if this is the first call, then bound the
     # history sent to the LLM (compact when enabled, then window to the
     # recent tail + pinned system prompts).
@@ -1022,9 +1146,17 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
         # stay in the log and state.error; the client sees no exception text.
         error_text = "抱歉，当前回答生成失败，请稍后重试。"
         writer({"type": "token", "content": error_text})
+        # The error stub is marked so later turns never re-send it as assistant
+        # history (see ``_is_llm_error_message``); ``state.error`` keeps the
+        # exception detail.
         return {
             "error": str(exc),
-            "messages": [AIMessage(content=error_text)],
+            "messages": [
+                AIMessage(
+                    content=error_text,
+                    additional_kwargs={_LLM_ERROR_MARKER: True},
+                )
+            ],
         }
 
     content = "".join(content_parts)
@@ -1043,7 +1175,7 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     else:
         aimessage = AIMessage(content=content)
 
-    return {"messages": [aimessage], "step_count": state.get("step_count", 0) + 1}
+    return {"messages": [aimessage], "step_count": step_base + 1}
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
@@ -1140,6 +1272,8 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     # Include the recent conversation history (skip tool & system messages),
     # windowed so a long thread doesn't resend unbounded history every turn.
     for m in windowed:
+        if _is_llm_error_message(m):
+            continue  # a failed-call error stub must not enter the prompt
         if isinstance(m, (ToolMessage, SystemMessage)):
             continue
         role = "assistant" if isinstance(m, AIMessage) else "user"
@@ -1196,6 +1330,83 @@ APPROVAL_REQUIRED_TOOLS: frozenset[str] = frozenset({
 # scenarios) keep the default set so they can still notify the team
 # autonomously — see ``build_agent_graph(approval_required_tools=...)``.
 CHAT_APPROVAL_TOOLS: frozenset[str] = APPROVAL_REQUIRED_TOOLS | {"notify_feishu_tool"}
+
+
+def _tool_call_id(call: dict) -> str:
+    """Extract the stable tool_call id from a raw tool_call dict.
+
+    Tool_calls appear in two shapes — LangChain's native
+    ``{"id", "name", "args", ...}`` and OpenAI's
+    ``{"id", "function": {"name", "arguments"}, ...}`` — so the id may live
+    at the top level or nested under ``function``.
+    """
+    return str(call.get("id", call.get("function", {}).get("id", "")))
+
+
+def _build_partial_approval_command(
+    messages: list[BaseMessage],
+    safe: list[dict],
+    sensitive: list[dict],
+    approved_ids: set[str],
+    reason: str,
+) -> Command:
+    """Route to ToolNode with only the approved tool calls, rejecting the rest.
+
+    ToolNode executes whatever ``tool_calls`` the latest AIMessage carries, so
+    we replace that message (keeping its id so ``add_messages`` swaps it in
+    place) with one holding only the approved subset plus every safe call, and
+    append a ``[REJECTED]`` ToolMessage per rejected call.  The LLM then sees
+    exactly which writes actually ran — previously the per-row buttons were a
+    lie: the whole batch was routed to the reject branch and tools never ran
+    while approved rows still got a fake ``[APPROVED]`` result.
+    """
+    safe_ids = {_tool_call_id(c) for c in safe}
+    rejection_msgs: list[ToolMessage] = []
+    exec_calls: list[dict] = list(safe)
+    for call in sensitive:
+        if _tool_call_id(call) in approved_ids:
+            exec_calls.append(call)
+        else:
+            rejection_msgs.append(
+                ToolMessage(
+                    content=f"[REJECTED] {reason}",
+                    tool_call_id=_tool_call_id(call),
+                    name=str(call.get("name", call.get("function", {}).get("name", ""))),
+                )
+            )
+
+    last_ai = next(
+        (
+            m
+            for m in reversed(messages)
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+        ),
+        None,
+    )
+    exec_tool_calls = [
+        tc
+        for tc in (last_ai.tool_calls if last_ai else [])
+        if _tool_call_id(tc) in approved_ids or _tool_call_id(tc) in safe_ids
+    ]
+    exec_msg = AIMessage(
+        content=last_ai.content if last_ai else "",
+        tool_calls=exec_tool_calls,
+        id=last_ai.id if last_ai else None,
+    )
+
+    logger.info(
+        "Partial approval: executing %d/%d sensitive tool(s)",
+        sum(1 for c in sensitive if _tool_call_id(c) in approved_ids),
+        len(sensitive),
+    )
+
+    return Command(
+        goto="tools",
+        update={
+            "messages": [*rejection_msgs, exec_msg],
+            "pending_approval": None,
+        },
+    )
 
 
 async def check_approval_node(
@@ -1266,6 +1477,10 @@ async def check_approval_node(
                 targs = {"raw": targs}
 
         entry: dict[str, Any] = {
+            # The stable tool_call id lets the resume payload (and the
+            # frontend batch card) address this exact call — tool_name alone
+            # collides when the same tool is called twice in one turn.
+            "id": _tool_call_id(call),
             "tool_name": tname,
             "tool_args": targs,
         }
@@ -1301,25 +1516,39 @@ async def check_approval_node(
         logger.info("All %d tool(s) approved, executing", len(calls_payload))
         return Command(goto="tools", update={"pending_approval": None})
 
-    # Some or all rejected — inject a ToolMessage for every tool_call in this turn
     reason = decision.get("reason", "Tool call was rejected by the user.")
+
+    # Partial approval in batch mode — at least one call approved but not all:
+    # execute the approved subset (plus every safe call) via ToolNode and
+    # inject a [REJECTED] ToolMessage for each call the human did not approve.
+    # Without this the "approve this row" button had no effect — the whole
+    # batch either ran or was faked as approved.
+    if len(calls_payload) > 1 and isinstance(decision.get("calls"), list):
+        approved_ids = {
+            str(d.get("id", "")) for d in decision["calls"] if d.get("approved") is True
+        }
+        if approved_ids:
+            return _build_partial_approval_command(
+                messages, safe, sensitive, approved_ids, reason
+            )
+
+    # Some or all rejected — inject a ToolMessage for every tool_call in this turn
     rejection_msgs: list[ToolMessage] = []
     for call in sensitive + safe:
-        cid = str(call.get("id", call.get("function", {}).get("id", "")))
+        cid = _tool_call_id(call)
         tname = str(call.get("name", call.get("function", {}).get("name", "")))
         if call in sensitive:
-            # Check if this specific call was rejected in batch mode
+            # In batch mode check whether THIS call (matched by id — the same
+            # tool may legitimately appear twice in one turn) was rejected.
             call_rejected = True
-            if len(calls_payload) > 1 and "calls" in decision:
-                batch_decisions = decision["calls"]
-                call_name = str(call.get("name", call.get("function", {}).get("name", "")))
-                for bd in batch_decisions:
-                    if bd.get("tool_name") == call_name:
+            if len(calls_payload) > 1 and isinstance(decision.get("calls"), list):
+                for bd in decision["calls"]:
+                    if str(bd.get("id", "")) == cid:
                         call_rejected = bd.get("approved") is not True
                         break
             content = f"[REJECTED] {reason}" if call_rejected else "[APPROVED]"
         else:
-            content = f"[CANCELLED] A related write operation was rejected by the user."
+            content = "[CANCELLED] A related write operation was rejected by the user."
         rejection_msgs.append(
             ToolMessage(content=content, tool_call_id=cid, name=tname)
         )
@@ -1357,8 +1586,14 @@ async def check_conflict_node(
     """
     messages = state["messages"]
 
-    # Find the last write_memory_tool result
+    # Find the last write_memory_tool result — but only within the current
+    # turn.  Scanning the whole history could hit a conflict ToolMessage from
+    # an earlier turn (still present after an interrupt/rollback) and pause
+    # for approval on a turn that never wrote anything.  Stop at the first
+    # HumanMessage, mirroring ``_has_tool_results_this_turn``.
     for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return Command(goto="call_llm")
         if (
             isinstance(m, ToolMessage)
             and getattr(m, "name", "") == "write_memory_tool"

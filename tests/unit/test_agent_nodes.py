@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
     _estimate_tokens,
+    _heuristic_tokens,
     _messages_to_dicts,
     _to_openai_tools,
     _truncate_tool_content,
@@ -26,6 +27,15 @@ def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     real extraction service (unmocked) at the end of each turn.
     """
     monkeypatch.setattr(config_mod.config, "auto_memory_enabled", False)
+
+
+@pytest.fixture(autouse=True)
+def _heuristic_token_estimator(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the heuristic token estimate — windowing assertions pin exact
+    token counts that tiktoken (when available) would shift."""
+    import agent.nodes as mod
+
+    monkeypatch.setattr(mod, "_get_tokenizer", lambda: None)
 
 
 def _disable_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -358,6 +368,115 @@ class TestCallLLMNode:
         # The exception text must not reach the client — only a generic
         # user-facing message is streamed.
         assert all("API down" not in e.get("content", "") for e in error_tokens)
+
+    @pytest.mark.asyncio
+    async def test_step_count_resets_on_new_user_turn(self, monkeypatch) -> None:
+        """A fresh HumanMessage restarts the ReAct step budget from 0.
+
+        Regression: the checkpointer persisted step_count across turns, so a
+        thread whose first turn exhausted MAX_AGENT_STEPS routed every later
+        turn's first call_llm straight to generate_final — tools silently
+        disabled.  A new turn is exactly when the latest message is a
+        HumanMessage.
+        """
+        from tests._fake_llm import content_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from agent.tools import ALL_TOOLS
+
+        # Second user turn — the prior turn already exhausted the budget.
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[
+                    HumanMessage(content="first turn"),
+                    AIMessage(content="first answer"),
+                    HumanMessage(content="second turn"),
+                ],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=5,
+            ),
+            tools=ALL_TOOLS,
+        )
+        assert result["step_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_step_count_continues_on_loopback(self, monkeypatch) -> None:
+        """Loopbacks within a turn keep the current count — no reset.
+
+        An approval rejection (latest message is a ToolMessage, not a
+        HumanMessage) is the same turn's loop; resetting there would let a
+        ReAct loop spin past max_steps.
+        """
+        from tests._fake_llm import content_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from agent.tools import ALL_TOOLS
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[
+                    HumanMessage(content="turn"),
+                    AIMessage(content="", tool_calls=[
+                        {"id": "c1", "name": "write_memory_tool",
+                         "args": {"content": "x"}, "type": "tool_call"}]),
+                    ToolMessage(content="[REJECTED] no", tool_call_id="c1"),
+                ],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=2,
+            ),
+            tools=ALL_TOOLS,
+        )
+        assert result["step_count"] == 3
+
+    @pytest.mark.asyncio
+    async def test_llm_error_stub_is_marked_and_never_resent(self, monkeypatch) -> None:
+        """A failed call_llm's error stub must not be re-sent to the model.
+
+        Regression: the error AIMessage was appended to the checkpoint and
+        later replayed to the LLM as assistant history.  It is now marked and
+        skipped by serialization (and by synthesis/compaction transcripts).
+        """
+        from tests._fake_llm import raise_stream, sequential_stream
+
+        import agent.nodes as mod
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            raise_stream(RuntimeError("API down"))
+        )
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[HumanMessage(content="hi")],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=None,
+            ),
+            tools=[],
+        )
+        stub = result["messages"][0]
+        assert stub.additional_kwargs.get(mod._LLM_ERROR_MARKER) is True
+        # The stub is dropped from the tool-selection history sent to the LLM.
+        assert mod._messages_to_dicts([stub]) == []
 
 
 class TestGenerateFinalNode:
@@ -770,6 +889,109 @@ class TestCheckApprovalNode:
         assert "retrieve_chunks_tool" not in APPROVAL_REQUIRED_TOOLS
         assert "extract_memory_tool" not in APPROVAL_REQUIRED_TOOLS
 
+    @pytest.mark.asyncio
+    async def test_batch_partial_approval_executes_only_approved(self, monkeypatch) -> None:
+        """Partial batch approval runs the approved subset, rejecting the rest.
+
+        Two sensitive calls to the SAME tool plus one safe call: approving only
+        the first write must route to ToolNode with exactly that call (matched
+        by id, not name) plus the safe call, and inject one [REJECTED]
+        ToolMessage for the second write — not a fake [APPROVED] for it.
+        """
+        from langgraph.types import Command
+
+        from agent.nodes import check_approval_node
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="remember A and B"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_a", "name": "write_memory_tool",
+                         "args": {"content": "A"}, "type": "tool_call"},
+                        {"id": "call_b", "name": "write_memory_tool",
+                         "args": {"content": "B"}, "type": "tool_call"},
+                        {"id": "call_c", "name": "search_memories_tool",
+                         "args": {"query": "x"}, "type": "tool_call"},
+                    ],
+                ),
+            ],
+        )
+
+        import agent.nodes as mod
+        monkeypatch.setattr(
+            mod,
+            "interrupt",
+            lambda payload: {
+                "calls": [
+                    {"id": "call_a", "tool_name": "write_memory_tool", "approved": True},
+                    {"id": "call_b", "tool_name": "write_memory_tool", "approved": False},
+                ]
+            },
+        )
+
+        result = await check_approval_node(state)
+        assert isinstance(result, Command)
+        assert result.goto == "tools"
+
+        msgs = result.update["messages"]
+        rejected = [m for m in msgs if isinstance(m, ToolMessage)]
+        assert len(rejected) == 1
+        assert rejected[0].tool_call_id == "call_b"
+        assert "[REJECTED]" in rejected[0].content
+
+        exec_ai = next(m for m in msgs if isinstance(m, AIMessage))
+        # Approved sensitive call (call_a) plus the safe call (call_c);
+        # call_b must NOT be executed.
+        assert [tc["id"] for tc in exec_ai.tool_calls] == ["call_a", "call_c"]
+
+    @pytest.mark.asyncio
+    async def test_batch_all_rejected_injects_rejection_per_call(self, monkeypatch) -> None:
+        """Rejecting every call in a batch injects a [REJECTED] ToolMessage per
+        sensitive call, matched by id so same-named calls both get rejected."""
+        from langgraph.types import Command
+
+        from agent.nodes import check_approval_node
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="remember A and B"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_a", "name": "write_memory_tool",
+                         "args": {"content": "A"}, "type": "tool_call"},
+                        {"id": "call_b", "name": "write_memory_tool",
+                         "args": {"content": "B"}, "type": "tool_call"},
+                    ],
+                ),
+            ],
+        )
+
+        import agent.nodes as mod
+        monkeypatch.setattr(
+            mod,
+            "interrupt",
+            lambda payload: {
+                "calls": [
+                    {"id": "call_a", "tool_name": "write_memory_tool", "approved": False},
+                    {"id": "call_b", "tool_name": "write_memory_tool", "approved": False},
+                ],
+                "reason": "用户拒绝了工具调用。",
+            },
+        )
+
+        result = await check_approval_node(state)
+        assert isinstance(result, Command)
+        assert result.goto == "call_llm"
+
+        msgs = result.update["messages"]
+        rejected = [m for m in msgs if isinstance(m, ToolMessage)]
+        assert len(rejected) == 2
+        assert {m.tool_call_id for m in rejected} == {"call_a", "call_b"}
+        assert all("[REJECTED]" in m.content for m in rejected)
+
 
 class TestCheckConflictNode:
     """Tests for the HITL conflict-resolution gate that intercepts
@@ -902,25 +1124,83 @@ class TestCheckConflictNode:
         assert isinstance(result, Command)
         assert result.goto == "call_llm"
 
+    @pytest.mark.asyncio
+    async def test_ignores_conflict_from_previous_turn(self) -> None:
+        """A previous turn's write-conflict result must not pause this turn.
+
+        Regression: check_conflict scanned the whole history, so a conflict
+        ToolMessage left over from an earlier turn (after an interrupt /
+        rollback) triggered a spurious conflict pause on a turn that never
+        wrote anything.
+        """
+        from langgraph.types import Command
+
+        from agent.nodes import check_conflict_node
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="remember X"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "old", "name": "write_memory_tool",
+                         "args": {"content": "x"}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content=self._json.dumps({
+                        "action": "conflict",
+                        "summary": "x",
+                        "existing_id": "mem-1",
+                        "existing_summary": "y",
+                    }),
+                    tool_call_id="old",
+                    name="write_memory_tool",
+                ),
+                AIMessage(content="已处理"),
+                HumanMessage(content="plain question"),
+            ],
+        )
+
+        result = await check_conflict_node(state)
+        assert isinstance(result, Command)
+        assert result.goto == "call_llm"
+
 
 class TestContextBounding:
     """Windowed history + tool-content truncation bound the LLM context."""
 
-    def test_estimate_tokens_cjk_and_ascii(self) -> None:
+    def test_heuristic_tokens_cjk_and_ascii(self) -> None:
         # ASCII ≈ 4 chars/token.
-        assert _estimate_tokens("x" * 20) == 5
-        assert _estimate_tokens("short") == 2  # ceil(5/4)
+        assert _heuristic_tokens("x" * 20) == 5
+        assert _heuristic_tokens("short") == 2  # ceil(5/4)
         # CJK ≈ 1 token/char.
-        assert _estimate_tokens("中文") == 2
-        assert _estimate_tokens("") == 0
+        assert _heuristic_tokens("中文") == 2
+        assert _heuristic_tokens("") == 0
 
-    def test_estimate_tokens_weights_symbols(self) -> None:
+    def test_heuristic_tokens_weights_symbols(self) -> None:
         # Code/JSON punctuation is token-dense — weighted ~2 chars/token.
-        assert _estimate_tokens("{" * 20) == 10
+        assert _heuristic_tokens("{" * 20) == 10
         # A symbols-heavy string estimates higher than the same-length alnum.
-        assert _estimate_tokens("path/to:foo") > _estimate_tokens("pathtofoo")
+        assert _heuristic_tokens("path/to:foo") > _heuristic_tokens("pathtofoo")
         # Symbols count heavier than whitespace of the same length.
-        assert _estimate_tokens("a!b!c!d!e") > _estimate_tokens("a b c d e")
+        assert _heuristic_tokens("a!b!c!d!e") > _heuristic_tokens("a b c d e")
+
+    def test_estimate_tokens_delegates_to_tokenizer(self, monkeypatch) -> None:
+        """With a tokenizer available, _estimate_tokens uses its real count."""
+        import agent.nodes as mod
+
+        class _FakeEncoder:
+            def encode(self, text: str) -> list[int]:
+                return list(range(11))  # 11 tokens
+
+        monkeypatch.setattr(mod, "_get_tokenizer", lambda: _FakeEncoder())
+        assert mod._estimate_tokens("anything") == 11
+
+    def test_estimate_tokens_falls_back_to_heuristic(self) -> None:
+        """Without a tokenizer (offline), _estimate_tokens equals the heuristic."""
+        assert _estimate_tokens("x" * 20) == _heuristic_tokens("x" * 20) == 5
+        assert _estimate_tokens("中文") == 2
 
     def test_window_keeps_most_recent_messages_by_budget(self) -> None:
         # Each message is ~5 tokens ("x"*20 → 5 ASCII tokens); a budget of

@@ -84,11 +84,28 @@ export interface Source {
 
 // ── Interrupt (approval / conflict) ──────────────────────────────
 
+/** One tool call inside a batch approval payload. */
+export interface ApprovalCall {
+  /** Stable tool_call id — lets the backend match a per-row decision to the
+   * exact call even when the same tool is called twice in one turn. */
+  id?: string;
+  tool_name: string;
+  tool_args?: Record<string, unknown>;
+  summary?: string;
+}
+
 export interface Interrupt {
-  type: 'approval' | 'conflict';
+  /**
+   * Backend payloads: single-tool approval has NO type field, a multi-tool
+   * approval is `type: 'batch'` with a `calls` array, conflict is
+   * `type: 'conflict'`.  Absent/`batch` both render the approval card.
+   */
+  type?: 'approval' | 'conflict' | 'batch';
   tool_name?: string;
   tool_args?: Record<string, unknown>;
   summary?: string;
+  /** Present on `type: 'batch'` approvals — one entry per sensitive tool. */
+  calls?: ApprovalCall[];
   new_summary?: string;
   existing_summary?: string;
   [key: string]: unknown;

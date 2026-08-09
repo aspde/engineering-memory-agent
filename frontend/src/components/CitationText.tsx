@@ -7,9 +7,10 @@ import RichText from './RichText';
 /**
  * Renders assistant answer text with inline source citations clickable.
  *
- * The agent.system prompt asks the model to cite source IDs inline, e.g.
- * ``（记忆 a1b2c3d4）`` or ``（文档 docs/architecture.md）``.  This component
- * splits the text on those citation spans:
+ * The agent.system prompt asks the model to cite source IDs inline — current
+ * prompt emits ``（memory: a1b2c3d4）`` / ``（document: docs/architecture.md）``,
+ * older answers may carry ``（记忆 a1b2c3d4）`` / ``（文档 docs/architecture.md）``.
+ * This component splits the text on those citation spans:
  *
  * - **memory citations** that resolve to a source in ``sources`` render as a
  *   clickable chip → sets the memory filter and navigates to the memories
@@ -20,7 +21,11 @@ import RichText from './RichText';
  *   inline-markdown renderer), so `` `code` ``, **bold**, and _italic_ keep
  *   working around citations.
  */
-const CITATION_RE = /([（(]\s*(记忆|文档)[：: ]?)([0-9a-zA-Z_./-]+)(\s*[）)])/g;
+// Full-width （） or half-width () around a kind token (中文 记忆/文档 or
+// English memory/document, with optional colon and/or whitespace), then the
+// id: letters, digits, underscore, dot, slash, dash.  Group 2 is the kind,
+// group 3 the id — the code below indexes m[2]/m[3], keep that contract.
+const CITATION_RE = /([（(]\s*(记忆|文档|memory|document)[：: ]?\s*)([0-9a-zA-Z_./-]+)(\s*[）)])/g;
 
 export interface CitationPart {
   kind: 'text' | 'citation';
@@ -39,7 +44,10 @@ export function splitCitations(text: string): CitationPart[] {
     if (m.index > lastIndex) {
       parts.push({ kind: 'text', text: text.slice(lastIndex, m.index) });
     }
-    parts.push({ kind: 'citation', text: m[0], refKind: m[2] as '记忆' | '文档', refId: m[3] });
+    // Normalize the kind token (Chinese or English) to the Chinese canonical
+    // form so downstream rendering treats 记忆/memory and 文档/document alike.
+    const kind: '记忆' | '文档' = m[2] === 'memory' ? '记忆' : m[2] === 'document' ? '文档' : (m[2] as '记忆' | '文档');
+    parts.push({ kind: 'citation', text: m[0], refKind: kind, refId: m[3] });
     lastIndex = m.index + m[0].length;
   }
   if (lastIndex < text.length) {

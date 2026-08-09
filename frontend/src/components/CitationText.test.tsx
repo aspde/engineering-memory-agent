@@ -30,6 +30,15 @@ describe('splitCitations', () => {
     expect(parts[1]).toEqual({ kind: 'citation', text: '（文档 docs/architecture.md）', refKind: '文档', refId: 'docs/architecture.md' });
   });
 
+  it('extracts the English prompt format (memory:/document:) and normalizes the kind', () => {
+    const parts = splitCitations('选型是 pgvector（memory: c4a11b2e）详见（document: docs/architecture.md）');
+    const citations = parts.filter((p) => p.kind === 'citation');
+    expect(citations).toEqual([
+      { kind: 'citation', text: '（memory: c4a11b2e）', refKind: '记忆', refId: 'c4a11b2e' },
+      { kind: 'citation', text: '（document: docs/architecture.md）', refKind: '文档', refId: 'docs/architecture.md' },
+    ]);
+  });
+
   it('handles multiple citations and surrounding text', () => {
     const parts = splitCitations('A（记忆 11111111）B（文档 doc.md）C');
     const citations = parts.filter((p) => p.kind === 'citation');
@@ -66,6 +75,14 @@ describe('CitationText', () => {
       <CitationText text="选型是 pgvector（记忆 c4a11b2e）" sources={memorySources} />,
     );
     const btn = screen.getByRole('button', { name: '（记忆 c4a11b2e）' });
+    expect(btn).toBeInTheDocument();
+  });
+
+  it('renders a matching memory citation in English format as a clickable button', () => {
+    render(
+      <CitationText text="选型是 pgvector（memory: c4a11b2e）" sources={memorySources} />,
+    );
+    const btn = screen.getByRole('button', { name: '（memory: c4a11b2e）' });
     expect(btn).toBeInTheDocument();
   });
 

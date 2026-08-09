@@ -277,3 +277,71 @@ class TestGraphHITLRouting:
         assert "__interrupt__" in result_chat
         first_interrupt = result_chat["__interrupt__"][0].value
         assert first_interrupt["tool_name"] == "notify_feishu_tool"
+
+
+class TestStepCountResetAcrossTurns:
+    """The ReAct step budget restarts each user turn — a thread whose first
+    turn exhausted max_steps must still be able to call tools on later turns."""
+
+    @pytest.mark.asyncio
+    async def test_second_turn_can_still_call_tools(self, monkeypatch) -> None:
+        """Round 1 burns the whole max_steps budget; round 2 must still
+        execute tools.
+
+        Regression: step_count was persisted session-wide by the checkpointer,
+        so once a thread hit max_steps, every later turn's first call_llm
+        routed straight to generate_final and tools were silently disabled.
+        """
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
+
+        from langchain_core.tools import tool
+
+        calls: list[str] = []
+
+        @tool
+        async def fake_search(query: str) -> str:
+            """Search for something."""
+            calls.append(query)
+            return f"Found: {query}"
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
+                {"id": "c1", "name": "fake_search", "args": {"query": "round1"}},
+            ]),
+            content_stream("Round one answer."),
+            tool_call_stream([
+                {"id": "c2", "name": "fake_search", "args": {"query": "round2"}},
+            ]),
+            content_stream("Round two answer."),
+        )
+        mock_provider.chat_stream = text_stream("Final.", "Final.")
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        graph = build_agent_graph([fake_search], checkpointer=None, max_steps=2)
+
+        # Round 1: a tool call plus its loopback answer consume the budget.
+        result1 = await graph.ainvoke(
+            {"messages": [HumanMessage(content="first round")]},
+            {"configurable": {"thread_id": "test-steps-reset"}},
+        )
+        assert "final_response" in result1 or "final_prompt" in result1
+
+        # Round 2: a new user turn — the step budget must restart so the tool
+        # executes again instead of skipping straight to the final answer.
+        result2 = await graph.ainvoke(
+            {"messages": [HumanMessage(content="second round")]},
+            {"configurable": {"thread_id": "test-steps-reset"}},
+        )
+        assert "final_response" in result2 or "final_prompt" in result2
+
+        assert calls == ["round1", "round2"], (
+            "the second user turn must be able to call tools again"
+        )

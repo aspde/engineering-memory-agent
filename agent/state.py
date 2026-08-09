@@ -22,7 +22,8 @@ class AgentState(TypedDict):
     step_count: int | None
     """Number of ``call_llm`` invocations in the current conversation turn.
     Used with ``MAX_AGENT_STEPS`` to bound the ReAct loop.  ``None`` until
-    the first ``call_llm`` pass."""
+    the first ``call_llm`` pass.  Restarts from 0 when a fresh HumanMessage
+    arrives (a new turn); loopbacks within a turn keep counting."""
 
     final_response: str | None
     """Final answer set by generate_final_node.  Must be Optional because
