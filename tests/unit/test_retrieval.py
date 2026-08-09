@@ -395,9 +395,9 @@ class TestRetrieveHybrid:
 
     @pytest.mark.asyncio
     async def test_llm_rerank_total_failure_falls_back_to_recall_scores(self, monkeypatch) -> None:
-        """Same fallback on the hybrid path: LLM rerank scoring every
-        candidate 0.0 (provider outage) returns the recall-ranked union
-        instead of []."""
+        """Same fallback on the hybrid path: an LLM rerank channel failure
+        (empty list = every candidate's call failed) returns the recall-ranked
+        union instead of []."""
         from backend.service import retrieval as mod
 
         dense = [
@@ -408,7 +408,7 @@ class TestRetrieveHybrid:
         self._patch_sources(monkeypatch, dense, sparse)
         monkeypatch.setattr(
             "backend.service.rerank.rerank_llm",
-            AsyncMock(return_value=[(0, 0.0), (1, 0.0), (2, 0.0)]),
+            AsyncMock(return_value=[]),
         )
 
         results = await mod.retrieve_hybrid(
@@ -519,10 +519,9 @@ class TestRetrieve:
 
     @pytest.mark.asyncio
     async def test_llm_rerank_total_failure_falls_back_to_recall_scores(self, monkeypatch) -> None:
-        """A provider outage during LLM pointwise rerank zeroes every
-        candidate (rerank_llm degrades each failed call to 0.0).  The read
-        path must NOT collapse to an empty result — it falls back to the
-        raw recall ranking instead, so real matches stay reachable."""
+        """An LLM rerank channel failure (empty list = every candidate's call
+        failed) must NOT collapse the read path to an empty result — it falls
+        back to the raw recall ranking so real matches stay reachable."""
         from backend.service import retrieval as mod
 
         dense = [
@@ -532,7 +531,7 @@ class TestRetrieve:
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
             "backend.service.rerank.rerank_llm",
-            AsyncMock(return_value=[(0, 0.0), (1, 0.0)]),
+            AsyncMock(return_value=[]),
         )
 
         results = await mod.retrieve("query", top_k=5, use_llm_rerank=True)
@@ -541,6 +540,27 @@ class TestRetrieve:
         assert [r.content for r in results] == ["c1", "c2"]
         assert results[0].score == pytest.approx(0.8)
         assert results[1].score == pytest.approx(0.6)
+
+    @pytest.mark.asyncio
+    async def test_llm_rerank_honest_low_scores_stay_empty(self, monkeypatch) -> None:
+        """A non-empty LLM rerank whose scores all fall below the floor is a
+        genuine "nothing is relevant" verdict — it must NOT fall back to the
+        recall ranking (that would resurrect what the model just rejected)."""
+        from backend.service import retrieval as mod
+
+        dense = [
+            {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
+            {"id": "c2", "content": "c2", "meta": {}, "similarity": 0.6},
+        ]
+        self._patch_sources(monkeypatch, dense)
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_llm",
+            AsyncMock(return_value=[(0, 0.05), (1, 0.1)]),
+        )
+
+        results = await mod.retrieve("query", top_k=5, use_llm_rerank=True)
+
+        assert results == []
 
     @pytest.mark.asyncio
     async def test_llm_rerank_partial_failure_keeps_rerank_scores(self, monkeypatch) -> None:
@@ -723,7 +743,7 @@ class TestQueryMemoriesDecayBatch:
 
     @pytest.mark.asyncio
     async def test_llm_rerank_total_failure_falls_back_to_decay_weighted(self, monkeypatch) -> None:
-        """A provider outage during LLM rerank must not empty memory search —
+        """An LLM rerank channel failure must not empty memory search —
         candidates fall back to the decay-weighted ranking, and the decay
         batch still bumps them."""
         from backend.service import retrieval as mod
@@ -733,7 +753,7 @@ class TestQueryMemoriesDecayBatch:
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
         monkeypatch.setattr(
             "backend.service.rerank.rerank_llm",
-            AsyncMock(return_value=[(0, 0.0), (1, 0.0)]),
+            AsyncMock(return_value=[]),
         )
 
         results = await mod.query_memories("q", top_k=5, use_llm_rerank=True)
@@ -743,6 +763,28 @@ class TestQueryMemoriesDecayBatch:
         assert results[0]["rerank_score"] == pytest.approx(0.9)
         assert results[1]["rerank_score"] == pytest.approx(0.5)
         decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
+
+    @pytest.mark.asyncio
+    async def test_llm_rerank_honest_low_scores_stay_empty_for_memories(self, monkeypatch) -> None:
+        """Same honesty on the memory path: an all-below-floor LLM verdict is
+        kept as an empty result, not silently replaced by the recall ranking
+        — and no decay bump happens for an empty result."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
+        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.5)])
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_llm",
+            AsyncMock(return_value=[(0, 0.05), (1, 0.1)]),
+        )
+
+        results = await mod.query_memories("q", top_k=5, use_llm_rerank=True)
+
+        assert results == []
+        # No memory is decay-bumped by an empty result (the batch is called
+        # with no ids — update_decay_batch returns early on an empty list).
+        decay_mod.update_decay_batch.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
     async def test_repeat_query_hits_embed_query_cache(self, monkeypatch) -> None:

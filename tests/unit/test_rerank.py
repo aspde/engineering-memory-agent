@@ -52,7 +52,10 @@ class TestRerankLlmConcurrency:
         assert await mod.rerank_llm("query", [], top_k=5) == []
 
     @pytest.mark.asyncio
-    async def test_llm_failure_scores_zero(self, monkeypatch) -> None:
+    async def test_llm_total_failure_returns_empty_channel_signal(self, monkeypatch) -> None:
+        """When EVERY candidate's LLM call fails, rerank_llm returns [] — a
+        channel-failure signal so callers fall back to the recall ranking
+        instead of treating the outage as "nothing is relevant"."""
         from backend.service import rerank as mod
 
         provider = MagicMock()
@@ -62,8 +65,28 @@ class TestRerankLlmConcurrency:
         )
 
         ranked = await mod.rerank_llm("query", ["a", "b"], top_k=5)
-        # Sorted by score — both 0.0, stable sort keeps input order.
-        assert ranked == [(0, 0.0), (1, 0.0)]
+        assert ranked == []
+
+    @pytest.mark.asyncio
+    async def test_llm_partial_failure_drops_failed_candidates(self, monkeypatch) -> None:
+        """A partial outage is honest: the failed candidate is dropped and the
+        surviving scores are trusted — not zeroed into the ranking."""
+        from backend.service import rerank as mod
+
+        async def _chat(messages, **kwargs):
+            if "Text: a" in messages[0]["content"]:
+                return "0.8"
+            raise RuntimeError("provider down")
+
+        provider = MagicMock()
+        provider.chat = AsyncMock(side_effect=_chat)
+        monkeypatch.setattr(
+            "backend.service.llm_service.get_llm_provider", lambda: provider
+        )
+
+        ranked = await mod.rerank_llm("query", ["a", "b"], top_k=5)
+        # b's call failed and is dropped; a survives with its real score.
+        assert ranked == [(0, 0.8)]
 
 
 class TestCrossEncoderFirstLoad:

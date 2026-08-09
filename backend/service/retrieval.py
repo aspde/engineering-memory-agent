@@ -380,17 +380,17 @@ async def _rerank_and_filter(
     (most nuanced, slowest).  ``_RERANK_FLOOR`` only applies on an explicit
     rerank path — the default branch trusts the retriever's own recall.
 
-    Failure fallback: when the LLM rerank channel produces no score at or
-    above ``_RERANK_FLOOR``, the call is treated as a channel failure rather
-    than a "nothing is relevant" verdict — ``rerank_llm`` degrades each failed
-    candidate call to 0.0, so a provider outage zeroes every candidate and
-    would otherwise collapse the read path to an empty result.  The raw
-    recall ranking is returned instead.  The fallback is LLM-rerank-only:
-    the local cross-encoder has no failure placeholder, so an all-below-floor
-    verdict there is a real "nothing is relevant" judgement and keeps its
-    honest empty result.  A rerank signal that clears the floor for *some*
-    candidates is trusted (partial call failures drop only the failed rows
-    below the floor).
+    Failure fallback: when the LLM rerank channel is *unavailable* — every
+    candidate's LLM call failed, signalled by ``rerank_llm`` returning an
+    empty list — the call is a channel failure, not a "nothing is relevant"
+    verdict, so the raw recall ranking is returned instead of collapsing the
+    read path to an empty result.  A non-empty ranking whose scores all sit
+    below ``_RERANK_FLOOR`` is a real "nothing is relevant" judgement and
+    keeps its honest empty result.  The fallback is LLM-rerank-only: the
+    local cross-encoder has no failure placeholder, so an all-below-floor
+    verdict there is genuine and keeps its honest empty result.  A rerank
+    signal that clears the floor for *some* candidates is trusted (partial
+    call failures drop only the failed rows).
     """
     if not use_llm_rerank and not use_cross_encoder:
         return _rank_by_similarity(candidates, top_k)
@@ -402,11 +402,11 @@ async def _rerank_and_filter(
         query, [c["content"] for c in candidates], top_k=top_k
     )
 
-    if use_llm_rerank and not any(score >= _RERANK_FLOOR for _, score in ranked):
+    if use_llm_rerank and not ranked:
         logger.warning(
-            "LLM rerank channel produced no score above %.2f (query=%r) — "
+            "LLM rerank channel failed for all candidates (query=%r) — "
             "falling back to recall ranking",
-            _RERANK_FLOOR, query[:60],
+            query[:60],
         )
         return _rank_by_similarity(candidates, top_k)
 
@@ -748,18 +748,21 @@ async def query_memories(
         )
         t_rerank = time.perf_counter()
 
-        if use_llm_rerank and not any(score >= _RERANK_FLOOR for _, score in ranked):
-            # LLM rerank channel failure (rerank_llm zeroes every candidate
-            # when the provider is down) — fall back to the decay-weighted
-            # ranking instead of returning an empty result.  LLM-rerank-only
-            # by design: the local cross-encoder has no failure placeholder,
-            # so an all-below-floor verdict there is a real judgement that
-            # keeps its honest empty result.  Mirrors _rerank_and_filter's
-            # fallback for the chunk paths.
+        if use_llm_rerank and not ranked:
+            # LLM rerank channel failure (rerank_llm returns an empty list
+            # when every candidate's call failed) — fall back to the
+            # decay-weighted ranking instead of returning an empty result.
+            # LLM-rerank-only by design: the local cross-encoder has no
+            # failure placeholder, so an all-below-floor verdict there is a
+            # real judgement that keeps its honest empty result.  A non-empty
+            # ranking whose scores all sit below the floor is a genuine
+            # "nothing is relevant" verdict and filters to an empty result
+            # below.  Mirrors _rerank_and_filter's fallback for the chunk
+            # paths.
             logger.warning(
-                "LLM rerank channel produced no score above %.2f for memories — "
-                "falling back to decay-weighted ranking (query=%r)",
-                _RERANK_FLOOR, query[:60],
+                "LLM rerank channel failed for all memory candidates "
+                "(query=%r) — falling back to decay-weighted ranking",
+                query[:60],
             )
             t_rerank = t_search
             surviving = _decay_ranking()

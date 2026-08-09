@@ -119,7 +119,7 @@ async def rerank_llm(
     # no coupling between concurrent rerank invocations.
     semaphore = asyncio.Semaphore(config.llm.rerank_concurrency)
 
-    async def _score_one(idx: int, text: str) -> tuple[int, float]:
+    async def _score_one(idx: int, text: str) -> tuple[int, float, bool]:
         async with semaphore:
             prompt = _RERANK_PROMPT.format(query=query, text=text)
             try:
@@ -130,13 +130,30 @@ async def rerank_llm(
                     temperature=0.0,
                 )
             except Exception:
-                return idx, 0.0
-            return idx, _parse_score(str(response))
+                return idx, 0.0, True  # this candidate's call failed
+            return idx, _parse_score(str(response)), False
 
     tasks = [_score_one(i, c) for i, c in enumerate(candidates)]
     results = await asyncio.gather(*tasks)
 
-    ranked = sorted(results, key=lambda x: x[1], reverse=True)
+    # Channel-failure signal: when EVERY candidate's LLM call failed, the
+    # reranker produced no signal at all — not "nothing is relevant".  Return
+    # an empty list so callers fall back to the recall ranking instead of an
+    # empty result.  Partial failures are treated as honest: the failed
+    # candidates are dropped, and the surviving scores are trusted.
+    if all(failed for _, _, failed in results):
+        logger.warning(
+            "LLM rerank: all %d candidate calls failed — returning empty "
+            "channel-failure signal",
+            len(candidates),
+        )
+        return []
+
+    ranked = sorted(
+        ((idx, score) for idx, score, failed in results if not failed),
+        key=lambda x: x[1],
+        reverse=True,
+    )
     return ranked[:top_k]
 
 
