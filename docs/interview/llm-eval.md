@@ -154,13 +154,17 @@ tests/eval/
 
 ## CI
 
-- `ci.yml`：每次 push 跑 `--validate-only`（零成本门禁，与检索数据集校验并列）。
+- `ci.yml`：每次 push 跑 `--validate-only`（零成本门禁，与检索/LLM 数据集校验并列）。
 - `eval.yml`：
   - `llm-eval` job：每周定时 + 手动触发，需要 `LLM_API_KEY` secret，跑
     `--suite tool_selection,extraction,answer`（三个无 DB 套件）并上传报告。
   - `e2e-eval` job：同样每周定时 + 手动触发，带 postgres service + BGE-M3 模型，
     `e2e_seed --clear` 后跑 `--suite e2e`。
-  - 两个 job 的**门禁都用 `--judge deterministic`**，阈值已按
+  - `task-eval` job：同样每周定时 + 手动触发，前置与 e2e-eval 相同（postgres +
+    BGE-M3 + LLM），`e2e_seed --clear` 后跑 `run_task_eval --judge deterministic`
+    驱动真实 Agent 图。**门禁阈值暂未设置**——等首份
+    `task-eval-report.md` 落地后按真实数字校准（参考 e2e-eval 的标定流程）。
+  - 两个（llm/e2e）job 的**门禁都用 `--judge deterministic`**，阈值已按
     `docs/interview/llm-eval-baseline.json`（2026-08-09，commit 4ae4848）校准，
     每个阈值低于基线 0.05-0.10 留噪声余量。门禁退出码：执行失败或指标跌破阈值
     为非零，CI 即红。
@@ -195,3 +199,95 @@ judge 一抖动整个 job 就误红——标定也就失去意义。因此 **CI 
 > 注：judge 通道已稳定（2026-08-09 换用 `mimo-v2.5-free`，全量 0 judge 降级），
 > 语义基线已固化，但门禁仍保持 deterministic——门禁的职责是稳定抓回归，语义评测
 > 归手动。
+
+---
+
+## 任务级端到端评测（task_eval）
+
+> 评测代码在 `tests/eval/` 下的 `task_*` 模块，CLI 入口是 `python -m tests.eval.run_task_eval`。
+
+### 和上面四个套件的区别
+
+上面的 `llm_*` 套件各自测一个维度，但**没有一个驱动 Agent 图本身**——`e2e` 套件
+仍是"一次检索 + 一次回答"，没有 ReAct 循环、没有真实工具执行、没有 HITL 门。
+`task_eval` 补的正是这个缺口：**让真实的 `build_agent_graph`（完整工具表、真实
+ToolNode、真实审批/冲突中断）去完成多步任务**，测的不是单次决策，而是一整条轨迹。
+
+关键设计：HITL 门**自动放行**（审批通过、冲突 keep_existing）——这样测的是
+"如果人总是同意，Agent 能不能把任务做完"，把人的决策从 Agent 能力里隔离出来。
+Auto-memory 在评测进程中关闭，避免后台抽取/写入污染语料、烧 token。
+
+### 标注集
+
+`task_ground_truth.py` 的 8 个任务，事实都指向 `e2e_seed` 语料（`e2e_seed --clear`
+先灌库），所以每条事实都可检索。三类任务：
+
+| 类型 | 任务 | 验证什么 |
+|------|------|---------|
+| 多源检索 | task-002/008（根因在 memories、AST 分块在 chunks，一次检索拿不全） | 必须**两个工具都调**才能答全，测多步轨迹 |
+| 检索 + 写 / 通知 | task-003/005（`write_memory_tool` / `notify_feishu_tool`） | 检索后完成副作用动作 |
+| 单检索 / 概念 / 拒绝 | task-001/004/006/007 | 循环基线、概念查询、no_tool 克制 |
+
+校验器强制：非 no_tool 任务必须有 required_facts，且每条事实必须是某条 e2e seed
+`source_content` 的子串——否则事实永远检索不到，`fact_coverage` 结构性 <1.0。
+
+### 指标（task_metrics.py，纯函数）
+
+| 指标 | 含义 |
+|------|------|
+| `completed` | 无错误 + 实质答案（非道歉 stub）+ 调齐 expected tools（no_tool 任务 = 一个不调） |
+| `tool_recall` | expected tools 被调用的比例（部分给分） |
+| `unexpected_rate` | 调了 expected ∪ allowed 之外的工具 |
+| `within_budget` | 未撞 `max_steps` 强制终止（循环纪律） |
+| `fact_coverage` / `groundedness` / `citation_rate` | 复用 answer 套件指标（judge 通道对 Agent 实际看到的工具上下文判定） |
+
+### 运行
+
+```bash
+# 1. 灌 e2e 语料（记忆 + 分块）
+python -m tests.eval.e2e_seed --clear
+# 2. 全量跑（真实 LLM，默认 --judge llm）
+python -m tests.eval.run_task_eval --report-md docs/interview/task-eval-report.md
+# 3. 免 judge 通道（CI 用，更便宜）
+python -m tests.eval.run_task_eval --judge deterministic
+# 4. 零成本校验（ci.yml 每 push 跑）
+python -m tests.eval.run_task_eval --validate-only
+```
+
+### 实测结果（2026-08-09，DeepSeek，`--judge deterministic`）
+
+| 指标 | 数值 | 解读 |
+|------|------|------|
+| `completed` | **0.500** | 严格完成率——调齐必备工具 + 实质答案 + 无错误 |
+| `tool_recall` | 0.938 | 该调的工具几乎都调了——**工具选择意图很准** |
+| `unexpected_rate` | 0.375 | 3/8 任务调了预期外工具——**过度调用是主短板** |
+| `within_budget` | 0.875 | 1 个概念查询撞 max_steps（task-004，单任务循环 8 次工具调用） |
+| `groundedness` | 1.000 | 答案全部接地，无捏造（deterministic 通道） |
+| `citation_rate` | 0.875 | 绝大多数答案引用了实际看到的记忆/文档 |
+| 执行错误 | 0 | 8 个任务全部跑完，无超时/崩溃 |
+
+**这是比分数更重要的发现**：`tool_recall 0.94 + groundedness 1.00 + 0 错误` 说明模型的
+工具选择意图和答案忠实度都没问题，但 `completed 0.5` 暴露了组件级评测看不到的
+**轨迹级行为**——DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了
+`search_memories`×2 + `retrieve_chunks` + `query_entity` 共 4 次），概念查询甚至
+循环到撞 max_steps。`unexpected_rate 0.375` 直接把严格 `completed` 拉下 0.5。
+
+改进方向（任一都能拉高 completed）：① 强化工具描述边界——把 `search_memories`
+（记忆）与 `retrieve_chunks`（文档）的决策标准写得更明确，减少"顺手再查一下"；
+② 轨迹级节流——检索结果已覆盖提问就停手；③ max_steps 已兜底，但 5 步对概念
+查询仍偏松。
+
+### 顺带修掉的一个生产 bug
+
+为 task_eval 写拒绝路径单测时发现：**拒绝审批后写操作仍然执行**。根因是
+LangGraph 1.2.10 在 resume 被 `interrupt()` 暂停的节点时，会同时走节点返回的
+`Command(goto=...)` **和**该节点的静态/条件边——EMA 的 `check_approval` 同时有
+条件边（`_route_after_approval → tools`）和返回 `Command`，批准/放行路径两者恰好
+都指向 tools（无害），但**拒绝路径返回 `Command(goto="call_llm")` 时，静态边仍把
+路由拉到 tools，ToolNode 执行了刚被拒绝的 tool_calls**——审批门对拒绝路径形同虚设。
+
+修复（`agent/graph.py`）：`check_approval` 每条路径都返回 `Command`，因此删掉它的
+静态条件边，让 Command 成为唯一路由机制。回归测试
+`test_agent_graph.test_rejected_approval_does_not_execute_tool` 用真实图驱动拒绝
+路径并断言写操作未执行。这个 bug 暴露了 task_eval 的真正价值：**它能抓到组件级
+评测发现不了的、跨节点编排层面的正确性问题**。
