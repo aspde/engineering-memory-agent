@@ -18,6 +18,7 @@ because psycopg 3 is incompatible with ``ProactorEventLoop``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 
@@ -126,7 +127,11 @@ async def _setup_checkpointer() -> None:
             max_size=5,
         )
         await _pool.open()
-        await _pool.wait()
+        # Bound the wait: psycopg 3's async driver cannot run on Windows'
+        # ProactorEventLoop (uvicorn's default there) and retries forever
+        # instead of surfacing an error — an unbounded wait would hang
+        # startup instead of reaching the InMemorySaver fallback below.
+        await asyncio.wait_for(_pool.wait(), timeout=10)
 
         _checkpointer = AsyncPostgresSaver(_pool)
         async with _pool.connection() as conn:

@@ -55,18 +55,69 @@ class TestGraphStructure:
         graph = build_agent_graph([])
         assert isinstance(graph, CompiledStateGraph)
 
-    def test_route_after_approval_always_returns_tools(self) -> None:
-        from agent.graph import _route_after_approval
-        from agent.state import AgentState
+    @pytest.mark.asyncio
+    async def test_rejected_approval_does_not_execute_tool(self, monkeypatch) -> None:
+        """Regression: a rejected approval must NOT run the write tool.
 
-        state = AgentState(
-            messages=[],
-            final_response=None,
-            final_prompt=None,
-            error=None,
-            pending_approval=None,
+        LangGraph (1.2.10) follows the resumed node's ``Command(goto=...)``
+        AND any static/conditional edge out of that node.  check_approval
+        therefore has no static edge — routing is purely by Command — so a
+        rejection (``Command(goto="call_llm")``) must not also route to
+        ``tools`` and execute the rejected tool_calls.
+        """
+        from langgraph.types import Command
+        from langchain_core.tools import tool
+
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
         )
-        assert _route_after_approval(state) == "tools"
+
+        executed: list[str] = []
+
+        @tool
+        async def fake_write(content: str) -> str:
+            """Write a memory."""
+            executed.append(content)
+            return "inserted"
+
+        provider = AsyncMock()
+        provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([{
+                "id": "call_r",
+                "name": "fake_write",
+                "args": {"content": "should-not-run"},
+            }]),
+            content_stream("明白了，我不会写入。"),
+        )
+        provider.chat_stream = text_stream("好的。")  # tool turn → synthesis path
+
+        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: provider)
+
+        graph = build_agent_graph(
+            [fake_write],
+            checkpointer=None,
+            approval_required_tools=frozenset({"fake_write"}),
+        )
+        run_config = {"configurable": {"thread_id": "test-reject-1"}}
+
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="write something")]},
+            config=run_config,
+        )
+        assert "__interrupt__" in result
+
+        await graph.ainvoke(
+            Command(resume={"approved": False, "reason": "no"}),
+            config=run_config,
+        )
+
+        assert executed == [], (
+            "the rejected write must not execute — the approval gate is "
+            "cosmetic if a rejection still runs the tool"
+        )
 
 
 class TestGraphRouting:

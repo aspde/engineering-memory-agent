@@ -52,11 +52,6 @@ def _make_route_after_call_llm(max_steps: int):
     return _route_after_call_llm
 
 
-def _route_after_approval(state: AgentState) -> str:
-    """Route to tools after check_approval pass-through."""
-    return "tools"
-
-
 def build_agent_graph(
     tools: list,
     checkpointer: object | None = None,
@@ -107,13 +102,17 @@ def build_agent_graph(
         },
     )
 
-    # check_approval → tools (approved / pass-through)
-    # Rejected cases use Command(goto="call_llm") — skips this edge.
-    builder.add_conditional_edges(
-        "check_approval",
-        _route_after_approval,
-        {"tools": "tools"},
-    )
+    # check_approval → every path returns a Command:
+    #   pass-through / approved  → Command(goto="tools")
+    #   rejected / no-tool-calls → Command(goto="call_llm")
+    # There is deliberately NO static edge from check_approval.  When a node
+    # that was paused by ``interrupt()`` is resumed, LangGraph follows the
+    # Command's ``goto`` AND any static/conditional edges out of that node —
+    # both targets run.  An edge here would therefore route the rejected path
+    # to ``tools`` as well, and ToolNode would execute the very tool_calls the
+    # human just rejected.  With no edge, the Command is the sole router.
+    # (Verified against langgraph 1.2.10; the docs' "Command skips the edge"
+    # assumption does not hold for resumed interrupts.)
 
     # tools → check_conflict → call_llm (all routing via Command.goto)
     builder.add_edge("tools", "check_conflict")
