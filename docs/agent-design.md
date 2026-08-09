@@ -64,7 +64,7 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 ```
 agent/
   state.py    # AgentState TypedDict (messages, final_response, final_prompt, error, pending_approval)
-  tools.py    # 7 个 @tool 薄封装 → 调用 backend/service/
+  tools.py    # 9 个 @tool 薄封装 → 调用 backend/service/
   nodes.py    # call_llm_node, check_approval_node, check_conflict_node, generate_final_node
   graph.py    # build_agent_graph(), get_default_agent()
 

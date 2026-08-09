@@ -25,7 +25,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Layer | Technology | Status |
 |-------|-----------|--------|
 | Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
-| Backend | FastAPI + Python 3.12 | 11 个 API 端点已实现（含 SSE 流式 + HITL） |
+| Backend | FastAPI + Python 3.12 | 36 个 API 路由已实现（含 SSE 流式 + HITL） |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/衰减/去重全链路已实现 |
 | Entity Graph | PostgreSQL + pgvector | 实体归一化、一度关系查询、图谱可视化已实现 |
@@ -50,6 +50,9 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | POST | `/api/agent/chat/stream` | Agent 对话（SSE 流式）：逐 token 输出 + interrupt |
 | GET | `/api/agent/threads` | 获取对话历史列表 |
 | GET | `/api/agent/thread/{thread_id}` | 获取指定对话消息历史 |
+| DELETE | `/api/agent/thread/{thread_id}` | 删除对话及 checkpoint 数据 |
+| GET | `/api/agent/usage` | Agent 进程内 LLM 调用计数快照 |
+| POST | `/api/agent/usage/reset` | 重置进程内计数 |
 | POST | `/api/memory/ingest` | 文档分块 → 嵌入 → 存入 chunks 表 |
 | POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索（+稀疏）→ 可选 rerank（hybrid 默认跳过） |
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
@@ -60,13 +63,25 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/entities/{entity_id}` | 获取实体档案：名称、类型、关联记忆数、来源分布 |
 | GET | `/api/entities/{entity_id}/relations` | 获取实体一度关系：关联实体 + 最近记忆 |
 | GET | `/api/entities/search?q=&type=` | 按名称搜索实体，支持类型过滤 |
+| GET | `/api/connectors` | 列出已接入的连接器（PingCode/CI/飞书）与配置状态 |
+| GET | `/api/connectors/{source}/logs` | 查看某连接器的投递日志 |
 | GET | `/api/conflicts` | 列出待人工解决的记忆冲突（webhook/连接器 HITL 队列） |
 | POST | `/api/conflicts/{id}/resolve` | 以 keep_existing/overwrite/merge/keep_both 之一解决冲突 |
+| POST | `/api/conflicts/{id}/reopen` | 重新打开已解决的冲突 |
+| POST | `/api/patrol/trigger` | 手动触发一次巡检 |
+| GET | `/api/patrol/logs` | 巡检历史日志列表 |
+| GET | `/api/patrol/logs/{log_id}` | 单次巡检详情（发现、冲突、告警） |
+| POST | `/api/patrol/findings/{log_id}/dismiss` | 忽略一条巡检发现 |
+| POST | `/api/patrol/findings/{log_id}/conflict` | 将巡检发现转入冲突队列 |
+| GET | `/api/scenarios` | 列出可用垂直场景（复盘/审查/Onboarding/技术债） |
+| POST | `/api/scenarios/{name}/run` | 运行指定场景 |
+| POST | `/api/webhook/{source}` | 连接器事件入口（PingCode/CI/飞书 webhook） |
 | GET | `/api/usage/summary?days=7` | LLM 调用按天汇总：调用数 / tokens / 错误数 / 平均延迟 / 估算成本 |
 | GET | `/api/usage/scenarios?days=7` | LLM 调用按 scenario 汇总（各调用点的成本拆分） |
 | GET | `/api/usage/models?days=7` | 按 provider/model 汇总 + 估算成本 |
 | GET | `/api/usage/threads/{thread_id}` | 单个会话的 LLM 调用记录 |
 | GET | `/api/usage/trace/{trace_id}` | 单次 trace 的 LLM 调用链（回放一次 agent 运行） |
+| GET | `/api/usage/samples` | LLM 调用原始样本 |
 | GET | `/health` | 存活探活：数据库连通性 + LLM/Embedding provider 配置与熔断器状态（DB 不可达返回 503 degraded） |
 
 ## Technology Stack
@@ -76,6 +91,15 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 - **Language**: Python 3.12
 - **Framework**: FastAPI
 - **Async**: async/await + httpx
+
+### API Security (Authentication)
+
+所有 `/api` 路由（含 agent chat、memory 读写、ingest、connectors、patrol、webhooks）共享单一 API key 接入认证，实现于 `backend/api/auth.py`，作为全局依赖挂载在 `backend/api/router.py`：
+
+- **认证模型**：请求须携带 `Authorization: Bearer <EMA_API_KEY>`，缺头 / 非 Bearer 方案 / key 不匹配均返回通用 401（`WWW-Authenticate: Bearer`），响应不携带任何可辅助攻击的细节。
+- **常量时间比较**：key 校验用 `secrets.compare_digest`，避免时序侧信道；`APP_ENV=test` 完全豁免该守卫（API 测试套件依赖 mock，不需 key）。
+- **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带同一 Bearer；未配置时前端不携带认证头（向后兼容，后端返回 401）。
+- **边界与 ADR-004 的关系**：当前是"单 key 共享、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限，这有意与 ADR 004 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-004 的拐点评估中覆盖。
 
 ### Agent Framework
 
@@ -113,6 +137,17 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - **与进程内计数器关系**：`/api/agent/usage` 的内存计数器（重启清零）保留，是即时快照；`/api/usage/*` 读持久化 `llm_usage` 表，是历史查询。两者由同一批 provider 打点驱动，互不依赖。
 - 配置项：`USAGE_ENABLED`（默认 true）、`USAGE_FLUSH_INTERVAL_SECONDS`（默认 10）、`USAGE_BUFFER_MAX`（默认 5000）。
 
+### Observability (Runtime health metrics — Prometheus)
+
+除持久化成本行外，`backend/shared/runtime_metrics.py` 维护进程内健康时间序列，`GET /metrics`（`METRICS_ENABLED=true`，默认开）以 Prometheus 文本格式暴露，供 Prometheus 抓取 / Grafana 看板：
+
+- **HTTP 层**：ASGI 中间件（`MetricsMiddleware`，挂在 `backend/main.py`）按路由模板路径记录请求数、延迟直方图（5ms–60s bucket）与状态码分布——`path` 取匹配到的 route 模板（`/api/agent/thread/{thread_id}` 而非具体 id），标签基数有界。
+- **LLM 层**：与 `llm_usage` 同一咽喉点（`usage.record_call`）打点——按 scenario 的调用数（success/error）、延迟直方图、input/output/total token 计数。
+- **韧性层**：`resilience.py` 的 `CircuitBreaker` 在状态转换处打点——open/half-open 状态 gauge、进入 OPEN 次数、open 期间快速拒绝次数。
+- **Agent 层**：交互式并发槽位占用 gauge + 超 `MAX_AGENT_CONCURRENCY` 的 503 拒绝计数（`agent_service.py`）；每次 chat 完成记录 ReAct 步数分布（`agent_routes.py`）——**task eval 测到的过度调用信号在产线持续可见**。
+- 所有记录函数在 `config.metrics_enabled` 关闭时 no-op、异常吞掉，绝不阻塞/拖垮热路径；测试用 `reset_runtime_metrics()` 隔离。
+- 与 `llm_usage` 的分工：**usage 表回答"花了多少钱、哪次调用贵"（历史查询）；Prometheus 回答"现在健不健康、慢在哪、并发满没满"（实时时序）**。二者由同一批 provider 打点驱动，互不依赖。
+
 ### Embedding
 
 通过 `EmbeddingProvider` 抽象接口统一封装：
@@ -141,14 +176,14 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 详见 [agent-design.md](agent-design.md)。核心能力：
 
-- **ReAct 工具调用循环**：6 个 tool 封装记忆检索、文档搜索、记忆写入、知识提取、Git 摄取、文档摄取
+- **ReAct 工具调用循环**：9 个 tool 封装记忆检索、文档搜索、实体查询、改写检索、记忆写入、知识提取、Git 摄取、文档摄取、飞书通知
 - **对话连续性**：thread_id 维持跨轮次上下文
 - **容错降级**：LLM 调用失败不终止图执行
 
 ### Frontend
 
 - **React + TypeScript + Vite + Tailwind CSS**
-- 纯客户端 SPA，2 个页面：聊天页、记忆库页
+- 纯客户端 SPA，6 个页面：聊天、记忆库、实体图谱、连接器、巡检、冲突解决
 - SSE 流式聊天、Human-in-the-Loop 审批/冲突解决
 
 ### Key Dependencies

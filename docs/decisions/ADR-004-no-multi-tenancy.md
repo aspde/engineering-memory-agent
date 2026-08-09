@@ -124,7 +124,7 @@ ALTER TABLE chunks ADD COLUMN project TEXT DEFAULT 'default';
 
 ## 后果
 
-- 当前按单团队使用设计，无用户认证系统，无租户隔离
+- 当前按单团队使用设计，接入认证为共享 API key（`EMA_API_KEY`，所有 `/api` 请求须携带 `Authorization: Bearer <key>`，见 `backend/api/auth.py`），无用户级认证系统（登录 / 会话 / 用户身份 / 角色权限），无租户隔离
 - 通过 `project` 字段提供轻量命名空间，默认不过滤，用户可按需过滤
 - 上下文污染和 tag 漂移是可接受的已知风险
 - 没有团队所有权意识可能影响记忆质量——通过仪表盘和巡检激励养护

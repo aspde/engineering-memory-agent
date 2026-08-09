@@ -11,7 +11,7 @@
 | LLM | OpenAI SDK / Anthropic SDK | 抽象接口，支持 DeepSeek、OpenAI、Claude |
 | Embedding | BGE-M3 (sentence-transformers) | 本地离线部署，可替换 |
 | 数据库 | PostgreSQL 16 + pgvector | 结构化数据 + 向量检索 + 对话 checkpoints |
-| 前端 | React + TypeScript + Vite + Tailwind CSS | SPA，聊天页 + 记忆库页 + HITL 审批流 |
+| 前端 | React + TypeScript + Vite + Tailwind CSS | SPA，6 页面（聊天 / 记忆库 / 实体图谱 / 连接器 / 巡检 / 冲突解决）+ HITL 审批流 |
 
 ## 快速开始
 
@@ -82,6 +82,17 @@ ema/
 | GET | `/api/memory/memories/{id}` | 通过 ID 获取单条记忆 |
 | DELETE | `/api/memory/memories/{id}` | 软删除记忆 |
 | GET | `/api/memory/stats` | 记忆库统计（总数、来源分布、高频实体） |
+| GET | `/api/entities/search?q=&type=` | 按名称搜索实体 |
+| GET | `/api/entities/{entity_id}` | 获取实体档案 |
+| GET | `/api/entities/{entity_id}/relations` | 获取实体一度关系 |
+| GET | `/api/conflicts` | 待人工解决的记忆冲突列表 |
+| POST | `/api/conflicts/{id}/resolve` | 解决冲突（keep_existing/overwrite/merge/keep_both） |
+| POST | `/api/patrol/trigger` | 手动触发巡检 |
+| GET | `/api/patrol/logs` | 巡检历史日志 |
+| POST | `/api/scenarios/{name}/run` | 运行垂直场景 |
+| POST | `/api/webhook/{source}` | 连接器事件入口 |
+| GET | `/api/usage/summary?days=7` | LLM 调用按天汇总（含成本估算） |
+| GET | `/api/usage/trace/{trace_id}` | 单次 trace 的 LLM 调用链回放 |
 
 ## 开发
 
