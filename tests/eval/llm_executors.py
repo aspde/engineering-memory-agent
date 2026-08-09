@@ -26,6 +26,7 @@ other two are tested by patching their production functions directly.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import HumanMessage
@@ -115,3 +116,136 @@ def make_answer_generator(provider: Any | None = None) -> AnswerGenerator:
         return "".join(parts)
 
     return _generate
+
+
+# ── End-to-end (E2E) ────────────────────────────────────────────────
+# The e2e suite drives the real retrieval chain: the query is issued against
+# the seeded corpus (query_memories / retrieve_hybrid — the same production
+# read paths the agent's tools wrap), the retrieved results become the model's
+# context, and the answer is generated from that context.  Unlike
+# ``make_answer_generator`` (golden context) this measures what a real user
+# question actually pulls back.
+
+# Source-tag for the context block, matching ``agent.nodes._CONTEXT_DOC_TOOLS``:
+# chunk-derived context is framed as <doc> (untrusted document data), memory
+# results as <memory>.
+_MEMORY_CONTEXT_TAG = 'memory source="search_memories_tool"'
+_CHUNK_CONTEXT_TAG = 'doc source="retrieve_chunks_tool"'
+
+# Callable for the e2e suite: query → answer + what the model saw.
+E2ERunner = Callable[[str], Awaitable["E2EOutcome"]]
+
+
+@dataclass
+class E2EOutcome:
+    """Result of one end-to-end run: the answer plus what retrieval surfaced."""
+
+    answer: str
+    context_text: str            # the wrapped context the model actually saw
+    retrieved_source_ids: list[str]  # short ids shown to the model (for citation)
+    n_retrieved: int
+
+
+def _format_memory_display(results: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    """Render memory results exactly as ``search_memories_tool`` does.
+
+    Mirrors the production display (``agent.tools.search_memories_tool``):
+    each line carries the ``memory: <short_id>`` prefix the tool exposes, so
+    the e2e suite measures the same citation material the production agent
+    gives the model.  Returns ``(display_text, source_ids)``.
+    """
+    lines: list[str] = []
+    source_ids: list[str] = []
+    for i, r in enumerate(results):
+        score = r.get("rerank_score", r.get("weighted_score", 0))
+        decay = r.get("decay_factor", 1.0)
+        mid = str(r["id"])
+        source_ids.append(mid)
+        lines.append(
+            f"[{i + 1}] (memory: {mid[:8]}, relevance: {float(score):.2f}, "
+            f"decay: {float(decay):.2f}) {r['summary']}"
+        )
+    return "\n".join(lines), source_ids
+
+
+def _format_chunk_display(results: list) -> tuple[str, list[str]]:
+    """Render chunk results as the chunk tool would, with document ids.
+
+    Returns ``(display_text, source_ids)`` where source ids are the
+    ``document_id`` metadata (what the model would cite for a chunk source).
+    """
+    lines: list[str] = []
+    source_ids: list[str] = []
+    for i, r in enumerate(results):
+        meta = r.metadata or {}
+        doc = str(meta.get("document_id") or "")
+        if doc:
+            source_ids.append(doc)
+            lines.append(
+                f"[{i + 1}] (relevance: {float(r.score):.2f}, document: {doc}) "
+                f"{r.content}"
+            )
+        else:
+            lines.append(f"[{i + 1}] (relevance: {float(r.score):.2f}) {r.content}")
+    return "\n".join(lines), source_ids
+
+
+def make_e2e_runner(
+    *,
+    top_k: int = 5,
+    retrieval_mode: str = "memory",
+    provider: Any | None = None,
+) -> E2ERunner:
+    """Executor for the e2e suite: real retrieval → context → answer.
+
+    Retrieval runs the production read path (``query_memories`` for memory
+    mode, ``retrieve_hybrid`` for chunk mode); the retrieved display text is
+    wrapped in the same source-tagged framing ``generate_final_node`` uses;
+    the answer is streamed from the ``agent.system`` template with that
+    context folded in.
+
+    ``provider=None`` resolves the configured provider (test injection uses a
+    fake); the retrieval functions are imported lazily so ``--validate-only``
+    never loads the DB layer.
+    """
+    from backend.service.llm_service import get_llm_provider
+    from backend.service.prompts import get_prompt
+
+    tag = _MEMORY_CONTEXT_TAG if retrieval_mode == "memory" else _CHUNK_CONTEXT_TAG
+
+    async def _run(query: str) -> E2EOutcome:
+        if retrieval_mode == "memory":
+            from backend.service.retrieval import query_memories
+
+            results = await query_memories(query, top_k=top_k)
+            display, source_ids = _format_memory_display(list(results))
+        else:
+            from backend.service.retrieval import retrieve_hybrid
+
+            results = await retrieve_hybrid(query, top_k=top_k)
+            display, source_ids = _format_chunk_display(list(results))
+
+        context_text = (
+            f"<{tag}>\n{display}\n</{tag.split()[0]}>" if display else ""
+        )
+
+        llm = provider if provider is not None else get_llm_provider()
+        version, system_text = get_prompt("agent.system")
+        block = f"\n\nContext:\n{context_text}" if context_text else ""
+        system_content = system_text.format(context=block)
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": query},
+        ]
+        parts: list[str] = []
+        async for token in llm.chat_stream(messages, scenario="eval_e2e"):
+            parts.append(str(token))
+
+        return E2EOutcome(
+            answer="".join(parts),
+            context_text=context_text,
+            retrieved_source_ids=source_ids,
+            n_retrieved=len(results),
+        )
+
+    return _run

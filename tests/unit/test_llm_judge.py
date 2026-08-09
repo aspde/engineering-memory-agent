@@ -52,6 +52,21 @@ class TestJudgeAnswer:
         assert scenario == "eval_answer_judge"
 
     @pytest.mark.asyncio
+    async def test_query_forwarded_into_prompt(self, monkeypatch) -> None:
+        """The judged question must reach the judge so it can score whether the
+        answer actually addresses it, not just whether it stays grounded."""
+        seen: list = []
+
+        async def _fake_structured(messages, *, json_schema, scenario, **kw):
+            seen.append(messages[0]["content"])
+            return {"covered_facts": [], "grounded": True, "ungrounded_claims": []}
+
+        monkeypatch.setattr(judge_mod, "chat_structured", _fake_structured)
+        await judge_mod.judge_answer("EMA 用什么数据库？", "ctx", "ans", [])
+        assert "被评测的问题" in seen[0]
+        assert "EMA 用什么数据库？" in seen[0]
+
+    @pytest.mark.asyncio
     async def test_empty_answer_gets_placeholder(self, monkeypatch) -> None:
         seen: list = []
 
@@ -62,6 +77,39 @@ class TestJudgeAnswer:
         monkeypatch.setattr(judge_mod, "chat_structured", _fake_structured)
         await judge_mod.judge_answer("q", "ctx", "", ["f"])
         assert "空答案" in seen[0]
+
+    @pytest.mark.asyncio
+    async def test_defaults_to_judge_provider(self, monkeypatch) -> None:
+        """Without an explicit provider, the judge runs on get_judge_provider()
+        — the dedicated (independent) judge model.
+        """
+        seen: dict = {}
+
+        async def _fake_structured(messages, *, json_schema, scenario, provider=None, **kw):
+            seen["provider"] = provider
+            return {"covered_facts": [], "grounded": True, "ungrounded_claims": []}
+
+        monkeypatch.setattr(judge_mod, "chat_structured", _fake_structured)
+        judge = object()
+        monkeypatch.setattr(judge_mod, "get_judge_provider", lambda: judge)
+
+        await judge_mod.judge_answer("q", "ctx", "ans", [])
+        assert seen["provider"] is judge
+
+    @pytest.mark.asyncio
+    async def test_explicit_provider_overrides_default(self, monkeypatch) -> None:
+        seen: dict = {}
+
+        async def _fake_structured(messages, *, json_schema, scenario, provider=None, **kw):
+            seen["provider"] = provider
+            return {"covered_facts": [], "grounded": True, "ungrounded_claims": []}
+
+        monkeypatch.setattr(judge_mod, "chat_structured", _fake_structured)
+        monkeypatch.setattr(judge_mod, "get_judge_provider", lambda: "default-judge")
+        explicit = object()
+
+        await judge_mod.judge_answer("q", "ctx", "ans", [], provider=explicit)
+        assert seen["provider"] is explicit
 
 
 class TestJudgeSummary:

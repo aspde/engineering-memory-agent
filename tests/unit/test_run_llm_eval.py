@@ -32,8 +32,25 @@ def _fake_result(suite: str, overall: dict) -> LlmEvalResult:
 
 @pytest.fixture
 def patch_runners(monkeypatch):
-    """Route all three suite runners to fakes that record their items arg."""
-    calls: dict[str, list] = {"tool_selection": [], "extraction": [], "answer": []}
+    """Route all four suite runners to fakes that record their items arg."""
+    import tests.eval.run_llm_eval as run_mod
+
+    # The self-judging guard makes --judge llm (the default) fail when the
+    # LLM_JUDGE_* block is incomplete.  Simulate a fully-configured judge
+    # provider so the suites run; the guard itself is tested separately.
+    monkeypatch.setattr(run_mod.config.llm, "judge_provider", "zhipu")
+    monkeypatch.setattr(run_mod.config.llm, "judge_model", "glm-4.7-flash")
+    monkeypatch.setattr(run_mod.config.llm, "judge_api_key", "test-judge-key")
+    monkeypatch.setattr(
+        run_mod.config.llm, "judge_base_url", "https://open.bigmodel.cn/api/paas/v4"
+    )
+
+    calls: dict[str, list] = {
+        "tool_selection": [],
+        "extraction": [],
+        "answer": [],
+        "e2e": [],
+    }
     results: dict[str, LlmEvalResult] = {}
 
     def _make(suite: str):
@@ -52,6 +69,9 @@ def patch_runners(monkeypatch):
     monkeypatch.setattr(
         "tests.eval.llm_runner.run_answer", _make("answer")
     )
+    monkeypatch.setattr(
+        "tests.eval.llm_runner.run_e2e", _make("e2e")
+    )
     results["tool_selection"] = _fake_result(
         "tool_selection", {"tool_accuracy": 1.0}
     )
@@ -60,6 +80,15 @@ def patch_runners(monkeypatch):
     )
     results["answer"] = _fake_result(
         "answer", {"fact_coverage": 1.0, "groundedness": 1.0}
+    )
+    results["e2e"] = _fake_result(
+        "e2e",
+        {
+            "context_recall": 1.0,
+            "fact_coverage": 1.0,
+            "groundedness": 1.0,
+            "citation_rate": 1.0,
+        },
     )
     return calls, results
 
@@ -73,6 +102,7 @@ class TestRun:
         assert calls["tool_selection"] == []
         assert calls["extraction"] == []
         assert calls["answer"] == []
+        assert calls["e2e"] == []
 
     @pytest.mark.asyncio
     async def test_all_runs_every_suite(self, patch_runners) -> None:
@@ -82,6 +112,7 @@ class TestRun:
         assert len(calls["tool_selection"]) == 1
         assert len(calls["extraction"]) == 1
         assert len(calls["answer"]) == 1
+        assert len(calls["e2e"]) == 1
 
     @pytest.mark.asyncio
     async def test_single_suite_selection(self, patch_runners) -> None:
@@ -90,6 +121,25 @@ class TestRun:
         assert await _run(args) == 0
         assert calls["tool_selection"] == []
         assert len(calls["answer"]) == 1
+        assert calls["e2e"] == []
+
+    @pytest.mark.asyncio
+    async def test_comma_separated_suite_selection(self, patch_runners) -> None:
+        calls, _ = patch_runners
+        args = _build_parser().parse_args(["--suite", "answer,e2e"])
+        assert await _run(args) == 0
+        assert calls["tool_selection"] == []
+        assert calls["extraction"] == []
+        assert len(calls["answer"]) == 1
+        assert len(calls["e2e"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_unknown_suite_is_a_hard_error(self, patch_runners) -> None:
+        calls, _ = patch_runners
+        args = _build_parser().parse_args(["--suite", "bogus"])
+        with pytest.raises(SystemExit, match="bogus"):
+            await _run(args)
+        assert calls["tool_selection"] == []
 
     @pytest.mark.asyncio
     async def test_sample_slices_items(self, patch_runners) -> None:
@@ -204,3 +254,161 @@ class TestRun:
         )
         args = _build_parser().parse_args(["--suite", "tool_selection"])
         assert await _run(args) == 1
+
+
+class TestJudgeProviderGuard:
+    """--judge llm without a dedicated judge provider must fail, not self-judge."""
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_without_provider_fails(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "")
+        args = _build_parser().parse_args(["--suite", "answer"])
+        with pytest.raises(SystemExit, match="judge provider"):
+            await _run(args)
+
+    @pytest.mark.asyncio
+    async def test_configured_provider_allows_llm_judge(
+        self, patch_runners
+    ) -> None:
+        # patch_runners sets the full LLM_JUDGE_* block → the run proceeds.
+        args = _build_parser().parse_args(["--suite", "answer"])
+        assert await _run(args) == 0
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_with_provider_but_missing_model_fails(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "zhipu")
+        monkeypatch.setattr(run_mod.config.llm, "judge_model", "")
+        monkeypatch.setattr(run_mod.config.llm, "judge_api_key", "test-key")
+        monkeypatch.setattr(
+            run_mod.config.llm, "judge_base_url", "https://open.bigmodel.cn/api/paas/v4"
+        )
+        args = _build_parser().parse_args(["--suite", "answer"])
+        with pytest.raises(SystemExit, match="LLM_JUDGE_MODEL"):
+            await _run(args)
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_with_provider_but_missing_api_key_fails(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "zhipu")
+        monkeypatch.setattr(run_mod.config.llm, "judge_model", "glm-4.7-flash")
+        monkeypatch.setattr(run_mod.config.llm, "judge_api_key", "")
+        monkeypatch.setattr(
+            run_mod.config.llm, "judge_base_url", "https://open.bigmodel.cn/api/paas/v4"
+        )
+        args = _build_parser().parse_args(["--suite", "answer"])
+        with pytest.raises(SystemExit, match="LLM_JUDGE_API_KEY"):
+            await _run(args)
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_openai_compat_requires_base_url(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "openai")
+        monkeypatch.setattr(run_mod.config.llm, "judge_model", "gpt-4o-mini")
+        monkeypatch.setattr(run_mod.config.llm, "judge_api_key", "test-key")
+        monkeypatch.setattr(run_mod.config.llm, "judge_base_url", "")
+        args = _build_parser().parse_args(["--suite", "answer"])
+        with pytest.raises(SystemExit, match="LLM_JUDGE_BASE_URL"):
+            await _run(args)
+
+    @pytest.mark.asyncio
+    async def test_llm_judge_anthropic_needs_no_base_url(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "anthropic")
+        monkeypatch.setattr(run_mod.config.llm, "judge_model", "claude-sonnet-5")
+        monkeypatch.setattr(run_mod.config.llm, "judge_api_key", "test-key")
+        monkeypatch.setattr(run_mod.config.llm, "judge_base_url", "")
+        args = _build_parser().parse_args(["--suite", "answer"])
+        assert await _run(args) == 0
+
+    @pytest.mark.asyncio
+    async def test_deterministic_judge_needs_no_provider(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "")
+        args = _build_parser().parse_args(
+            ["--suite", "answer", "--judge", "deterministic"]
+        )
+        assert await _run(args) == 0
+
+    @pytest.mark.asyncio
+    async def test_validate_only_skips_guard(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "")
+        args = _build_parser().parse_args(["--validate-only"])
+        assert await _run(args) == 0
+
+    @pytest.mark.asyncio
+    async def test_tool_selection_only_skips_guard(
+        self, patch_runners, monkeypatch
+    ) -> None:
+        # tool_selection never consults the judge → no provider required.
+        import tests.eval.run_llm_eval as run_mod
+
+        monkeypatch.setattr(run_mod.config.llm, "judge_provider", "")
+        args = _build_parser().parse_args(["--suite", "tool_selection"])
+        assert await _run(args) == 0
+
+
+class TestJudgeChannelExitCode:
+    """≥50% judge failures on a suite reads as a broken run (exit 1)."""
+
+    @pytest.mark.asyncio
+    async def test_majority_judge_failures_exit_1(
+        self, patch_runners, monkeypatch, capsys
+    ) -> None:
+        r = _fake_result("answer", {"fact_coverage": 0.0, "groundedness": 0.0})
+        r.judge = "llm"
+        r.n_items = 2
+        r.judge_errors = [
+            {"id": "a1", "error": "down"},
+            {"id": "a2", "error": "down"},
+        ]
+
+        async def _fake(**kw):
+            return r
+
+        monkeypatch.setattr("tests.eval.llm_runner.run_answer", _fake)
+        args = _build_parser().parse_args(["--suite", "answer"])
+        assert await _run(args) == 1
+        assert "judge channel failed" in capsys.readouterr().err
+
+    @pytest.mark.asyncio
+    async def test_minority_judge_failures_do_not_fail_run(
+        self, patch_runners, monkeypatch, capsys
+    ) -> None:
+        r = _fake_result("answer", {"fact_coverage": 1.0, "groundedness": 1.0})
+        r.judge = "llm"
+        r.n_items = 4
+        r.judge_errors = [{"id": "a1", "error": "down"}]  # 25% < 50%
+
+        async def _fake(**kw):
+            return r
+
+        monkeypatch.setattr("tests.eval.llm_runner.run_answer", _fake)
+        args = _build_parser().parse_args(["--suite", "answer"])
+        assert await _run(args) == 0
+        err = capsys.readouterr().err
+        assert "judge degraded on 1/4 rows" in err
+        assert "judge channel failed" not in err

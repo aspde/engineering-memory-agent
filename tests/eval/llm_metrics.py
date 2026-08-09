@@ -310,6 +310,7 @@ def answer_judge_metrics(
 
 
 # Source IDs are matched tolerantly: the model may cite the full id as shown,
+# the 8-char head (the short id ``_format_memory_display`` exposes, ``mid[:8]``),
 # only its 8-char tail, or drop a ``mem-``/``doc-`` prefix.  An opaque short id
 # is never present by accident, so a match is a strong signal of an actual
 # citation.
@@ -333,13 +334,37 @@ def citation_presence(answer: str, source_ids: list[str]) -> float:
             continue
         variants = {sid}
         if len(sid) > 8:
-            variants.add(sid[-8:])
+            variants.add(sid[-8:])  # 8-char tail
+            variants.add(sid[:8])   # 8-char head — the short id the memory display exposes
         for prefix in _CITATION_PREFIXES:
             if sid.startswith(prefix):
                 variants.add(sid[len(prefix):])
         if any(v and v in text for v in variants):
             return 1.0
     return 0.0
+
+
+# ── E2E (end-to-end) ───────────────────────────────────────────────
+# The e2e suite measures the full chain "query → real retrieval → answer".
+# ``context_recall`` is the retrieval-side bound on answer quality: the
+# fraction of golden required facts actually present in the retrieved
+# context.  An answer can never cover a fact its context lacks, so a low
+# fact_coverage paired with a low context_recall points at the retriever,
+# while a high context_recall with low coverage points at generation.
+
+
+def context_recall(required_facts: list[str], context_text: str) -> float:
+    """Fraction of *required_facts* present in *context_text*.
+
+    ``context_text`` is the concatenation of what the model actually saw
+    (the retrieved results).  Empty ``required_facts`` ⇒ 1.0 (nothing to
+    retrieve, vacuously satisfied).  Facts are matched as substrings — the
+    same deterministic convention as :func:`answer_deterministic_metrics`.
+    """
+    if not required_facts:
+        return 1.0
+    text = str(context_text or "")
+    return sum(1 for f in required_facts if f in text) / len(required_facts)
 
 
 # ── Per-suite metric key order (report column order) ────────────────
@@ -367,6 +392,14 @@ EXTRACTION_METRIC_KEYS: tuple[str, ...] = (
 )
 
 ANSWER_METRIC_KEYS: tuple[str, ...] = (
+    "fact_coverage",
+    "groundedness",
+    "hallucination_rate",
+    "citation_rate",
+)
+
+E2E_METRIC_KEYS: tuple[str, ...] = (
+    "context_recall",
     "fact_coverage",
     "groundedness",
     "hallucination_rate",

@@ -15,6 +15,7 @@ from tests.eval.llm_metrics import (
     answer_deterministic_metrics,
     answer_judge_metrics,
     citation_presence,
+    context_recall,
     entity_metrics,
     names_match,
     normalize_name,
@@ -264,6 +265,12 @@ class TestCitationPresence:
         # The model may cite only the 8-char tail of a longer id.
         assert citation_presence("（文档 a1b2c3d4）", ["mem-a1b2c3d4"]) == 1.0
 
+    def test_short_head_cited(self) -> None:
+        # The memory display exposes the 8-char HEAD of a long id (mid[:8] in
+        # _format_memory_display); citing that short id is a real citation.
+        long_id = "550e8400-e29b-41d4-a716-446655440000"
+        assert citation_presence("（记忆 550e8400）", [long_id]) == 1.0
+
     def test_prefix_stripped(self) -> None:
         assert citation_presence("pgvector（a1b2c3d4）", ["mem-a1b2c3d4"]) == 1.0
 
@@ -278,3 +285,24 @@ class TestCitationPresence:
 
     def test_empty_answer(self) -> None:
         assert citation_presence("", ["a1b2c3d4"]) == 0.0
+
+
+class TestContextRecall:
+    def test_all_facts_in_context(self) -> None:
+        assert context_recall(
+            ["pgvector", "Elasticsearch"], "选用 pgvector 而非 Elasticsearch"
+        ) == 1.0
+
+    def test_missing_fact_is_partial(self) -> None:
+        assert context_recall(
+            ["pgvector", "Elasticsearch"], "选用 pgvector"
+        ) == pytest.approx(0.5)
+
+    def test_no_facts_is_vacuously_passing(self) -> None:
+        assert context_recall([], "任意上下文") == 1.0
+
+    def test_empty_context(self) -> None:
+        assert context_recall(["pgvector"], "") == 0.0
+
+    def test_none_context_never_raises(self) -> None:
+        assert context_recall(["pgvector"], None) == 0.0

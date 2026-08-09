@@ -15,6 +15,7 @@ from tests.eval.llm_ground_truth import (
     TOOL_SELECTION_CATEGORIES,
     TOOL_SELECTION_ITEMS,
     AnswerItem,
+    E2EItem,
     ExtractionItem,
     ToolSelectionItem,
     validate_llm_dataset,
@@ -115,4 +116,57 @@ class TestAnswerValidation:
         )
         monkeypatch.setattr(gt, "ANSWER_ITEMS", [bad])
         with pytest.raises(ValueError, match="required_facts"):
+            validate_llm_dataset()
+
+
+class TestE2EValidation:
+    def test_required_fact_not_in_source_content_raises(self, monkeypatch) -> None:
+        # A fact absent from source_content can never be retrieved, so
+        # context_recall can never reach 1.0 — a hard label error.
+        bad = E2EItem(
+            id="x1",
+            query="选型是什么",
+            source_content="用 pgvector 做向量检索",
+            required_facts=["pgvector", "Elasticsearch"],
+            category="factual",
+        )
+        monkeypatch.setattr(gt, "E2E_ITEMS", [bad])
+        with pytest.raises(ValueError, match="not a substring"):
+            validate_llm_dataset()
+
+    def test_duplicate_id_raises(self, monkeypatch) -> None:
+        item = E2EItem(
+            id="x1",
+            query="q",
+            source_content="用 pgvector 做向量检索",
+            required_facts=["pgvector"],
+            category="factual",
+        )
+        monkeypatch.setattr(gt, "E2E_ITEMS", [item, item])
+        with pytest.raises(ValueError, match="duplicate e2e item id"):
+            validate_llm_dataset()
+
+    def test_unknown_retrieval_mode_raises(self, monkeypatch) -> None:
+        bad = E2EItem(
+            id="x1",
+            query="q",
+            source_content="用 pgvector 做向量检索",
+            required_facts=["pgvector"],
+            category="factual",
+            retrieval_mode="hybrid",
+        )
+        monkeypatch.setattr(gt, "E2E_ITEMS", [bad])
+        with pytest.raises(ValueError, match="retrieval_mode"):
+            validate_llm_dataset()
+
+    def test_invalid_category_raises(self, monkeypatch) -> None:
+        bad = E2EItem(
+            id="x1",
+            query="q",
+            source_content="用 pgvector 做向量检索",
+            required_facts=["pgvector"],
+            category="bogus",
+        )
+        monkeypatch.setattr(gt, "E2E_ITEMS", [bad])
+        with pytest.raises(ValueError, match="unknown category"):
             validate_llm_dataset()

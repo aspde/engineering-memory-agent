@@ -519,6 +519,142 @@ ANSWER_ITEMS: list[AnswerItem] = [
 ]
 
 
+# ── End-to-end (E2E) ────────────────────────────────────────────────
+# Unlike the answer suite (which injects golden context), e2e items drive the
+# real retrieval chain: the query is issued against the seeded corpus, the
+# retrieved results become the model's context, and the answer is judged
+# against *what was actually retrieved*.  ``context_recall`` (see
+# llm_metrics) then separates retrieval losses from generation losses.
+#
+# ``source_content`` is the knowledge that MUST be retrievable — it is seeded
+# into the memories/chunks table by ``tests.eval.e2e_seed`` before the run.
+# Every ``required_fact`` must be a substring of ``source_content`` (enforced
+# by validation) or the item can never score context_recall = 1.0.
+
+E2E_RETRIEVAL_MODES: tuple[str, ...] = ("memory", "chunk")
+
+
+@dataclass(frozen=True)
+class E2EItem:
+    id: str
+    query: str
+    source_content: str
+    required_facts: list[str]
+    category: str
+    prohibited_claims: list[str] = field(default_factory=list)
+    #: "memory" → query_memories (default read path); "chunk" →
+    #: retrieve_hybrid (document chunks).
+    retrieval_mode: str = "memory"
+    notes: str = ""
+
+
+E2E_ITEMS: list[E2EItem] = [
+    E2EItem(
+        id="e2e-001",
+        query="向量检索后端选了什么方案，为什么不用 Elasticsearch？",
+        source_content=(
+            "向量检索后端选型决策：选用 PostgreSQL 的 pgvector 扩展而非 Elasticsearch。"
+            "原因：pgvector 与业务库同库，事务一致性有保障；原生支持 cosine 距离；"
+            "省去独立 ES 集群的运维成本。"
+        ),
+        required_facts=["pgvector", "Elasticsearch", "cosine"],
+        category="factual",
+        prohibited_claims=["最终选用了 Elasticsearch", "选了 Milvus"],
+        notes="选型陈述，答案应给出对比理由",
+    ),
+    E2EItem(
+        id="e2e-002",
+        query="为什么线上会突然返回 502？根因是什么？",
+        source_content=(
+            "线上 502 事故复盘：根因是数据库连接池被占满。触发链路：流量上涨 → "
+            "连接池无空闲连接 → 新请求排队超时 → 网关返回 502。"
+            "修复：重启连接池并增加连接泄漏监控。"
+        ),
+        required_facts=["连接池", "占满", "超时"],
+        category="causal",
+        prohibited_claims=["内存泄漏", "代码语法错误"],
+        notes="根因是连接池占满，禁止编造其他根因",
+    ),
+    E2EItem(
+        id="e2e-003",
+        query="Agent 编排为什么选 LangGraph 而不是 LangChain Agent？",
+        source_content=(
+            "Agent 编排框架选型：选用 LangGraph 而非 LangChain Agent。理由：StateGraph "
+            "显式声明节点与边，支持 interrupt 与 Command 实现人工介入，而旧版 "
+            "AgentExecutor 的黑盒路由无法做双 HITL。"
+        ),
+        required_facts=["LangGraph", "StateGraph", "interrupt"],
+        category="causal",
+        prohibited_claims=["最终选用了 LangChain Agent"],
+        notes="选型理由应指向状态图显式建模与人工介入",
+    ),
+    E2EItem(
+        id="e2e-004",
+        query="Windows 开发环境下 Agent 的对话状态为什么重启后会丢？",
+        source_content=(
+            "持久化降级：Windows 开发环境下 AsyncPostgresSaver 因 psycopg3 异步实现与 "
+            "ProactorEventLoop 兼容性问题不可用，降级为 InMemorySaver。重启后 Agent 状态丢失；"
+            "生产 Linux 环境仍用 PostgresSaver，可跨会话恢复。"
+        ),
+        required_facts=["AsyncPostgresSaver", "ProactorEventLoop", "InMemorySaver"],
+        category="negation",
+        prohibited_claims=["Windows 下重启后状态不会丢失"],
+        notes="正确答案是否定的，禁止肯定化",
+    ),
+    E2EItem(
+        id="e2e-005",
+        query="怎么把本地仓库的提交历史导入 EMA？",
+        source_content=(
+            "导入能力：EMA 的 ingest_git_repo_tool 支持从本地 Git 仓库读取提交历史并写入记忆。"
+            "参数：repo_path 为仓库绝对路径，max_commits 默认 50，branch 默认 HEAD。"
+        ),
+        required_facts=["ingest_git_repo_tool", "repo_path", "max_commits"],
+        category="instruction",
+        prohibited_claims=[],
+        notes="操作说明，应引用具体工具与参数",
+    ),
+    E2EItem(
+        id="e2e-006",
+        query="嵌入模型用的是什么，为什么不用 OpenAI 的？",
+        source_content=(
+            "嵌入模型选型：选用 BGE-M3，1024 维，支持中英双语，本地推理零 API 成本；"
+            "对比 OpenAI text-embedding-3-large 准确率相当但成本和延迟更优。"
+        ),
+        required_facts=["BGE-M3", "1024", "本地推理"],
+        category="factual",
+        prohibited_claims=["选用了 OpenAI 的 text-embedding-3-large"],
+        notes="答案应给出对比理由，禁止把备选说成已选用",
+    ),
+    E2EItem(
+        id="e2e-007",
+        query="Agent 是怎么防止工具调用失控的？一轮最多执行几步？",
+        source_content=(
+            "Agent 循环防护：max_agent_steps 限制每轮最多执行的 LLM 调用次数，"
+            "达到上限后强制进入最终回答节点，防止工具循环失控。"
+            "默认值由配置 MAX_AGENT_STEPS 控制。"
+        ),
+        required_facts=["max_agent_steps", "最终回答", "MAX_AGENT_STEPS"],
+        category="factual",
+        prohibited_claims=[],
+        notes="答案应提到循环上限机制",
+    ),
+    E2EItem(
+        id="e2e-008",
+        query="文档分块是怎么做的？长代码文件会被切坏吗？",
+        source_content=(
+            "文档分块策略：普通文档用递归分隔符按自然边界切块（段落、行、句），"
+            "代码文件用 AST 解析按函数/类边界切分，chunk_code 保证一个 200 行的函数"
+            "不会被拦腰切断。"
+        ),
+        required_facts=["AST", "chunk_code", "递归"],
+        category="instruction",
+        prohibited_claims=["任何长函数都会被切坏"],
+        notes="答案应说明 AST 边界切分与递归分隔符",
+        retrieval_mode="chunk",
+    ),
+]
+
+
 # ── Loading & validation ───────────────────────────────────────────
 
 
@@ -532,6 +668,10 @@ def load_extraction_items() -> list[ExtractionItem]:
 
 def load_answer_items() -> list[AnswerItem]:
     return list(ANSWER_ITEMS)
+
+
+def load_e2e_items() -> list[E2EItem]:
+    return list(E2E_ITEMS)
 
 
 def _normalize_name(name: str) -> str:
@@ -668,5 +808,36 @@ def validate_llm_dataset() -> list[str]:
         for sid in it.source_ids:
             if not str(sid).strip():
                 raise ValueError(f"{it.id}: empty source id in source_ids")
+
+    # ── e2e ──
+    seen.clear()
+    for it in E2E_ITEMS:
+        if it.id in seen:
+            raise ValueError(f"duplicate e2e item id: {it.id}")
+        seen.add(it.id)
+        if not it.query.strip():
+            raise ValueError(f"{it.id}: empty query")
+        if not it.source_content.strip():
+            raise ValueError(f"{it.id}: empty source_content")
+        if not it.required_facts:
+            raise ValueError(f"{it.id}: required_facts is empty")
+        if it.category not in ANSWER_CATEGORIES:
+            raise ValueError(
+                f"{it.id}: unknown category {it.category!r} "
+                f"(expected one of {ANSWER_CATEGORIES})"
+            )
+        if it.retrieval_mode not in E2E_RETRIEVAL_MODES:
+            raise ValueError(
+                f"{it.id}: unknown retrieval_mode {it.retrieval_mode!r} "
+                f"(expected one of {E2E_RETRIEVAL_MODES})"
+            )
+        for fact in it.required_facts:
+            if not str(fact).strip():
+                raise ValueError(f"{it.id}: empty required fact")
+            if str(fact) not in it.source_content:
+                raise ValueError(
+                    f"{it.id}: required fact {fact!r} is not a substring of "
+                    "source_content — context_recall can never reach 1.0"
+                )
 
     return warnings

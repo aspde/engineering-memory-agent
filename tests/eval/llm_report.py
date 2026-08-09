@@ -24,6 +24,7 @@ SUITE_TITLES: dict[str, str] = {
     "tool_selection": "工具选择",
     "extraction": "知识抽取",
     "answer": "最终答案",
+    "e2e": "端到端问答",
 }
 
 
@@ -113,6 +114,16 @@ def _per_query_detail(result: LlmEvalResult) -> str:
                 f"citation={_fmt(citation)} "
                 f"(answer len={q.get('answer_len', '?')})"
             )
+            context_recall = q.get("context_recall")
+            if context_recall is not None:
+                lines.append(
+                    f"- context_recall={_fmt(context_recall)} "
+                    f"(n_retrieved={q.get('n_retrieved', '?')})"
+                )
+                if context_recall < 1.0:
+                    lines.append(
+                        "- ⚠ 检索未召回完整上下文 — 缺失事实在生成层无法补齐"
+                    )
             if q.get("answer_preview"):
                 lines.append(f"- answer: `{q['answer_preview']}…`")
             if citation is not None and citation == 0.0:
@@ -233,6 +244,15 @@ def summarize(result: LlmEvalResult) -> str:
             f"[extraction] entity_f1={_fmt(result.metric('entity_f1'))} "
             f"relation_f1={_fmt(result.metric('relation_f1'))} "
             f"summary_coverage={_fmt(result.metric('summary_coverage'))} "
+            f"items={result.n_items} errors={len(result.errors)}"
+        )
+    if result.suite == "e2e":
+        return (
+            f"[e2e] context_recall={_fmt(result.metric('context_recall'))} "
+            f"coverage={_fmt(result.metric('fact_coverage'))} "
+            f"groundedness={_fmt(result.metric('groundedness'))} "
+            f"hallucination={_fmt(result.metric('hallucination_rate'))} "
+            f"citation={_fmt(result.metric('citation_rate'))} "
             f"items={result.n_items} errors={len(result.errors)}"
         )
     return (

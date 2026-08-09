@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from backend.model.llm import LLMProvider
+from backend.service.llm_service import get_judge_provider
 from backend.service.structured import chat_structured
 
 # ── Answer judge ────────────────────────────────────────────────────
@@ -31,7 +33,10 @@ from backend.service.structured import chat_structured
 # ungrounded claims for the report's forensic detail.
 
 ANSWER_JUDGE_PROMPT = """\
-你是一个严格的答案评测助手。判断下面模型答案是否忠实于给定的上下文。
+你是一个严格的答案评测助手。判断下面模型答案是否忠实于给定的上下文、是否回答了给定的问题。
+
+被评测的问题:
+{query}
 
 上下文（唯一事实来源，答案只能依据它）:
 {context}
@@ -70,9 +75,19 @@ async def judge_answer(
     context: str,
     answer: str,
     required_facts: list[str],
+    *,
+    provider: LLMProvider | None = None,
 ) -> dict[str, Any]:
-    """Grade one final answer.  Returns the validated verdict dict."""
+    """Grade one final answer.  Returns the validated verdict dict.
+
+    The judge LLM runs on the dedicated judge provider
+    (``get_judge_provider``) when one is configured — an independent model
+    from the one being evaluated, avoiding same-model self-judging.  When no
+    ``LLM_JUDGE_*`` config is set it falls back to the primary provider.
+    ``provider`` is an explicit injection point for tests.
+    """
     prompt = ANSWER_JUDGE_PROMPT.format(
+        query=query or "(未提供问题)",
         context=context,
         answer=answer or "(空答案)",
         required_facts=json.dumps(required_facts, ensure_ascii=False),
@@ -81,6 +96,7 @@ async def judge_answer(
         [{"role": "user", "content": prompt}],
         json_schema=ANSWER_JUDGE_SCHEMA,
         scenario="eval_answer_judge",
+        provider=provider or get_judge_provider(),
     )
     # Guard against a schema-valid-but-empty verdict.
     if not isinstance(verdict, dict):
@@ -126,8 +142,17 @@ SUMMARY_JUDGE_SCHEMA: dict[str, Any] = {
 }
 
 
-async def judge_summary(source: str, summary: str) -> dict[str, Any]:
-    """Grade one extracted summary.  Returns the validated verdict dict."""
+async def judge_summary(
+    source: str,
+    summary: str,
+    *,
+    provider: LLMProvider | None = None,
+) -> dict[str, Any]:
+    """Grade one extracted summary.  Returns the validated verdict dict.
+
+    Judge LLM selection mirrors ``judge_answer`` — the dedicated judge
+    provider when configured, the primary otherwise.
+    """
     prompt = SUMMARY_JUDGE_PROMPT.format(
         source=source,
         summary=summary or "(空摘要)",
@@ -136,6 +161,7 @@ async def judge_summary(source: str, summary: str) -> dict[str, Any]:
         [{"role": "user", "content": prompt}],
         json_schema=SUMMARY_JUDGE_SCHEMA,
         scenario="eval_summary_judge",
+        provider=provider or get_judge_provider(),
     )
     if not isinstance(verdict, dict):
         raise ValueError(f"summary judge returned non-object: {verdict!r}")
