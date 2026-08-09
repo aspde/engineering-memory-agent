@@ -113,13 +113,22 @@ jobs:
   # provider.  Requires the LLM_API_KEY secret (plus LLM_BASE_URL when not
   # the provider default).
   #
-  # Gate thresholds below are conservative starting points, NOT yet
-  # calibrated: as of 2026-08-08 no baseline report exists in
-  # docs/interview/llm-eval-report.md (each run needs a valid LLM_API_KEY,
-  # and the 2026-08-08 local probe key was invalid).  Until one lands, keep
-  # these floors low enough that a healthy run passes.  After the first
-  # report, calibrate them to the measured baselines (raise them so a
-  # regression actually trips the job).
+  # Gate thresholds calibrated 2026-08-09 against the committed baseline
+  # (docs/interview/llm-eval-baseline.json, commit 4ae4848, --judge
+  # deterministic, 0 execution errors / 0 judge degradations).  The floors
+  # sit ~0.05-0.10 below the measured values so a healthy run passes while a
+  # real regression still trips the job.  Recalibrate after an intentional
+  # behaviour change (prompt bump, model swap): regenerate the baseline and
+  # move the floors to the new measured values.
+  #
+  # The gate uses --judge deterministic (not the default --judge llm): the
+  # deterministic channel is reproducible and independent of the judge LLM's
+  # availability.  During calibration (2026-08-09) the configured judge
+  # provider (glm-4.7-flash) was rate-limited on both full runs — 429 on
+  # 7/8 and 6/8+8/8 answer/e2e judge calls — so every LLM-judged metric was
+  # untrustworthy.  A judge outage must degrade the gate to its
+  # deterministic channel, not flake the whole job.  Run --judge llm by hand
+  # for the semantic groundedness analysis; the CI gate stays deterministic.
   llm-eval:
     name: LLM behavior eval
     runs-on: ubuntu-latest
@@ -127,11 +136,11 @@ jobs:
       LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://api.deepseek.com' }}
-      # Dedicated judge provider — the judged model must NOT score its own
-      # output (self-preference bias inflates every gate).  run_llm_eval now
-      # hard-fails when --judge llm runs without a configured LLM_JUDGE_*
-      # block, so these secrets must be set or this job fails loudly instead
-      # of silently self-judging.
+      # Dedicated judge provider for manual --judge llm runs — the judged
+      # model must NOT score its own output (self-preference bias inflates
+      # every metric).  run_llm_eval hard-fails when --judge llm runs
+      # without a configured LLM_JUDGE_* block, so a manual semantic-judge
+      # run without these fails loudly instead of silently self-judging.
       LLM_JUDGE_PROVIDER: ${{ secrets.LLM_JUDGE_PROVIDER || '' }}
       LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL || '' }}
       LLM_JUDGE_API_KEY: ${{ secrets.LLM_JUDGE_API_KEY || '' }}
@@ -152,17 +161,18 @@ jobs:
 
       - name: Run LLM behavior eval
         run: |
-          # The three no-DB suites.  The e2e suite needs a seeded corpus and a
-          # database — it runs in the dedicated `e2e-eval` job below.
+          # Deterministic gate (see job comment: reproducible, judge-outage
+          # safe).  Thresholds from the committed baseline minus ~0.05-0.10.
           python -m tests.eval.run_llm_eval --suite tool_selection,extraction,answer \
+            --judge deterministic \
             --report-md docs/interview/llm-eval-report.md \
             --report-json llm-eval-report.json \
-            --min-tool-accuracy 0.70 \
-            --min-entity-f1 0.60 \
-            --min-relation-f1 0.50 \
-            --min-fact-coverage 0.60 \
-            --min-groundedness 0.80 \
-            --min-citation-rate 0.80
+            --min-tool-accuracy 0.68 \
+            --min-entity-f1 0.68 \
+            --min-relation-f1 0.28 \
+            --min-fact-coverage 0.90 \
+            --min-groundedness 0.95 \
+            --min-citation-rate 0.95
 
       - name: Upload LLM eval report
         if: ${{ !cancelled() }}
@@ -180,10 +190,12 @@ jobs:
   # gets its own postgres + model job rather than riding on `llm-eval`
   # (which has neither) or `eval` (which must stay LLM-free).
   #
-  # Gate thresholds below are conservative starting points, NOT yet
-  # calibrated — same policy as `llm-eval`: after the first report lands in
-  # docs/interview/e2e-eval-report.md, raise them to the measured baselines
-  # so a regression actually trips the job.
+  # Gate thresholds calibrated 2026-08-09 against the committed baseline
+  # (docs/interview/llm-eval-baseline.json, --judge deterministic):
+  # context_recall=1.000, fact_coverage=1.000, groundedness=1.000,
+  # citation_rate=1.000 on 8 items.  Floors sit ~0.05-0.10 below so a
+  # healthy run passes while a regression trips the job.  Same
+  # deterministic-gate rationale as `llm-eval` — see that job's comment.
   e2e-eval:
     name: End-to-end eval
     runs-on: ubuntu-latest
@@ -205,9 +217,9 @@ jobs:
       LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://api.deepseek.com' }}
-      # Dedicated judge provider — same requirement as the llm-eval job: the
-      # e2e groundedness gate is only meaningful when the judge is a model
-      # other than the one answering.  run_llm_eval hard-fails without it.
+      # Dedicated judge provider for manual --judge llm runs — same
+      # requirement as the llm-eval job: semantic e2e groundedness is only
+      # meaningful when the judge is a model other than the one answering.
       LLM_JUDGE_PROVIDER: ${{ secrets.LLM_JUDGE_PROVIDER || '' }}
       LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL || '' }}
       LLM_JUDGE_API_KEY: ${{ secrets.LLM_JUDGE_API_KEY || '' }}
@@ -243,13 +255,16 @@ jobs:
 
       - name: Run end-to-end eval
         run: |
+          # Deterministic gate (see the job comment): thresholds from the
+          # committed baseline minus ~0.05-0.10.
           python -m tests.eval.run_llm_eval --suite e2e \
+            --judge deterministic \
             --report-md docs/interview/e2e-eval-report.md \
             --report-json e2e-eval-report.json \
-            --min-context-recall 0.90 \
-            --min-fact-coverage 0.70 \
-            --min-groundedness 0.80 \
-            --min-citation-rate 0.80
+            --min-context-recall 0.95 \
+            --min-fact-coverage 0.90 \
+            --min-groundedness 0.95 \
+            --min-citation-rate 0.95
 
       - name: Upload e2e eval report
         if: ${{ !cancelled() }}

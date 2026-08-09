@@ -159,7 +159,39 @@ tests/eval/
   - `llm-eval` job：每周定时 + 手动触发，需要 `LLM_API_KEY` secret，跑
     `--suite tool_selection,extraction,answer`（三个无 DB 套件）并上传报告。
   - `e2e-eval` job：同样每周定时 + 手动触发，带 postgres service + BGE-M3 模型，
-    `e2e_seed --clear` 后跑 `--suite e2e`，门禁 `--min-context-recall 0.90
-    --min-fact-coverage 0.70 --min-groundedness 0.80 --min-citation-rate 0.80`。
-  - 门禁阈值均为保守起点，首次报告落地后按基线校准
-    （见 workflow 注释与本节上方的 `--min-*` 示例）。
+    `e2e_seed --clear` 后跑 `--suite e2e`。
+  - 两个 job 的**门禁都用 `--judge deterministic`**，阈值已按
+    `docs/interview/llm-eval-baseline.json`（2026-08-09，commit 4ae4848）校准，
+    每个阈值低于基线 0.05-0.10 留噪声余量。门禁退出码：执行失败或指标跌破阈值
+    为非零，CI 即红。
+
+### 基线
+
+- **基线文件**：`docs/interview/llm-eval-baseline.json`——一次干净运行
+  （0 执行错误、0 judge 降级）的逐指标结果，提交进仓库，不被每次 run 覆盖。
+- **语义基线**：`docs/interview/llm-eval-semantic-baseline.json`——judge 通道稳定后
+  用 `--judge llm` 跑出的语义判定结果（groundedness / hallucination_rate /
+  summary_faithfulness / summary_completeness），供手动分析；不进 CI 门禁。
+- **对比**：`python -m tests.eval.compare_baseline` 把当前报告与基线做 diff，
+  输出逐指标 delta，任何跌破 `--tolerance`（默认 0.01，吸收 ~±0.001 的
+  运行间噪声）的下降都以非零退出码标红。**每次改 prompt 或模型后跑一次**，
+  用 delta 判断该改动是提升还是回归。确定性报告与 LLM-judge 报告混比会被
+  拒绝（judge 模式不匹配时脚本明确报错，避免把语义判定的更严当成回归）；
+  语义对比用 `--baseline docs/interview/llm-eval-semantic-baseline.json`。
+- **重标定**：有意的行为变更（prompt 版本号 bump、模型切换、工具表调整）落地后，
+  重新生成基线并同步 eval.yml 阈值。
+
+### 为什么门禁不用 LLM judge
+
+`--judge llm` 提供语义 groundedness 判定（子串匹配检测不到的捏造），但它依赖
+judge LLM 的可用性。2026-08-09 标定过程中，配置的 judge provider
+（glm-4.7-flash）在两次全量 run 中均被持续 429 限流（7/8、6/8+8/8 的
+answer/e2e judge 调用失败），LLM 判定指标被归零、不可信。门禁若依赖这种通道，
+judge 一抖动整个 job 就误红——标定也就失去意义。因此 **CI 门禁走确定性通道**
+（可复现、judge 故障时不会拖垮 job）；`--judge llm` 保留为手动语义分析手段
+（需配置完整的 `LLM_JUDGE_*` 块，`run_llm_eval` 在缺配置时会拒绝自判），
+结果与语义基线对比。
+
+> 注：judge 通道已稳定（2026-08-09 换用 `mimo-v2.5-free`，全量 0 judge 降级），
+> 语义基线已固化，但门禁仍保持 deterministic——门禁的职责是稳定抓回归，语义评测
+> 归手动。

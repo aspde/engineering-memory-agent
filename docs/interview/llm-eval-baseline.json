@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "note": "Baseline of the LLM behavior eval.  Generated from a clean run (0 execution errors, 0 judge degradations) with --judge deterministic, so every metric is reproducible and trustworthy.  Regenerate after intentional behavior changes (prompt version bumps, model swaps, tool roster edits) via: python -m tests.eval.run_llm_eval --suite all --judge deterministic --report-json docs/interview/llm-eval-report.json && python -m tests.eval.compare_baseline",
+  "environment": {
+    "generated_at": "2026-08-09",
+    "commit": "4ae4848",
+    "llm_provider": "deepseek",
+    "llm_model": "deepseek-v4-flash",
+    "judge_mode": "deterministic"
+  },
+  "overall": {
+    "tool_selection": {
+      "tool_accuracy": 0.733,
+      "expected_recall": 0.933,
+      "unexpected_rate": 0.2,
+      "no_call": 0.067,
+      "arg_match_rate": 0.933
+    },
+    "extraction": {
+      "entity_precision": 0.762,
+      "entity_recall": 0.781,
+      "entity_f1": 0.741,
+      "entity_type_accuracy": 0.812,
+      "relation_precision": 0.292,
+      "relation_recall": 0.531,
+      "relation_f1": 0.356,
+      "summary_coverage": 0.938
+    },
+    "answer": {
+      "fact_coverage": 0.958,
+      "groundedness": 1.0,
+      "hallucination_rate": 0.0,
+      "citation_rate": 1.0
+    },
+    "e2e": {
+      "context_recall": 1.0,
+      "fact_coverage": 1.0,
+      "groundedness": 1.0,
+      "hallucination_rate": 0.0,
+      "citation_rate": 1.0
+    }
+  }
+}
