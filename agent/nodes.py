@@ -1215,7 +1215,15 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
         # would leave the client's assistant message empty.  Provider details
         # stay in the log and state.error; the client sees no exception text.
         error_text = "抱歉，当前回答生成失败，请稍后重试。"
-        writer({"type": "token", "content": error_text})
+        if content_parts:
+            # Partial tokens already reached the client — appending the error
+            # text here would glue "half an answer + apology" together.  Emit
+            # it as a distinct error event instead (the SSE layer forwards it
+            # as a separate ``error`` event); non-streaming callers have a
+            # no-op writer and simply keep the error stub in state.
+            writer({"type": "error", "message": error_text})
+        else:
+            writer({"type": "token", "content": error_text})
         # The error stub is marked so later turns never re-send it as assistant
         # history (see ``_is_llm_error_message``); ``state.error`` keeps the
         # exception detail.
@@ -1368,9 +1376,20 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         # empty assistant message (the answer's tokens normally arrive via
         # the custom stream).
         response = "抱歉，生成回复时出现错误，请稍后重试。"
-        writer({"type": "token", "content": response})
+        if response_parts:
+            # Partial tokens already reached the client — emitting the error
+            # text as a token would glue "half an answer + apology" together.
+            # A distinct error event lets the SSE layer surface it separately.
+            writer({"type": "error", "message": response})
+        else:
+            writer({"type": "token", "content": response})
 
-    aimessage = AIMessage(content=response)
+    # The error stub is marked so later turns never re-send it as assistant
+    # history (same marker as call_llm_node's failed-call stub).
+    aimessage = AIMessage(
+        content=response,
+        additional_kwargs={_LLM_ERROR_MARKER: True},
+    )
 
     _schedule_auto_memory(state)
 

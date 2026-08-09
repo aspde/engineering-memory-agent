@@ -1,7 +1,7 @@
 """Tests for agent node functions — mock LLM provider."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from langgraph.types import Command
@@ -372,6 +372,39 @@ class TestCallLLMNode:
         assert all("API down" not in e.get("content", "") for e in error_tokens)
 
     @pytest.mark.asyncio
+    async def test_partial_stream_failure_emits_error_event(self, monkeypatch) -> None:
+        """A mid-stream failure after tokens reached the client must not glue
+        the apology onto the partial answer — it becomes a distinct error
+        event, and the error stub in state stays marked so it is never resent.
+        """
+        async def _partial_then_raise(*args, **kwargs):
+            yield {"type": "content", "text": "PARTIAL-ANSWER"}
+            raise RuntimeError("API down mid-stream")
+
+        mock_provider = Mock()
+        mock_provider.chat_raw_stream.side_effect = _partial_then_raise
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        emitted: list[dict[str, str]] = []
+        monkeypatch.setattr(mod, "_stream_writer", lambda: emitted.append)
+
+        result = await mod.call_llm_node(
+            _make_state([HumanMessage(content="hi")]), tools=[]
+        )
+
+        tokens = [e for e in emitted if e.get("type") == "token"]
+        errors = [e for e in emitted if e.get("type") == "error"]
+        # The partial answer streams as tokens; the apology is NOT appended.
+        assert any("PARTIAL-ANSWER" in t.get("content", "") for t in tokens)
+        assert not any("抱歉" in t.get("content", "") for t in tokens)
+        assert len(errors) == 1
+        assert errors[0]["message"]
+        # The error stub stays marked so later turns never resend it.
+        assert result["messages"][0].additional_kwargs.get("__ema_llm_error") is True
+
+    @pytest.mark.asyncio
     async def test_step_count_resets_on_new_user_turn(self, monkeypatch) -> None:
         """A fresh HumanMessage restarts the ReAct step budget from 0.
 
@@ -566,6 +599,40 @@ class TestGenerateFinalNode:
         )
         # The exception text stays server-side.
         assert "synthesis down" not in result["final_response"]
+
+    @pytest.mark.asyncio
+    async def test_partial_final_stream_failure_emits_error_event(self, monkeypatch) -> None:
+        """A mid-stream synthesis failure after tokens reached the client must
+        not glue the apology onto the partial answer; the persisted error stub
+        is marked so it is never resent as assistant history.
+        """
+        async def _partial_then_raise(*args, **kwargs):
+            yield "PARTIAL-FINAL"
+            raise RuntimeError("synthesis down mid-stream")
+
+        mock_provider = Mock()
+        mock_provider.chat_stream.side_effect = _partial_then_raise
+
+        import agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        emitted: list[dict[str, str]] = []
+        monkeypatch.setattr(mod, "_stream_writer", lambda: emitted.append)
+
+        state = _make_state(messages=[HumanMessage(content="What is EMA?")])
+        result = await mod.generate_final_node(state)
+
+        tokens = [e for e in emitted if e.get("type") == "token"]
+        errors = [e for e in emitted if e.get("type") == "error"]
+        # The partial answer streams as tokens; the apology is NOT appended.
+        assert any("PARTIAL-FINAL" in t.get("content", "") for t in tokens)
+        assert not any("抱歉" in t.get("content", "") for t in tokens)
+        assert len(errors) == 1
+        assert errors[0]["message"]
+        # The persisted final AIMessage is the marked error stub — never
+        # resent to the model as assistant history on a later turn.
+        last = result["messages"][-1]
+        assert last.additional_kwargs.get("__ema_llm_error") is True
 
     @pytest.mark.asyncio
     async def test_harvest_parses_envelope_before_truncating(self, monkeypatch) -> None:

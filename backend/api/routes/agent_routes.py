@@ -618,6 +618,12 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                         # generate_final_node while the LLM generates.
                         if isinstance(event_data, dict) and event_data.get("type") == "token":
                             yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                        elif isinstance(event_data, dict) and event_data.get("type") == "error":
+                            # A node failed after streaming partial tokens — it
+                            # deliberately did NOT append the error to the answer,
+                            # so surface it as its own error event (the client
+                            # renders it separately instead of gluing it on).
+                            yield f"data: {json.dumps({'type': 'error', 'message': event_data.get('message', '生成出错，请稍后重试。')}, ensure_ascii=False)}\n\n"
                         continue
 
                     # mode == "updates": node completions + interrupts.
