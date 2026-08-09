@@ -20,6 +20,7 @@ from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
 from agent.state import AgentState
+from agent.tool_envelope import envelope_display, truncate_tool_content
 from backend.service.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
 from backend.service.memory import resolve_conflict, write_memory
@@ -436,18 +437,11 @@ _TRANSCRIPT_TOOL_CHAR_CAP = 200
 def _tool_display_text(message: ToolMessage) -> str:
     """The display text of a tool result, unwrapped from its JSON envelope.
 
-    Tools return ``{"display": ..., "sources": [...]}`` JSON; parsing the
-    envelope *before* truncating (the same ordering generate_final_node uses)
-    avoids cutting the raw JSON into a form the summariser can't read.
+    Delegates to :func:`agent.tool_envelope.envelope_display` — the shared
+    unwrapper — so this path and the other consumers agree on what an
+    envelope is.  Non-envelope results return their raw text.
     """
-    raw = _message_text(message)
-    try:
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict) and "display" in parsed:
-            return str(parsed["display"])
-    except (json.JSONDecodeError, TypeError):
-        pass
-    return raw
+    return envelope_display(_message_text(message))
 
 
 def _overflow_transcript(messages: list[BaseMessage]) -> str:
@@ -468,8 +462,9 @@ def _overflow_transcript(messages: list[BaseMessage]) -> str:
             lines.append(f"assistant: {_message_text(m)}")
         elif isinstance(m, ToolMessage):
             name = getattr(m, "name", "") or "tool"
+            # Envelope-aware: unwraps the display text before truncating.
             content = _truncate_tool_content(
-                _tool_display_text(m), limit=_TRANSCRIPT_TOOL_CHAR_CAP
+                _message_text(m), limit=_TRANSCRIPT_TOOL_CHAR_CAP
             )
             lines.append(f"tool ({name}): {content}")
     transcript = "\n".join(lines)
@@ -698,13 +693,13 @@ async def _bounded_messages(
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
     """Cap a ToolMessage's content before it is resent to the LLM.
 
-    Search/retrieval results can be thousands of characters; the model only
-    needs the relevant head.  The truncation marker keeps the model aware the
-    result was longer than shown.
+    Envelope-aware: a ``{"display", "sources"}`` tool result is unwrapped to
+    its display text *before* truncating, so the model never re-reads a
+    half-cut JSON blob as history.  Non-envelope text is truncated verbatim.
+    The logic lives in :mod:`agent.tool_envelope`; this alias keeps the
+    existing call sites and tests working.
     """
-    if len(text) <= limit:
-        return text
-    return text[:limit] + "\n…[truncated]"
+    return truncate_tool_content(text, limit)
 
 
 # ── Retrieved-context tagging (B2) ───────────────────────────────
@@ -1298,19 +1293,12 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         raw = str(m.content) if m.content else ""
         if not raw.strip():
             continue
-        # Parse the full envelope *before* truncating: tools return a
-        # {"display": ..., "sources": [...]} JSON envelope, and the sources
-        # array alone can exceed the truncation cap — cutting the raw text
-        # first would corrupt the JSON and fall back to sending the LLM
-        # truncated raw JSON instead of the clean display text.
-        content = raw
-        try:
-            parsed = json.loads(raw)
-            if isinstance(parsed, dict) and "display" in parsed:
-                content = str(parsed["display"])
-        except (json.JSONDecodeError, TypeError):
-            content = raw
-        content = _truncate_tool_content(content)
+        # Envelope-aware truncation: the display text is unwrapped *before*
+        # capping (see agent.tool_envelope.truncate_tool_content) — the
+        # sources array alone can exceed the cap, and cutting the raw JSON
+        # first would send the LLM truncated raw JSON instead of the clean
+        # display text.
+        content = _truncate_tool_content(raw)
         if not content.strip():
             continue
         context_parts.append(_wrap_context_item(tool_name, content))

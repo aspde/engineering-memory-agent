@@ -1,5 +1,6 @@
 """Tests for agent node functions — mock LLM provider."""
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -8,6 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
+    _MAX_TOOL_CONTENT_CHARS,
     _estimate_tokens,
     _heuristic_tokens,
     _messages_to_dicts,
@@ -1265,6 +1267,63 @@ class TestContextBounding:
         ])
         tool_msg = dicts[1]
         assert "…[truncated]" in tool_msg["content"]
+        assert len(tool_msg["content"]) == 800 + 1 + len("…[truncated]")
+
+    def test_messages_to_dicts_unwraps_envelope_before_truncating(self) -> None:
+        """A large envelope (sources alone exceed the cap) is sent to the
+        model as its complete display text, never as a half-cut JSON blob.
+        The ReAct loop re-reads the converted message as assistant history,
+        so truncating the raw envelope would poison the next turn's context.
+        The display here is short, so unwrapping means no truncation at all —
+        the fix is that the JSON is gone and the clean text survived."""
+        envelope = json.dumps(
+            {
+                "display": "这里是一段简短的检索摘要",
+                "sources": [{"id": f"src-{i}", "summary": "x" * 200} for i in range(50)],
+            },
+            ensure_ascii=False,
+        )
+        assert len(envelope) > _MAX_TOOL_CONTENT_CHARS
+
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool",
+                     "args": {"query": "x"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content=envelope, tool_call_id="c1"),
+        ])
+        tool_msg = dicts[1]
+        # The complete display text survived — no truncation marker, no JSON
+        # braces, no sources content.
+        assert tool_msg["content"] == "这里是一段简短的检索摘要"
+        assert "src-" not in tool_msg["content"]
+        assert "…[truncated]" not in tool_msg["content"]
+
+    def test_messages_to_dicts_truncates_unwrapped_display(self) -> None:
+        """When the display itself is oversized, truncation applies to the
+        unwrapped text — the model still reads display content, never JSON."""
+        envelope = json.dumps(
+            {"display": "摘" * 2000, "sources": [{"id": "s1"}]},
+            ensure_ascii=False,
+        )
+        dicts = _messages_to_dicts([
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "c1", "name": "search_memories_tool",
+                     "args": {"query": "x"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content=envelope, tool_call_id="c1"),
+        ])
+        tool_msg = dicts[1]
+        # Truncated display text — no JSON braces, no "sources".
+        assert "…[truncated]" in tool_msg["content"]
+        assert '"display"' not in tool_msg["content"]
+        assert "sources" not in tool_msg["content"]
         assert len(tool_msg["content"]) == 800 + 1 + len("…[truncated]")
 
     @pytest.mark.asyncio

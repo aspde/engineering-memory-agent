@@ -15,6 +15,7 @@ from typing import Any
 from langchain_core.tools import tool
 from pydantic import Field
 
+from agent.tool_envelope import build_tool_envelope
 from backend.service.chunk import chunk_code, chunk_text
 from backend.service.entity import (
     get_entity_by_name,
@@ -97,10 +98,7 @@ async def search_memories_tool(
             "decay": round(float(decay), 4),
             "entities": entities,
         })
-    return json.dumps(
-        {"display": "\n".join(lines), "sources": sources},
-        ensure_ascii=False,
-    )
+    return build_tool_envelope("\n".join(lines), sources)
 
 
 @tool
@@ -143,10 +141,7 @@ async def retrieve_chunks_tool(
             "relevance": round(float(r.score), 4),
             "metadata": meta,
         })
-    return json.dumps(
-        {"display": "\n".join(lines), "sources": sources},
-        ensure_ascii=False,
-    )
+    return build_tool_envelope("\n".join(lines), sources)
 
 
 @tool
@@ -198,10 +193,7 @@ async def query_rewrite_and_search_tool(
             "relevance": round(float(r.score), 4),
             "metadata": meta,
         })
-    return json.dumps(
-        {"display": "\n".join(lines), "sources": sources},
-        ensure_ascii=False,
-    )
+    return build_tool_envelope("\n".join(lines), sources)
 
 
 # ── Write tools ──────────────────────────────────────────────────────

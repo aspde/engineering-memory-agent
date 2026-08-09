@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from agent.nodes import CHAT_APPROVAL_TOOLS
+from agent.tool_envelope import parse_tool_envelope
 from backend.service.agent_service import (
     _release_agent_slot,
     _try_acquire_agent_slot,
@@ -144,16 +145,15 @@ def _extract_tool_traces(
 
         raw = str(m.content) if m.content else ""
 
-        # Try to extract structured sources from JSON envelope
+        # Try to extract structured sources from the tool-result JSON envelope
+        # (shared parser — agent.tool_envelope).  Non-envelope results
+        # (plain text, write/ingest/entity JSON) fall back to the raw text.
         parsed_sources: list[dict[str, Any]] | None = None
-        try:
-            data = json.loads(raw)
-            if isinstance(data, dict) and "sources" in data:
-                parsed_sources = data["sources"]
-                display = data.get("display", raw)
-            else:
-                display = raw
-        except (json.JSONDecodeError, TypeError):
+        envelope = parse_tool_envelope(raw)
+        if envelope is not None:
+            parsed_sources = envelope.get("sources")
+            display = str(envelope.get("display") or raw)
+        else:
             display = raw
 
         # Only write / ingest tools go to the tool-call panel.  Read
