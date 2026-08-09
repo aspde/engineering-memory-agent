@@ -100,6 +100,40 @@ class TestValidateConfig:
 
         assert config_mod.validate_config() == []
 
+    def test_judge_requires_model_key_and_base_url(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "judge_provider", "openai")
+        monkeypatch.setattr(config_mod.config.llm, "judge_model", "")
+        monkeypatch.setattr(config_mod.config.llm, "judge_api_key", "")
+        monkeypatch.setattr(config_mod.config.llm, "judge_base_url", "")
+
+        problems = config_mod.validate_config()
+        assert any("LLM_JUDGE_MODEL" in p for p in problems)
+        assert any("LLM_JUDGE_API_KEY" in p for p in problems)
+        assert any("LLM_JUDGE_BASE_URL" in p for p in problems)
+
+    def test_judge_anthropic_needs_no_base_url(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "judge_provider", "anthropic")
+        monkeypatch.setattr(config_mod.config.llm, "judge_model", "claude-haiku")
+        monkeypatch.setattr(config_mod.config.llm, "judge_api_key", "k")
+        monkeypatch.setattr(config_mod.config.llm, "judge_base_url", "")
+
+        assert config_mod.validate_config() == []
+
+    def test_judge_unset_is_valid(self, monkeypatch) -> None:
+        """No judge config at all is valid — the judge falls back to primary."""
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "judge_provider", "")
+        monkeypatch.setattr(config_mod.config.llm, "judge_model", "")
+        monkeypatch.setattr(config_mod.config.llm, "judge_api_key", "")
+        monkeypatch.setattr(config_mod.config.llm, "judge_base_url", "")
+
+        assert config_mod.validate_config() == []
+
     def test_usage_sample_rate_out_of_range(self, monkeypatch) -> None:
         _valid_patrol(monkeypatch)
         monkeypatch.setattr(config_mod.config, "app_env", "test")
@@ -167,3 +201,89 @@ class TestValidateConfig:
         monkeypatch.setattr(config_mod.config.embedding, "fallback_api_key", "k")
 
         assert config_mod.validate_config() == []
+
+    def test_usage_flush_interval_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "usage_flush_interval_seconds", 0)
+
+        problems = config_mod.validate_config()
+        assert any("USAGE_FLUSH_INTERVAL_SECONDS" in p for p in problems)
+
+    def test_usage_buffer_max_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "usage_buffer_max", 0)
+
+        problems = config_mod.validate_config()
+        assert any("USAGE_BUFFER_MAX" in p for p in problems)
+
+    def test_temperature_out_of_range(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "temperature", 2.5)
+
+        problems = config_mod.validate_config()
+        assert any("LLM_TEMPERATURE" in p for p in problems)
+
+    def test_structured_backoff_negative(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "structured_backoff", -0.1)
+
+        problems = config_mod.validate_config()
+        assert any("LLM_STRUCTURED_BACKOFF" in p for p in problems)
+
+    def test_backoff_base_may_exceed_max(self, monkeypatch) -> None:
+        """base > max is not a config error — tenacity caps every wait at
+        backoff_max, so a larger base just means a flat max backoff."""
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.resilience, "backoff_base", 10.0)
+        monkeypatch.setattr(config_mod.config.resilience, "backoff_max", 5.0)
+
+        assert config_mod.validate_config() == []
+
+    def test_structured_temperature_out_of_range(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "structured_temperature", 2.5)
+
+        problems = config_mod.validate_config()
+        assert any("LLM_STRUCTURED_TEMPERATURE" in p for p in problems)
+
+    def test_llm_provider_enum_invalid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "provider", "deepseekk")
+
+        problems = config_mod.validate_config()
+        assert any("LLM_PROVIDER" in p for p in problems)
+
+    def test_fallback_provider_enum_invalid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_provider", "gpt")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_model", "m")
+        monkeypatch.setattr(config_mod.config.llm, "fallback_api_key", "k")
+
+        problems = config_mod.validate_config()
+        assert any("LLM_FALLBACK_PROVIDER" in p for p in problems)
+
+    def test_judge_provider_enum_invalid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.llm, "judge_provider", "gemini")
+        monkeypatch.setattr(config_mod.config.llm, "judge_model", "m")
+        monkeypatch.setattr(config_mod.config.llm, "judge_api_key", "k")
+
+        problems = config_mod.validate_config()
+        assert any("LLM_JUDGE_PROVIDER" in p for p in problems)
+
+    def test_embedding_provider_enum_invalid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config.embedding, "provider", "voyage")
+
+        problems = config_mod.validate_config()
+        assert any("EMBEDDING_PROVIDER" in p for p in problems)

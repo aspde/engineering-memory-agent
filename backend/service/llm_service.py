@@ -16,6 +16,7 @@ from backend.shared.resilience import (
     call_with_resilience_sync,
     circuit_breaker_guard,
     is_retryable,
+    resilient_stream_guard,
 )
 from backend.service.usage import begin_call, record_call
 
@@ -58,17 +59,23 @@ class OpenAICompatibleProvider(LLMProvider):
         # Per-endpoint breaker name: a fallback provider (different base_url
         # and/or model) must not share the primary's breaker, or an open
         # primary breaker would fast-fail the healthy fallback too.
-        self._breaker_name = f"llm:openai:{base_url}|{model}"
+        self._breaker_name = breaker_name("openai", base_url, model)
 
+        # max_retries=0: the SDK's built-in retry is disabled so this module's
+        # resilience layer (resilience.py) is the single retry owner.  Leaving
+        # the SDK default (2) on would nest two retry loops on a transient
+        # failure — up to 3×3=9 HTTP requests with two backoff ladders.
         self._async_client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            max_retries=0,
         )
         self._sync_client = OpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=timeout,
+            max_retries=0,
         )
         logger.info("LLM provider ready: %s @ %s", model, base_url)
 
@@ -202,31 +209,81 @@ class OpenAICompatibleProvider(LLMProvider):
         Wired to the circuit breaker only — transport retries for this path
         live in ``structured.py`` (semantic retry), so tenacity is not
         layered here.
+
+        Degradation: a few OpenAI-compatible proxies implement
+        ``response_format`` lazily and occasionally return an *empty*
+        ``content`` (an empty response is indistinguishable from a model
+        refusal).  When that happens the call is retried once without
+        ``response_format`` so the model can answer freely — the structured
+        validator downstream still enforces shape.  The fallback only fires
+        on empty content, never on a populated (if malformed) response.
         """
         scenario = pop_scenario(kwargs)
         ctx = begin_call(messages)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
 
-        async def _op() -> Any:
-            return await self._async_client.chat.completions.create(
-                model=self._model,
-                messages=messages,  # type: ignore[arg-type]
-                response_format={"type": "json_object"},
+        async def _op(use_json_format: bool = True) -> Any:
+            create_kwargs: dict[str, object] = {
+                "model": self._model,
+                "messages": messages,
                 **kwargs,
-            )
+            }
+            if use_json_format:
+                create_kwargs["response_format"] = {"type": "json_object"}
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
 
         try:
             async with circuit_breaker_guard(self._breaker_name):
-                response = await _op()
+                response = await _op(use_json_format=True)
         except Exception as exc:
             self._record(
                 ctx, scenario=scenario, status="error", error=str(exc)
             )
             raise
+
+        def _raise_empty_choices(phase: str) -> None:
+            """Treat a provider response with an empty ``choices`` list as an
+            error (recorded) instead of crashing on an unrecorded IndexError."""
+            error = (
+                f"chat_json: {phase} returned an empty choices list "
+                f"(model={self._model})"
+            )
+            self._record(ctx, scenario=scenario, status="error", error=error)
+            raise RuntimeError(error)
+
+        if not response.choices:
+            _raise_empty_choices("provider")
+
+        text = response.choices[0].message.content or ""
+        if not text.strip():
+            # The empty response still consumed tokens — record its usage
+            # before the fallback so the first request's cost isn't lost when
+            # the fallback fires (regardless of the fallback's own outcome).
+            first_usage = getattr(response, "usage", None)
+            record_usage(scenario, first_usage)
+            self._record(
+                ctx, scenario=scenario, usage=first_usage, response_text=text
+            )
+            logger.warning(
+                "chat_json returned empty content (model=%s) — retrying "
+                "once without response_format",
+                self._model,
+            )
+            try:
+                async with circuit_breaker_guard(self._breaker_name):
+                    response = await _op(use_json_format=False)
+            except Exception as exc:
+                self._record(
+                    ctx, scenario=scenario, status="error", error=str(exc)
+                )
+                raise
+            if not response.choices:
+                _raise_empty_choices("fallback")
+            text = response.choices[0].message.content or ""
+
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
-        text = response.choices[0].message.content or ""
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text
         )
@@ -245,9 +302,12 @@ class OpenAICompatibleProvider(LLMProvider):
         [...]}`` event when the turn ends with tool calls.  ``tool_calls``
         use the same shape as :meth:`chat_raw` (``{"id", "name", "args"}``).
 
-        Transport retry + the circuit breaker guard connection establishment;
-        token iteration is not retried (an established stream is consumed
-        once).
+        Transport retry covers connection establishment; the circuit breaker
+        guards the whole stream lifecycle — success is only recorded once the
+        stream is fully consumed, so a stream that connects but dies
+        mid-iteration trips the breaker instead of being counted as a success.
+        Tokens already delivered are never retried (an established stream is
+        consumed once).
         Token usage is recorded when the provider returns it: the OpenAI
         SDK surfaces usage on the stream object (or on the final chunk) once
         the stream is fully consumed.  Providers whose stream carries no
@@ -274,60 +334,61 @@ class OpenAICompatibleProvider(LLMProvider):
         tool_call_order: list[int] = []
         last_chunk: Any = None
         try:
-            # Same transport retry + circuit breaker as the non-streaming
-            # paths: a 429 / 5xx / timeout at create time is retried by
-            # tenacity before the stream is established.  Once the first
-            # token has been consumed the stream is not retried — the client
-            # already saw the prefix.
-            response = await call_with_resilience(self._breaker_name, _op)
+            # Transport retry covers connection establishment (a 429 / 5xx /
+            # timeout at create time is retried by tenacity before the stream
+            # exists); the circuit breaker covers the whole stream lifecycle —
+            # success is recorded only once the stream is fully consumed, so a
+            # stream that connects but dies mid-iteration still trips the
+            # breaker.  Tokens already delivered are never retried — the
+            # client already saw the prefix.
+            async with resilient_stream_guard(self._breaker_name, _op) as response:
+                async for chunk in response:
+                    last_chunk = chunk
+                    choices = getattr(chunk, "choices", None)
+                    if not choices:
+                        continue
+                    delta = choices[0].delta
+                    if delta is None:
+                        continue
+                    if delta.content:
+                        content_parts.append(delta.content)
+                        yield {"type": "content", "text": delta.content}
+                    for tc in delta.tool_calls or []:
+                        idx = tc.index
+                        if idx not in tool_calls_map:
+                            tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
+                            tool_call_order.append(idx)
+                        if tc.id:
+                            tool_calls_map[idx]["id"] = tc.id
+                        if tc.function:
+                            if tc.function.name:
+                                tool_calls_map[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_map[idx]["arguments"] += tc.function.arguments
 
-            async for chunk in response:
-                last_chunk = chunk
-                choices = getattr(chunk, "choices", None)
-                if not choices:
-                    continue
-                delta = choices[0].delta
-                if delta is None:
-                    continue
-                if delta.content:
-                    content_parts.append(delta.content)
-                    yield {"type": "content", "text": delta.content}
-                for tc in delta.tool_calls or []:
-                    idx = tc.index
-                    if idx not in tool_calls_map:
-                        tool_calls_map[idx] = {"id": "", "name": "", "arguments": ""}
-                        tool_call_order.append(idx)
-                    if tc.id:
-                        tool_calls_map[idx]["id"] = tc.id
-                    if tc.function:
-                        if tc.function.name:
-                            tool_calls_map[idx]["name"] = tc.function.name
-                        if tc.function.arguments:
-                            tool_calls_map[idx]["arguments"] += tc.function.arguments
+                # After full consumption the SDK surfaces usage on the stream object
+                # (some versions) or on the final chunk (most versions); either way a
+                # missing usage just means this provider's stream didn't report it.
+                usage = getattr(response, "usage", None)
+                if usage is None and last_chunk is not None:
+                    usage = getattr(last_chunk, "usage", None)
+                if usage is not None:
+                    record_usage(scenario, usage)
+                self._record(
+                    ctx, scenario=scenario, usage=usage,
+                    response_text="".join(content_parts),
+                )
 
-            # After full consumption the SDK surfaces usage on the stream object
-            # (some versions) or on the final chunk (most versions); either way a
-            # missing usage just means this provider's stream didn't report it.
-            usage = getattr(response, "usage", None)
-            if usage is None and last_chunk is not None:
-                usage = getattr(last_chunk, "usage", None)
-            if usage is not None:
-                record_usage(scenario, usage)
-            self._record(
-                ctx, scenario=scenario, usage=usage,
-                response_text="".join(content_parts),
-            )
-
-            if tool_calls_map:
-                tool_calls: list[dict[str, object]] = []
-                for idx in tool_call_order:
-                    info = tool_calls_map[idx]
-                    try:
-                        args: object = json.loads(info["arguments"]) if info["arguments"] else {}
-                    except json.JSONDecodeError:
-                        args = {"raw": info["arguments"]}
-                    tool_calls.append({"id": info["id"], "name": info["name"], "args": args})
-                yield {"type": "tool_calls", "tool_calls": tool_calls}
+                if tool_calls_map:
+                    tool_calls: list[dict[str, object]] = []
+                    for idx in tool_call_order:
+                        info = tool_calls_map[idx]
+                        try:
+                            args: object = json.loads(info["arguments"]) if info["arguments"] else {}
+                        except json.JSONDecodeError:
+                            args = {"raw": info["arguments"]}
+                        tool_calls.append({"id": info["id"], "name": info["name"], "args": args})
+                    yield {"type": "tool_calls", "tool_calls": tool_calls}
         except Exception as exc:
             self._record(
                 ctx, scenario=scenario, status="error", error=str(exc)
@@ -375,15 +436,19 @@ class AnthropicProvider(LLMProvider):
         self._prompt_caching = prompt_caching
         # Per-instance breaker name (model distinguishes a same-account
         # fallback from the primary so they don't share one breaker).
-        self._breaker_name = f"llm:anthropic:{model}"
+        self._breaker_name = breaker_name("anthropic", "", model)
 
+        # max_retries=0: same single-retry-layer rationale as the
+        # OpenAI-compatible provider — resilience.py owns transport retry.
         self._async_client = AsyncAnthropic(
             api_key=api_key,
             timeout=timeout,
+            max_retries=0,
         )
         self._sync_client = Anthropic(
             api_key=api_key,
             timeout=timeout,
+            max_retries=0,
         )
         logger.info(
             "Anthropic provider ready: %s (prompt_caching=%s)",
@@ -559,6 +624,11 @@ class AnthropicProvider(LLMProvider):
         Wired to the circuit breaker only — transport retries for this path
         live in ``structured.py`` (semantic retry), so tenacity is not
         layered here.
+
+        System / messages / tools go through the same conversion and prompt
+        caching as :meth:`chat_raw` (``_maybe_cache_system`` /
+        ``_to_anthropic_messages`` / ``_maybe_cache_tools``), so a
+        tool-result turn and a cached prefix behave identically on this path.
         """
         scenario = pop_scenario(kwargs)
         ctx = begin_call(messages)
@@ -567,23 +637,24 @@ class AnthropicProvider(LLMProvider):
         schema = json_schema or {"type": "object"}
 
         async def _op() -> Any:
+            emit_tool: list[dict[str, object]] = [
+                {
+                    "name": "emit_json",
+                    "description": (
+                        'Return the requested data as a JSON value in the "result" field.'
+                    ),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"result": schema},
+                        "required": ["result"],
+                    },
+                }
+            ]
             return await self._async_client.messages.create(
                 model=self._model,
-                system=system,
-                messages=user_messages,  # type: ignore[arg-type]
-                tools=[
-                    {
-                        "name": "emit_json",
-                        "description": (
-                            'Return the requested data as a JSON value in the "result" field.'
-                        ),
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"result": schema},
-                            "required": ["result"],
-                        },
-                    }
-                ],
+                system=self._maybe_cache_system(system),
+                messages=self._to_anthropic_messages(user_messages),  # type: ignore[arg-type]
+                tools=self._maybe_cache_tools(self._to_anthropic_tools(emit_tool)),
                 tool_choice={"type": "tool", "name": "emit_json"},
                 **kwargs,
             )
@@ -1031,18 +1102,30 @@ def _build_provider(
 _provider: LLMProvider | None = None
 
 
+def breaker_name(provider: str, base_url: str, model: str) -> str:
+    """Circuit-breaker name for a provider family.
+
+    Anthropic breakers are keyed by model (``llm:anthropic:{model}``);
+    OpenAI-compatible ones by ``base_url|model`` (``llm:openai:{url}|{model}``).
+    This is the single naming source: the provider classes compute their
+    instance breaker name in ``__init__`` and ``primary_breaker_name`` reads
+    the configured primary through it, so a naming change lands in one place
+    instead of being kept "in lockstep" across modules.
+    """
+    if provider == "anthropic":
+        return f"llm:anthropic:{model}"
+    return f"llm:openai:{base_url}|{model}"
+
+
 def primary_breaker_name() -> str:
     """Circuit-breaker name for the configured primary LLM provider.
 
     Mirrors the per-instance names the provider classes compute in ``__init__``
     (endpoint | model) so ``/health`` can report the primary's breaker state
-    without reaching into provider internals.  Keeping the derivation here and
-    in the providers in lockstep is deliberate — the health endpoint must read
-    the *same* breaker the provider guards with.
+    without reaching into provider internals.  Delegates to :func:`breaker_name`,
+    the single naming source.
     """
-    if config.llm.provider == "anthropic":
-        return f"llm:anthropic:{config.llm.model}"
-    return f"llm:openai:{config.llm.base_url}|{config.llm.model}"
+    return breaker_name(config.llm.provider, config.llm.base_url, config.llm.model)
 
 
 def get_llm_provider() -> LLMProvider:
@@ -1078,3 +1161,57 @@ def get_llm_provider() -> LLMProvider:
         )
         _provider = FallbackLLMProvider(_provider, fallback)
     return _provider
+
+
+_judge_provider: LLMProvider | None = None
+
+
+def get_judge_provider() -> LLMProvider:
+    """Return the dedicated judge provider for the eval's LLM-as-judge.
+
+    Independent of the primary ``get_llm_provider`` singleton: when the
+    ``LLM_JUDGE_*`` config block is set, judging runs on that separate
+    provider — its own breaker name (``base_url|model``) and its own usage
+    rows (``scenario=eval_*_judge``), so judge verdicts come from a model
+    other than the one being evaluated and judge cost stays traceable.  When
+    no judge provider is configured, the primary provider is returned —
+    behaviour unchanged for setups without a second model.
+
+    Deliberately cached in its own module global, never into ``_provider``:
+    the judge must not share state with (or be served by) the production LLM
+    singleton.
+    """
+    global _judge_provider
+    if _judge_provider is not None:
+        return _judge_provider
+
+    llm = config.llm
+    if not llm.judge_provider:
+        # No dedicated judge — the primary provider is the judge.  Cache it
+        # into ``_judge_provider`` like the configured path so callers don't
+        # re-run the fallback decision (and re-touch the primary singleton)
+        # on every judge call.
+        _judge_provider = get_llm_provider()
+        return _judge_provider
+
+    # Structured judging should be deterministic — build at the structured
+    # temperature.  ``chat_structured`` also sets it per call, so this is a
+    # belt-and-braces default for any direct judge call.  Prompt caching is
+    # passed explicitly so an Anthropic judge doesn't silently inherit the
+    # provider default (True) when PROMPT_CACHING_ENABLED=false.
+    _judge_provider = _build_provider(
+        llm.judge_provider,
+        llm.judge_api_key,
+        llm.judge_base_url,
+        llm.judge_model,
+        temperature=llm.structured_temperature,
+        max_tokens=llm.max_tokens,
+        timeout=llm.timeout,
+        prompt_caching=llm.prompt_caching_enabled,
+    )
+    logger.info(
+        "Dedicated judge provider ready: %s @ %s",
+        llm.judge_model,
+        llm.judge_base_url or "<default>",
+    )
+    return _judge_provider

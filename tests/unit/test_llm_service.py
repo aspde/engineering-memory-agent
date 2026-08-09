@@ -183,6 +183,130 @@ class TestOpenAICompatibleChatJson:
         kwargs = mock_client.chat.completions.create.await_args.kwargs
         assert kwargs["response_format"] == {"type": "json_object"}
 
+    @pytest.mark.asyncio
+    async def test_empty_content_falls_back_without_response_format(self) -> None:
+        """An OpenAI-compatible proxy that returns empty content under
+        response_format (a lazy implementation, seen on some gateways) must
+        be retried once without the constraint — empty output is a dead end
+        for the schema validator downstream."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        calls: list[dict] = []
+
+        def _create(**kwargs):
+            calls.append(kwargs)
+            resp = MagicMock()
+            resp.usage = None
+            if len(calls) == 1:
+                # First attempt (response_format) → empty content.
+                resp.choices = [MagicMock(message=MagicMock(content=""))]
+            else:
+                resp.choices = [MagicMock(message=MagicMock(content='{"ok": true}'))]
+            return resp
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = _create
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        raw = await provider.chat_json(
+            [{"role": "user", "content": "hi"}], json_schema={"type": "object"}
+        )
+        assert raw == '{"ok": true}'
+        assert len(calls) == 2
+        # First call carries the constraint; the fallback drops it.
+        assert calls[0]["response_format"] == {"type": "json_object"}
+        assert "response_format" not in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_populated_malformed_content_is_not_retried(self) -> None:
+        """Only *empty* content triggers the fallback — a populated (even if
+        unparseable) response goes back to the caller for the validator to
+        reject, exactly once."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        resp = MagicMock()
+        resp.usage = None
+        resp.choices = [MagicMock(message=MagicMock(content="not json at all"))]
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.return_value = resp
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        raw = await provider.chat_json(
+            [{"role": "user", "content": "hi"}], json_schema={"type": "object"}
+        )
+        assert raw == "not json at all"
+        assert mock_client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_choices_raises_instead_of_index_error(self) -> None:
+        """A provider response with an empty ``choices`` list must be handled
+        as a recorded error, not crash with an unrecorded IndexError that
+        skips usage/error accounting."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        resp = MagicMock()
+        resp.usage = None
+        resp.choices = []
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.return_value = resp
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError):
+            await provider.chat_json(
+                [{"role": "user", "content": "hi"}], json_schema={"type": "object"}
+            )
+        assert mock_client.chat.completions.create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_content_fallback_records_first_response_usage(self) -> None:
+        """When the empty response triggers the no-response_format fallback,
+        the first (empty) response's token usage must be recorded too — it
+        consumed tokens even though its content was empty."""
+        from backend.shared.metrics import get_token_usage, reset_token_usage
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        reset_token_usage()
+        provider = OpenAICompatibleProvider(
+            api_key="test-key", base_url="https://example.com/v1", model="test-model"
+        )
+        calls: list[dict] = []
+
+        def _create(**kwargs):
+            calls.append(kwargs)
+            resp = MagicMock()
+            if len(calls) == 1:
+                # First attempt (response_format) → empty content, but it
+                # still reported usage.
+                resp.usage = SimpleNamespace(total_tokens=10)
+                resp.choices = [MagicMock(message=MagicMock(content=""))]
+            else:
+                resp.usage = SimpleNamespace(total_tokens=20)
+                resp.choices = [MagicMock(message=MagicMock(content='{"ok": true}'))]
+            return resp
+
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = _create
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        raw = await provider.chat_json(
+            [{"role": "user", "content": "hi"}],
+            json_schema={"type": "object"},
+            scenario="agent_chat",
+        )
+        assert raw == '{"ok": true}'
+        assert len(calls) == 2
+        # Both the empty first response (10) and the fallback (20) are counted.
+        assert get_token_usage()["agent_chat"] == 30
+
 
 class TestOpenAICompatibleChatRaw:
     """OpenAI-compatible chat_raw must surface tool_calls as
@@ -288,9 +412,90 @@ class TestAnthropicChatJson:
         )
         assert raw == '[{"from": "a", "to": "b", "type": "depends_on"}]'
         assert captured["tool_choice"] == {"type": "tool", "name": "emit_json"}
-        # system message promoted to top-level param; envelope wraps the schema
-        assert captured["system"] == "sys"
+        # system promoted to a top-level block AND cached — chat_json now goes
+        # through the same caching as chat_raw (fix: it previously sent the
+        # bare string with no cache breakpoint).
+        assert captured["system"] == [
+            {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}
+        ]
+        # messages converted to Anthropic shape (system pulled out, user kept)
+        assert captured["messages"] == [{"role": "user", "content": "hi"}]
+        # envelope still wraps the schema; the single emit_json tool is passed
+        # through _to_anthropic_tools and carries the cache breakpoint
+        assert [t["name"] for t in captured["tools"]] == ["emit_json"]
         assert captured["tools"][0]["input_schema"]["properties"]["result"] == {"type": "array"}  # type: ignore[index]
+        assert captured["tools"][0]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_chat_json_converts_tool_result_messages(self, monkeypatch) -> None:
+        """chat_json must translate OpenAI-format messages (assistant
+        tool_calls + tool results) into Anthropic tool_use/tool_result shapes —
+        a bare ``role: tool`` message would be rejected by the Anthropic API
+        (fix: chat_json previously forwarded user_messages unconverted)."""
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _ToolUseBlock:
+            type = "tool_use"
+            input = {"result": {"ok": True}}
+
+        class _FakeMessages:
+            async def create(self, **kwargs):  # type: ignore[no-untyped-def]
+                captured.update(kwargs)
+                resp = MagicMock()
+                resp.content = [_ToolUseBlock()]
+                resp.usage = None
+                return resp
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                self.messages = _FakeMessages()
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+        # prompt_caching=False keeps this test focused on message conversion.
+        provider = AnthropicProvider(
+            api_key="test-key", model="claude-test", prompt_caching=False
+        )
+        messages: list[dict[str, object]] = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "summarize"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search_memories_tool",
+                            "arguments": '{"query": "pgvector"}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "Found 2", "tool_call_id": "call_1"},
+        ]
+
+        raw = await provider.chat_json(messages, json_schema={"type": "object"})
+        assert raw == '{"ok": true}'
+        assert captured["messages"][0] == {"role": "user", "content": "summarize"}
+        assert captured["messages"][1]["role"] == "assistant"
+        assert captured["messages"][1]["content"][0] == {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "search_memories_tool",
+            "input": {"query": "pgvector"},
+        }
+        assert captured["messages"][2] == {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "Found 2"}
+            ],
+        }
 
 
 class TestAnthropicChatRaw:
@@ -883,3 +1088,256 @@ class TestStreamingUsage:
 
         assert events == []
         assert get_token_usage() == {}
+
+
+class TestStreamingBreaker:
+    """The OpenAI stream path must record breaker success only once the stream
+    is fully consumed — a stream that connects but dies mid-iteration is a
+    breaker *failure*, not a success."""
+
+    @pytest.fixture(autouse=True)
+    def _isolate_breakers(self):
+        """Fresh breaker registry per test — test_llm_service.py otherwise
+        shares one module-global breaker per endpoint|model name, and the
+        threshold/state from a neighbouring test would leak in."""
+        from backend.shared import resilience
+
+        resilience.reset_circuit_breakers()
+        yield
+        resilience.reset_circuit_breakers()
+
+    @pytest.mark.asyncio
+    async def test_mid_stream_failure_trips_breaker(self, monkeypatch) -> None:
+        import httpx
+
+        from backend.service.llm_service import OpenAICompatibleProvider
+        from backend.shared import resilience
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        breaker = resilience.get_circuit_breaker(provider._breaker_name)
+
+        class _BurstStream(_FakeAsyncStream):
+            async def _iter(self):
+                yield _openai_chunk("prefix", usage=None)
+                raise httpx.ConnectError("connection lost mid-stream")
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=_BurstStream([]))
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        collected: list = []
+        with pytest.raises(httpx.ConnectError):
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            ):
+                collected.append(event)
+
+        # The prefix already delivered is preserved; the breaker learned that
+        # this provider died mid-stream.
+        assert collected == [{"type": "content", "text": "prefix"}]
+        assert breaker.is_open
+
+    @pytest.mark.asyncio
+    async def test_successful_stream_keeps_breaker_closed(self) -> None:
+        from backend.service.llm_service import OpenAICompatibleProvider
+        from backend.shared import resilience
+
+        provider = OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="m"
+        )
+        breaker = resilience.get_circuit_breaker(provider._breaker_name)
+        stream = _FakeAsyncStream(
+            [_openai_chunk("hello", usage=None)],
+            usage=SimpleNamespace(total_tokens=5),
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(return_value=stream)
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+
+        assert events == [{"type": "content", "text": "hello"}]
+        assert not breaker.is_open  # success recorded after full consumption
+
+
+class TestSdkRetryDisabled:
+    """The SDK clients must be built with max_retries=0 — resilience.py is the
+    single retry owner, so a transient failure is never retried twice
+    (SDK default 2 × tenacity max_attempts)."""
+
+    def test_openai_clients_built_without_sdk_retry(self, monkeypatch) -> None:
+        import openai
+
+        from backend.service.llm_service import OpenAICompatibleProvider
+
+        captured: dict = {}
+
+        class _FakeAsyncOpenAI:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                captured["async"] = kwargs
+
+        class _FakeOpenAI:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                captured["sync"] = kwargs
+
+        monkeypatch.setattr(openai, "AsyncOpenAI", _FakeAsyncOpenAI)
+        monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+
+        OpenAICompatibleProvider(api_key="k", base_url="https://example.com/v1", model="m")
+        assert captured["async"]["max_retries"] == 0
+        assert captured["sync"]["max_retries"] == 0
+
+    def test_anthropic_clients_built_without_sdk_retry(self, monkeypatch) -> None:
+        import anthropic
+
+        from backend.service.llm_service import AnthropicProvider
+
+        captured: dict = {}
+
+        class _FakeAsyncAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                captured["async"] = kwargs
+
+        class _FakeAnthropic:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                captured["sync"] = kwargs
+
+        monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+        monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropic)
+
+        AnthropicProvider(api_key="k", model="claude-test")
+        assert captured["async"]["max_retries"] == 0
+        assert captured["sync"]["max_retries"] == 0
+
+
+class TestGetJudgeProvider:
+    """get_judge_provider — dedicated judge model vs primary fallback.
+
+    The judge provider must be independent of the primary singleton so the
+    eval's LLM-as-judge runs on a different model from the one evaluated.
+    """
+
+    def _reset_judge(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import backend.service.llm_service as ls
+
+        monkeypatch.setattr(ls, "_judge_provider", None)
+
+    def test_falls_back_to_primary_when_not_configured(self, monkeypatch) -> None:
+        import backend.service.llm_service as ls
+
+        self._reset_judge(monkeypatch)
+        monkeypatch.setattr(ls.config.llm, "judge_provider", "")
+        monkeypatch.setattr(ls.config.llm, "judge_model", "")
+        primary = FakeLLMProvider("primary")
+        monkeypatch.setattr(ls, "get_llm_provider", lambda: primary)
+
+        assert ls.get_judge_provider() is primary
+
+    def test_builds_independent_instance_when_configured(self, monkeypatch) -> None:
+        import backend.service.llm_service as ls
+
+        self._reset_judge(monkeypatch)
+        monkeypatch.setattr(ls.config.llm, "judge_provider", "openai")
+        monkeypatch.setattr(ls.config.llm, "judge_model", "glm-4.7-flash")
+        monkeypatch.setattr(ls.config.llm, "judge_api_key", "k")
+        monkeypatch.setattr(
+            ls.config.llm,
+            "judge_base_url",
+            "https://open.bigmodel.cn/api/paas/v4",
+        )
+        judge = FakeLLMProvider("judge")
+        seen: dict[str, str] = {}
+
+        def _fake_build(provider, api_key, base_url, model, **kw):
+            seen.update(
+                provider=provider,
+                api_key=api_key,
+                base_url=base_url,
+                model=model,
+            )
+            return judge
+
+        monkeypatch.setattr(ls, "_build_provider", _fake_build)
+
+        assert ls.get_judge_provider() is judge
+        assert seen["provider"] == "openai"
+        assert seen["model"] == "glm-4.7-flash"
+        assert seen["api_key"] == "k"
+        assert seen["base_url"] == "https://open.bigmodel.cn/api/paas/v4"
+
+    def test_result_is_cached(self, monkeypatch) -> None:
+        import backend.service.llm_service as ls
+
+        self._reset_judge(monkeypatch)
+        monkeypatch.setattr(ls.config.llm, "judge_provider", "openai")
+        monkeypatch.setattr(ls.config.llm, "judge_model", "glm-4.7-flash")
+        monkeypatch.setattr(ls.config.llm, "judge_api_key", "k")
+        monkeypatch.setattr(ls.config.llm, "judge_base_url", "b")
+        calls = {"n": 0}
+
+        def _fake_build(*a, **kw):
+            calls["n"] += 1
+            return FakeLLMProvider("judge")
+
+        monkeypatch.setattr(ls, "_build_provider", _fake_build)
+
+        first = ls.get_judge_provider()
+        second = ls.get_judge_provider()
+        assert first is second
+        assert calls["n"] == 1
+
+    def test_fallback_result_is_cached(self, monkeypatch) -> None:
+        """When no dedicated judge is configured the primary fallback is
+        cached in ``_judge_provider`` too, so the fallback decision (and the
+        primary singleton lookup) runs once, not on every judge call."""
+        import backend.service.llm_service as ls
+
+        self._reset_judge(monkeypatch)
+        monkeypatch.setattr(ls.config.llm, "judge_provider", "")
+        monkeypatch.setattr(ls.config.llm, "judge_model", "")
+        primary = FakeLLMProvider("primary")
+        calls = {"n": 0}
+
+        def _fake_get():
+            calls["n"] += 1
+            return primary
+
+        monkeypatch.setattr(ls, "get_llm_provider", _fake_get)
+
+        first = ls.get_judge_provider()
+        second = ls.get_judge_provider()
+        assert first is primary
+        assert second is primary
+        assert calls["n"] == 1
+
+    def test_judge_build_passes_prompt_caching(self, monkeypatch) -> None:
+        """An Anthropic judge must be built with the configured
+        prompt_caching_enabled, not silently inheriting the provider default
+        True when PROMPT_CACHING_ENABLED=false."""
+        import backend.service.llm_service as ls
+
+        self._reset_judge(monkeypatch)
+        monkeypatch.setattr(ls.config.llm, "judge_provider", "anthropic")
+        monkeypatch.setattr(ls.config.llm, "judge_model", "claude-haiku")
+        monkeypatch.setattr(ls.config.llm, "judge_api_key", "k")
+        monkeypatch.setattr(ls.config.llm, "judge_base_url", "")
+        monkeypatch.setattr(ls.config.llm, "prompt_caching_enabled", False)
+        seen: dict = {}
+
+        def _fake_build(*args, **kwargs):
+            seen.update(kwargs)
+            return FakeLLMProvider("judge")
+
+        monkeypatch.setattr(ls, "_build_provider", _fake_build)
+
+        ls.get_judge_provider()
+        assert seen["prompt_caching"] is False

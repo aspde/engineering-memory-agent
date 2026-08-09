@@ -160,6 +160,25 @@ class LLMConfig:
     fallback_timeout: int = field(
         default_factory=lambda: int(os.getenv("LLM_FALLBACK_TIMEOUT", "60"))
     )
+    # Dedicated judge provider for the LLM behavior eval (tests/eval).  When
+    # set, the eval's LLM-as-judge runs on this independent provider so the
+    # verdict comes from a different model than the one being evaluated —
+    # avoiding the self-preference bias of same-model judging.  All
+    # ``LLM_JUDGE_*`` fields empty means the judge falls back to the primary
+    # provider (get_judge_provider in llm_service.py) — behaviour unchanged
+    # for setups without a second provider.
+    judge_provider: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_PROVIDER", "")
+    )
+    judge_api_key: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_API_KEY", "")
+    )
+    judge_base_url: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_BASE_URL", "")
+    )
+    judge_model: str = field(
+        default_factory=lambda: os.getenv("LLM_JUDGE_MODEL", "")
+    )
 
 
 @dataclass
@@ -245,12 +264,13 @@ class AppConfig:
     auto_memory_max_per_window: int = field(
         default_factory=lambda: int(os.getenv("AUTO_MEMORY_MAX_PER_WINDOW", "30"))
     )
-    # When enabled, a turn that passes the keyword heuristic is additionally
-    # judged by one cheap LLM call ("is this durable knowledge?") before
-    # extraction runs.  Off by default — the heuristic is free; the gate
-    # costs one structured call per candidate turn.
+    # When enabled (default), a turn that passes the cheap fast-path is judged
+    # by one cheap LLM call ("is this durable knowledge?") before extraction
+    # runs — replacing the keyword heuristic as the arbiter for borderline
+    # turns.  Set AUTO_MEMORY_LLM_GATE=false to fall back to the free keyword
+    # heuristic (zero LLM cost per turn, coarser).
     auto_memory_llm_gate: bool = field(
-        default_factory=lambda: os.getenv("AUTO_MEMORY_LLM_GATE", "false").lower() == "true"
+        default_factory=lambda: os.getenv("AUTO_MEMORY_LLM_GATE", "true").lower() == "true"
     )
     # When enabled, messages older than the context window are folded into a
     # running-summary SystemMessage instead of being dropped.  Enabled by
@@ -339,6 +359,12 @@ class AppConfig:
 
 config = AppConfig()
 
+# Valid provider names — validate_config fails a typo at startup instead of
+# on the first call.  LLM providers are the OpenAI-compatible trio (DeepSeek
+# is OpenAI-compatible); embeddings are local BGE or an OpenAI-compatible API.
+_LLM_PROVIDERS = ("deepseek", "openai", "anthropic")
+_EMBEDDING_PROVIDERS = ("local", "openai")
+
 
 class ConfigError(RuntimeError):
     """Raised when :func:`validate_config` finds invalid configuration."""
@@ -370,6 +396,10 @@ def validate_config() -> list[str]:
         )
 
     # Positive / non-negative bounds for resilience & structured retry params.
+    # No ``backoff_base <= backoff_max`` check: tenacity's
+    # ``wait_exponential_jitter`` caps every wait at ``backoff_max``
+    # (``max(0, min(initial * exp, max))``), so base > max is harmless — it
+    # just means every retry already waits the full ``backoff_max``.
     if config.resilience.max_attempts < 1:
         problems.append(f"LLM_RETRY_MAX_ATTEMPTS={config.resilience.max_attempts} must be >= 1")
     if config.resilience.backoff_base < 0:
@@ -388,9 +418,27 @@ def validate_config() -> list[str]:
         problems.append(
             f"LLM_STRUCTURED_MAX_ATTEMPTS={config.llm.structured_max_attempts} must be >= 1"
         )
+    if config.llm.structured_backoff < 0:
+        problems.append(
+            f"LLM_STRUCTURED_BACKOFF={config.llm.structured_backoff} must be >= 0"
+        )
     if config.llm.rerank_concurrency < 1:
         problems.append(
             f"LLM_RERANK_CONCURRENCY={config.llm.rerank_concurrency} must be >= 1"
+        )
+    # General chat temperature is a ratio bounded well above the common 0..1
+    # range (some providers accept up to 2); out-of-range silently clamps.
+    if not 0 <= config.llm.temperature <= 2:
+        problems.append(
+            f"LLM_TEMPERATURE={config.llm.temperature} must be in 0..2"
+        )
+    # Structured calls use their own (lower) temperature, and that same value
+    # is what the eval judge provider is built with — so it gets the same
+    # 0..2 bound as the general chat temperature.
+    if not 0 <= config.llm.structured_temperature <= 2:
+        problems.append(
+            f"LLM_STRUCTURED_TEMPERATURE={config.llm.structured_temperature} "
+            "must be in 0..2"
         )
     if config.agent_timeout <= 0:
         problems.append(f"AGENT_TIMEOUT={config.agent_timeout} must be > 0")
@@ -415,6 +463,18 @@ def validate_config() -> list[str]:
         problems.append(
             f"USAGE_SAMPLE_RETENTION_DAYS={config.usage_sample_retention_days} "
             "must be >= 1"
+        )
+    # Flusher cadence and buffer cap: 0 interval spins asyncio.sleep(0) burning
+    # CPU in the flusher loop, and a non-positive buffer cap makes record_call
+    # pop from an empty buffer.
+    if config.usage_flush_interval_seconds < 1:
+        problems.append(
+            f"USAGE_FLUSH_INTERVAL_SECONDS={config.usage_flush_interval_seconds} "
+            "must be >= 1"
+        )
+    if config.usage_buffer_max < 1:
+        problems.append(
+            f"USAGE_BUFFER_MAX={config.usage_buffer_max} must be >= 1"
         )
     if not 0 <= config.alert_error_rate_threshold <= 1:
         problems.append(
@@ -462,6 +522,51 @@ def validate_config() -> list[str]:
                 "EMBEDDING_FALLBACK_API_KEY is required for an openai "
                 "embedding fallback"
             )
+
+    # Judge provider: same fail-fast policy as LLM failover — a half-set
+    # ``LLM_JUDGE_*`` config would otherwise only surface on the first eval
+    # judge call, silently degrading the eval to self-judging.
+    if config.llm.judge_provider:
+        if not config.llm.judge_model:
+            problems.append(
+                "LLM_JUDGE_MODEL is required when LLM_JUDGE_PROVIDER is set"
+            )
+        if not config.llm.judge_api_key:
+            problems.append(
+                "LLM_JUDGE_API_KEY is required when LLM_JUDGE_PROVIDER is set"
+            )
+        if (
+            config.llm.judge_provider != "anthropic"
+            and not config.llm.judge_base_url
+        ):
+            problems.append(
+                "LLM_JUDGE_BASE_URL is required when LLM_JUDGE_PROVIDER "
+                "is an OpenAI-compatible provider"
+            )
+
+    # Provider names — a typo (e.g. ``LLM_PROVIDER=deepseekk``) must fail at
+    # startup, not on the first provider call.  Fallback/judge may be empty
+    # (feature off) but must be a valid name when set.
+    if config.llm.provider not in _LLM_PROVIDERS:
+        problems.append(
+            f"LLM_PROVIDER={config.llm.provider!r} must be one of "
+            f"{', '.join(_LLM_PROVIDERS)}"
+        )
+    if config.llm.fallback_provider and config.llm.fallback_provider not in _LLM_PROVIDERS:
+        problems.append(
+            f"LLM_FALLBACK_PROVIDER={config.llm.fallback_provider!r} must be one of "
+            f"{', '.join(_LLM_PROVIDERS)}"
+        )
+    if config.llm.judge_provider and config.llm.judge_provider not in _LLM_PROVIDERS:
+        problems.append(
+            f"LLM_JUDGE_PROVIDER={config.llm.judge_provider!r} must be one of "
+            f"{', '.join(_LLM_PROVIDERS)}"
+        )
+    if config.embedding.provider not in _EMBEDDING_PROVIDERS:
+        problems.append(
+            f"EMBEDDING_PROVIDER={config.embedding.provider!r} must be one of "
+            f"{', '.join(_EMBEDDING_PROVIDERS)}"
+        )
 
     # LLM API key — real providers all need one; only tests are exempt.
     if config.app_env != "test" and not config.llm.api_key:
