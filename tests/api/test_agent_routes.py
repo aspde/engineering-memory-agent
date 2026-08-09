@@ -600,6 +600,61 @@ class TestAgentStream:
         assert error_text in response.text
 
     @pytest.mark.asyncio
+    async def test_custom_error_event_reaches_sse_client_as_own_event(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A custom-stream error event (emitted after partial tokens) is
+        forwarded as its own SSE error event, not glued onto a token line.
+
+        Regression guard for the #4 fix: nodes emit ``{"type": "error"}``
+        through the custom stream instead of appending the apology to the
+        partial answer; the route must forward it as a distinct ``error``
+        event so the client renders it separately.
+        """
+        import json
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+
+        async def _astream(*args, **kwargs):
+            yield (), "custom", {"type": "token", "content": "半句答案"}
+            yield (), "custom", {
+                "type": "error",
+                "message": "抱歉，当前回答生成失败，请稍后重试。",
+            }
+            yield (), "updates", {"generate_final": {"final_response": ""}}
+
+        mock_agent.astream = _astream
+        mock_agent.aget_state.return_value = None
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={"message": "hi"},
+        )
+        assert response.status_code == 200
+
+        events = [
+            json.loads(line[6:])
+            for line in response.text.splitlines()
+            if line.strip().startswith("data: ")
+        ]
+        types = [e.get("type") for e in events]
+        # The partial answer and the apology travel as separate events —
+        # the error is never appended to a token.
+        assert "token" in types
+        assert "error" in types
+        token_event = next(e for e in events if e.get("type") == "token")
+        error_event = next(e for e in events if e.get("type") == "error")
+        assert token_event["content"] == "半句答案"
+        assert "抱歉" not in token_event["content"]
+        assert "抱歉，当前回答生成失败，请稍后重试。" in error_event["message"]
+
+    @pytest.mark.asyncio
     async def test_stream_outer_error_does_not_leak_internal_exception(
         self, async_client: AsyncClient, monkeypatch
     ) -> None:
