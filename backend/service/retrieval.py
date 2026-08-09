@@ -338,6 +338,28 @@ def _attach_document_id(row: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def _rank_by_similarity(
+    candidates: list[dict[str, Any]], top_k: int
+) -> list[RetrievalResult]:
+    """Rank candidates by raw recall similarity — the no-rerank default and
+    the rerank-channel-failure fallback.  No ``_RERANK_FLOOR``: like the
+    default read path, this trusts the retriever's own recall.
+    """
+    top = sorted(
+        candidates,
+        key=lambda c: float(c.get("similarity", 0.0)),
+        reverse=True,
+    )[:top_k]
+    return [
+        RetrievalResult(
+            content=c["content"],
+            score=float(c.get("similarity", 0.0)),
+            metadata=_attach_document_id(c),
+        )
+        for c in top
+    ]
+
+
 async def _rerank_and_filter(
     query: str,
     candidates: list[dict[str, Any]],
@@ -357,21 +379,21 @@ async def _rerank_and_filter(
     568M model.  ``use_llm_rerank=True`` selects the LLM pointwise variant
     (most nuanced, slowest).  ``_RERANK_FLOOR`` only applies on an explicit
     rerank path — the default branch trusts the retriever's own recall.
+
+    Failure fallback: when the LLM rerank channel produces no score at or
+    above ``_RERANK_FLOOR``, the call is treated as a channel failure rather
+    than a "nothing is relevant" verdict — ``rerank_llm`` degrades each failed
+    candidate call to 0.0, so a provider outage zeroes every candidate and
+    would otherwise collapse the read path to an empty result.  The raw
+    recall ranking is returned instead.  The fallback is LLM-rerank-only:
+    the local cross-encoder has no failure placeholder, so an all-below-floor
+    verdict there is a real "nothing is relevant" judgement and keeps its
+    honest empty result.  A rerank signal that clears the floor for *some*
+    candidates is trusted (partial call failures drop only the failed rows
+    below the floor).
     """
     if not use_llm_rerank and not use_cross_encoder:
-        top = sorted(
-            candidates,
-            key=lambda c: float(c.get("similarity", 0.0)),
-            reverse=True,
-        )[:top_k]
-        return [
-            RetrievalResult(
-                content=c["content"],
-                score=float(c.get("similarity", 0.0)),
-                metadata=_attach_document_id(c),
-            )
-            for c in top
-        ]
+        return _rank_by_similarity(candidates, top_k)
 
     from backend.service.rerank import rerank_cross_encoder, rerank_llm
 
@@ -379,6 +401,15 @@ async def _rerank_and_filter(
     ranked = await reranker(
         query, [c["content"] for c in candidates], top_k=top_k
     )
+
+    if use_llm_rerank and not any(score >= _RERANK_FLOOR for _, score in ranked):
+        logger.warning(
+            "LLM rerank channel produced no score above %.2f (query=%r) — "
+            "falling back to recall ranking",
+            _RERANK_FLOOR, query[:60],
+        )
+        return _rank_by_similarity(candidates, top_k)
+
     return [
         RetrievalResult(
             content=candidates[idx]["content"],
@@ -690,26 +721,14 @@ async def query_memories(
         )
         return []
 
-    if use_llm_rerank or use_cross_encoder:
-        reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
-        ranked = await reranker(
-            query, [c["summary"] for c in candidates], top_k=top_k
-        )
-        t_rerank = time.perf_counter()
-
-        # Drop results where the reranker score is below the minimum threshold —
-        # this prevents irrelevant results from appearing when no real match exists.
-        surviving: list[tuple[int, float]] = [
-            (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
-        ]
-    else:
-        # Default path: no rerank.  ``search_memories`` already returns rows
-        # ordered by decay-weighted similarity (weighted_score DESC), so the
-        # top-k candidates *are* the rank order.  The reported score is the
-        # weighted_score the retriever produced (falling back to the stored
-        # decay_factor for rows without one, e.g. legacy mocks).
-        t_rerank = t_search
-        surviving = [
+    def _decay_ranking() -> list[tuple[int, float]]:
+        """Decay-weighted surviving list — the default path and the
+        rerank-channel-failure fallback.  ``search_memories`` already returns
+        rows ordered by decay-weighted similarity (weighted_score DESC), so the
+        top-k candidates *are* the rank order.  The reported score is the
+        weighted_score the retriever produced (falling back to the stored
+        decay_factor for rows without one, e.g. legacy mocks)."""
+        return [
             (
                 idx,
                 float(
@@ -721,6 +740,39 @@ async def query_memories(
             )
             for idx in range(min(len(candidates), top_k))
         ]
+
+    if use_llm_rerank or use_cross_encoder:
+        reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
+        ranked = await reranker(
+            query, [c["summary"] for c in candidates], top_k=top_k
+        )
+        t_rerank = time.perf_counter()
+
+        if use_llm_rerank and not any(score >= _RERANK_FLOOR for _, score in ranked):
+            # LLM rerank channel failure (rerank_llm zeroes every candidate
+            # when the provider is down) — fall back to the decay-weighted
+            # ranking instead of returning an empty result.  LLM-rerank-only
+            # by design: the local cross-encoder has no failure placeholder,
+            # so an all-below-floor verdict there is a real judgement that
+            # keeps its honest empty result.  Mirrors _rerank_and_filter's
+            # fallback for the chunk paths.
+            logger.warning(
+                "LLM rerank channel produced no score above %.2f for memories — "
+                "falling back to decay-weighted ranking (query=%r)",
+                _RERANK_FLOOR, query[:60],
+            )
+            t_rerank = t_search
+            surviving = _decay_ranking()
+        else:
+            # Drop results where the reranker score is below the minimum threshold —
+            # this prevents irrelevant results from appearing when no real match exists.
+            surviving: list[tuple[int, float]] = [
+                (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
+            ]
+    else:
+        # Default path: no rerank.
+        t_rerank = t_search
+        surviving = _decay_ranking()
 
     # Re-attach full memory rows in ranked order, and update decay in a
     # single batch (one UPDATE ... RETURNING) instead of N sequential
