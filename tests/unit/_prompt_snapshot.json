@@ -1,7 +1,7 @@
 {
   "agent.auto_memory_gate": {
-    "version": "1",
-    "sha256": "18f41b058d1cdd9a3a476e789de65a0c38a35e0ee60135b7cf7c902ab25d14a4"
+    "version": "3",
+    "sha256": "506ccc172e6d5e2725b71ff6f2d06076c9ff79c04b46c82b5d81c30e1e7abbaa"
   },
   "agent.compaction": {
     "version": "1",
@@ -12,24 +12,24 @@
     "sha256": "fe84c4860dd9c2572c6993f05123f724e7bf737818ef0c40e9b35583e49b7c68"
   },
   "extraction.entities": {
-    "version": "1",
-    "sha256": "75c9092730dd03cbfd90687020c8a1420f922e9cb9472b4f80de4c74542a5d0d"
+    "version": "2",
+    "sha256": "c6a222c4cd82cf3e35260fb49b66256e876cbbc555c1dde901a77881f215f705"
   },
   "extraction.relations": {
-    "version": "1",
-    "sha256": "76930ea962f5b11f0fe0c4cef7f97fed1312dee577763ad79a0abe25bfaf7823"
+    "version": "2",
+    "sha256": "bbde209fc94be5aef79066c826fbdba3e084d6f6054132f25690ce34a9d2f0e4"
   },
   "extraction.summary": {
-    "version": "1",
-    "sha256": "b4fc57f648171ddc560ef8cb3f0d5b9e1ff6631d95ed32f87c77d4fd3a70077e"
+    "version": "2",
+    "sha256": "97c17c4c00c964ace2ad9c636280daabbf5cc6f47358faad302debd5cc5c7320"
   },
   "memory.conflict": {
-    "version": "1",
-    "sha256": "fbf0f189582e48d0d3f45b35d4067efa659071892e5b6b78a77fa99cd71b485c"
+    "version": "2",
+    "sha256": "3999eb33c5915e9fb7b8def5efbe74810918eb4176941699dabc8a0f134ca0dd"
   },
   "memory.merge": {
-    "version": "1",
-    "sha256": "879bcc0e26baddfefb07efc4e99ab4aedece8d2d3976c9cc2cdf80c1eb9664e5"
+    "version": "2",
+    "sha256": "f2a8dffec9bf1344c70e7a32c6c3a2cd8db464565bb679436f11a921f253aef0"
   },
   "patrol.ci_failure": {
     "version": "2",
@@ -48,8 +48,8 @@
     "sha256": "0621fc793846e0fdd91191123c1c7b414e102ee5837f6f53131443dfa82a168f"
   },
   "query_rewrite": {
-    "version": "1",
-    "sha256": "9969cc4e3006b01310a6cf2416a64913910086d2fae1baeba24f25574bede9a1"
+    "version": "3",
+    "sha256": "cc361810b60230714450077dfb3b81f34109870a70d43e5941fc71aa1f6041ea"
   },
   "scenario.code_review": {
     "version": "2",
