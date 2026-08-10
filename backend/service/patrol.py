@@ -17,6 +17,7 @@ from langgraph.types import Command
 
 from backend.db import get_session_factory
 from backend.service.agent_service import get_agent
+from backend.service.llm_service import get_llm_provider
 from backend.service.patrol_prompts import (
     CI_FAILURE_PATROL_PROMPT,
     DAILY_PATROL_PROMPT,
@@ -34,6 +35,25 @@ logger = logging.getLogger(__name__)
 # existing memory — nothing is dropped or overwritten — and the bound below
 # stops a loop of repeated conflicts from spinning the whole patrol.
 _MAX_AUTO_CONFLICT_RESOLUTIONS = 3
+
+# Patrol scans get their own ReAct budget instead of borrowing the interactive
+# MAX_AGENT_STEPS (default 5).  The graph force-routes to ``generate_final``
+# once ``step_count`` hits the bound, which used to cut patrols off mid-scan
+# with an incomplete report.  A full-memory scan needs many more search steps;
+# types absent from the map keep the interactive default (``get_agent`` falls
+# back to ``config.max_agent_steps``).
+_PATROL_MAX_STEPS: dict[str, int] = {
+    "daily": 15,
+    "weekly": 20,
+    "contradiction_scan": 20,
+}
+
+# Repair-retry threshold: a patrol output that failed contract validation is
+# re-emitted as JSON by one dedicated LLM call (see ``_repair_findings``).
+# Only outputs substantial enough to repair qualify — a mid-thought fragment
+# ("Let me scan more…") is not a report, and re-emitting it as empty JSON
+# would turn a genuine scan failure into a misleading 'completed'.
+_PATROL_REPAIR_MIN_CHARS = 300
 
 
 def _interrupt_payload(interrupt: Any) -> Any:
@@ -151,6 +171,62 @@ def _parse_findings(raw_text: str) -> dict | None:
     return {"raw_output": text[:5000]}
 
 
+async def _repair_findings(
+    raw_text: str, parse_error: str, patrol_type: str
+) -> dict | None:
+    """One bounded LLM attempt to turn an invalid patrol output into
+    contract-compliant JSON.
+
+    The agent occasionally finishes a run with output that passes parsing but
+    violates the JSON contract (prose instead of the schema, or a report
+    truncated at the output ceiling).  Rather than record the patrol failed,
+    this re-emits the existing output through one dedicated LLM call with a
+    strict "pure JSON, every key present" instruction.  Returns valid findings,
+    or ``None`` (which records the patrol failed exactly as before).
+
+    Bounded: called at most once per run, only when the raw output is
+    substantial enough to repair (``_PATROL_REPAIR_MIN_CHARS``), and capped at
+    ``config.patrol_max_tokens`` — the raw report alone can exceed the
+    interactive ``LLM_MAX_TOKENS``.
+    """
+    required = _PATROL_REQUIRED_KEYS.get(patrol_type)
+    if required is None:
+        return None
+    if len(raw_text.strip()) < _PATROL_REPAIR_MIN_CHARS:
+        return None
+    try:
+        from backend.service.prompts import get_prompt
+
+        version, prompt = get_prompt("patrol.repair")
+        logger.info(
+            "Patrol repair: re-emitting invalid %s output as JSON "
+            "(prompt patrol.repair v%s)",
+            patrol_type, version,
+        )
+        content = prompt.format(
+            error=parse_error,
+            keys=", ".join(sorted(required)),
+            raw=raw_text[:4000],
+        )
+        provider = get_llm_provider()
+        text = await provider.chat(
+            [{"role": "user", "content": content}],
+            scenario="patrol_repair",
+            max_tokens=config.patrol_max_tokens,
+        )
+    except Exception:
+        logger.exception("Patrol repair call failed")
+        return None
+
+    repaired = _parse_findings(text)
+    if _validate_findings(repaired, patrol_type) is not None:
+        logger.warning(
+            "Patrol repair produced output that still fails validation"
+        )
+        return None
+    return repaired
+
+
 async def run_patrol(
     patrol_type: str,
     trigger: str,
@@ -252,7 +328,10 @@ async def run_patrol(
             # write tools execute directly.  The conflict HITL gate
             # (check_conflict_node) still pauses on a write conflict — that
             # interrupt is surfaced below, not swallowed.
-            agent = get_agent(approval_required_tools=frozenset())
+            agent = get_agent(
+                approval_required_tools=frozenset(),
+                max_steps=_PATROL_MAX_STEPS.get(patrol_type),
+            )
             # Bounded by PATROL_TIMEOUT (default 600s) — a hung provider or a
             # runaway ReAct loop must not leave the patrol in 'running' forever.
             async with asyncio.timeout(config.patrol_timeout):
@@ -332,6 +411,22 @@ async def run_patrol(
                             break
                 findings = _parse_findings(raw_text) if raw_text else None
                 parse_error = _validate_findings(findings, patrol_type)
+                if parse_error:
+                    # One bounded repair attempt: a malformed scan is re-emitted
+                    # as contract-compliant JSON by a dedicated LLM call.  On
+                    # success the report is kept (status stays 'completed'); on
+                    # failure the run is recorded failed exactly as before.
+                    repaired = await _repair_findings(
+                        raw_text, parse_error, patrol_type
+                    )
+                    if repaired is not None:
+                        logger.warning(
+                            "Patrol %s (%s) findings repaired after failed "
+                            "validation: %s",
+                            patrol_id, patrol_type, parse_error,
+                        )
+                        findings = repaired
+                        parse_error = None
                 if parse_error:
                     # A malformed scan must never persist as 'completed' — the
                     # UI would render "done" while every finding click fails.

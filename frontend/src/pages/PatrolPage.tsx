@@ -34,6 +34,79 @@ function patrolFindingKey(f: PatrolFinding): string | null {
   return [a, b].sort().join(':');
 }
 
+/**
+ * Human-readable title + description for a finding card, derived from the
+ * fields each patrol type actually emits (see backend/service/prompts.py
+ * patrol templates).  None of the finding schemas use the generic
+ * title/summary/description fields the card used to assume — entity_coverage
+ * has entity_name/missing_domains/recommendation, contradictions have the two
+ * memory summaries + conflict_description, etc. — so without this mapping a
+ * whole group would render as bare "#1 #2 …" placeholders.
+ */
+function findingCardText(
+  f: PatrolFinding,
+  groupKey: string,
+): { title?: string; description?: string } {
+  const recommendation = f.recommendation ? String(f.recommendation) : undefined;
+  switch (groupKey) {
+    case 'entity_coverage': {
+      const missing = Array.isArray(f.missing_domains)
+        ? (f.missing_domains as string[]).join('、')
+        : '';
+      const description = [
+        missing ? `缺失领域：${missing}` : '',
+        recommendation ? `建议：${recommendation}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      return {
+        title: f.entity_name ? String(f.entity_name) : undefined,
+        description: description || undefined,
+      };
+    }
+    case 'knowledge_gaps':
+      return {
+        title: f.entity_name ? String(f.entity_name) : undefined,
+        description:
+          f.missing_domain
+            ? `缺失领域：${String(f.missing_domain)}`
+            : recommendation,
+      };
+    case 'new_entities':
+      return {
+        title: f.entity_name ? String(f.entity_name) : undefined,
+        description: recommendation,
+      };
+    case 'contradictions':
+      return {
+        title:
+          f.memory_a_summary || f.memory_b_summary
+            ? `${f.memory_a_summary ?? '记忆 A'} ⇄ ${f.memory_b_summary ?? '记忆 B'}`
+            : undefined,
+        description: f.conflict_description ? String(f.conflict_description) : undefined,
+      };
+    case 'pattern_matches':
+      return {
+        title:
+          f.new_summary || f.matched_summary
+            ? `${f.new_summary ?? '新记忆'} ⇄ ${f.matched_summary ?? '历史记忆'}`
+            : undefined,
+        description: f.reason ? String(f.reason) : undefined,
+      };
+    case 'decay_alerts':
+      return {
+        title: f.summary ? String(f.summary) : f.memory_id ? String(f.memory_id) : undefined,
+        description: recommendation,
+      };
+    default:
+      // Unknown/extension groups: keep the generic fields the card used to read.
+      return {
+        title: f.title || f.summary ? String(f.title ?? f.summary) : undefined,
+        description: f.description ? String(f.description) : undefined,
+      };
+  }
+}
+
 const PAGE_SIZE = 20;
 
 export default function PatrolPage() {
@@ -50,6 +123,11 @@ export default function PatrolPage() {
   const [arbitratedKeys, setArbitratedKeys] = useState<Set<string>>(new Set());
   const [arbitrateError, setArbitrateError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string>('');
+  // Latest run *today* per patrol type (for the "已执行过" hint under the
+  // trigger buttons).  Informational only — triggering again stays allowed.
+  const [todayRuns, setTodayRuns] = useState<
+    Record<string, { started_at: string; status: string }>
+  >({});
 
   const fetchLogs = useCallback(async (newOffset: number) => {
     setLoading(true);
@@ -66,8 +144,32 @@ export default function PatrolPage() {
     }
   }, [filterType]);
 
+  // Today's runs are derived from the newest logs (the endpoint returns them
+  // newest-first): the first entry per type whose started_at falls on the
+  // local date is "today's run" for that type.
+  const fetchTodayRuns = useCallback(async () => {
+    try {
+      const data = await listPatrolLogs({ limit: 100 });
+      const runs: Record<string, { started_at: string; status: string }> = {};
+      const todayKey = new Date().toDateString();
+      for (const log of data.items) {
+        if (!log.started_at) continue;
+        const runDate = new Date(log.started_at);
+        if (runDate.toDateString() !== todayKey) continue;
+        const prev = runs[log.patrol_type];
+        if (!prev || runDate > new Date(prev.started_at)) {
+          runs[log.patrol_type] = { started_at: log.started_at, status: log.status };
+        }
+      }
+      setTodayRuns(runs);
+    } catch {
+      setTodayRuns({});
+    }
+  }, []);
+
   useEffect(() => {
     void fetchLogs(0);
+    void fetchTodayRuns();
   }, [filterType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFilterChange = useCallback((type: string) => {
@@ -92,14 +194,16 @@ export default function PatrolPage() {
     setTriggering(true);
     try {
       await triggerPatrol(patrolType);
-      // Refresh the log list after a short delay to let the patrol start
+      // Refresh the log list + today's-runs hint after a short delay to let
+      // the patrol start
       setTimeout(() => {
         void fetchLogs(0);
+        void fetchTodayRuns();
       }, 1000);
     } finally {
       setTriggering(false);
     }
-  }, [fetchLogs]);
+  }, [fetchLogs, fetchTodayRuns]);
 
   const handleDismiss = useCallback(async (findingKey: string) => {
     if (!selectedId) return;
@@ -209,6 +313,26 @@ export default function PatrolPage() {
               ▶ 矛盾
             </button>
           </div>
+          {/* "已执行过" hint — informational, does not block re-triggering */}
+          {Object.keys(todayRuns).length > 0 && (
+            <div className="mt-2 space-y-1 border-t border-gray-200 pt-1.5">
+              {(['daily', 'weekly', 'contradiction_scan'] as const).map((type) => {
+                const run = todayRuns[type];
+                if (!run) return null;
+                const ok = run.status === 'completed';
+                return (
+                  <p key={type} className="text-[10px] text-gray-400">
+                    今日{PATROL_TYPE_LABELS[type] ?? type}已执行 ·{' '}
+                    {new Date(run.started_at).toLocaleTimeString('zh-CN', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                    {ok ? ' · 完成' : ' · 未完成（可再次执行）'}
+                  </p>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Log rows */}
@@ -337,6 +461,7 @@ export default function PatrolPage() {
                         const arbitrateKey = patrolFindingKey(f);
                         const arbitrated = arbitrateKey ? arbitratedKeys.has(arbitrateKey) : false;
                         const isContradiction = groupKey === 'contradictions';
+                        const card = findingCardText(f, groupKey);
                         return (
                           <div
                             key={fKey}
@@ -347,11 +472,12 @@ export default function PatrolPage() {
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
                                 <p className="text-sm font-medium text-gray-800 truncate">
-                                  {String(f.title ?? f.summary ?? `#${i + 1}`)}
+                                  {card.title ??
+                                    String(f.title ?? f.summary ?? `#${i + 1}`)}
                                 </p>
-                                {f.description && (
+                                {card.description && (
                                   <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">
-                                    {f.description}
+                                    {card.description}
                                   </p>
                                 )}
                               </div>

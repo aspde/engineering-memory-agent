@@ -38,6 +38,14 @@ class TestValidateConfig:
         problems = config_mod.validate_config()
         assert any("PATROL_WEEKLY_DAY" in p for p in problems)
 
+    def test_patrol_max_tokens_must_be_positive(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "patrol_max_tokens", 0)
+
+        problems = config_mod.validate_config()
+        assert any("PATROL_MAX_TOKENS" in p for p in problems)
+
     def test_llm_api_key_required_outside_test(self, monkeypatch) -> None:
         _valid_patrol(monkeypatch)
         monkeypatch.setattr(config_mod.config, "app_env", "development")

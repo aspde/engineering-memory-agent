@@ -211,12 +211,17 @@ async def _close_checkpointer() -> None:
 
 def get_agent(
     approval_required_tools: frozenset[str] | None = None,
+    max_steps: int | None = None,
 ) -> CompiledStateGraph:
     """Return a compiled agent graph with active tools per config.
 
     Uses ``AsyncPostgresSaver`` when the database is reachable;
     falls back to ``InMemorySaver``.  Different ``thread_id`` values
     in ``ainvoke()`` config are fully isolated.
+
+    ``max_steps`` overrides the default ``MAX_AGENT_STEPS`` ReAct bound for
+    the caller — automated scans (patrol) pass a per-type budget, interactive
+    chat keeps the default.  ``None`` falls back to ``config.max_agent_steps``.
 
     Tool selection is controlled by ``MEMORY_ENABLED`` — when ``false``
     the agent runs without memory tools (pure chat mode).
@@ -230,7 +235,7 @@ def get_agent(
     return build_agent_graph(
         tools=_active_tools(),
         checkpointer=_get_checkpointer(),
-        max_steps=config.max_agent_steps,
+        max_steps=max_steps if max_steps is not None else config.max_agent_steps,
         approval_required_tools=approval_required_tools,
     )
 

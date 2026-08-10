@@ -12,6 +12,8 @@ from backend.service.patrol import (
     _interrupt_payload,
     _is_conflict_interrupt,
     _parse_findings,
+    _PATROL_REPAIR_MIN_CHARS,
+    _repair_findings,
     _validate_findings,
     mark_stale_patrols_failed,
     run_patrol,
@@ -219,7 +221,80 @@ class TestRunPatrol:
                 system_prompt="test prompt",
             )
 
-        mock_get_agent.assert_called_once_with(approval_required_tools=frozenset())
+        mock_get_agent.assert_called_once_with(
+            approval_required_tools=frozenset(), max_steps=15
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("patrol_type", "expected"),
+        [
+            ("daily", 15),
+            ("weekly", 20),
+            ("contradiction_scan", 20),
+        ],
+    )
+    async def test_run_patrol_passes_per_type_max_steps(
+        self, patrol_type: str, expected: int
+    ) -> None:
+        """Each patrol type gets its own ReAct budget, not the interactive
+        MAX_AGENT_STEPS — a full-memory scan needs more search steps than chat."""
+        contract = (
+            {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []}
+            if patrol_type == "daily"
+            else {"contradictions": [], "decay_alerts": [], "entity_coverage": []}
+        )
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": json.dumps(contract),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch(
+                "backend.service.patrol.get_agent", return_value=mock_agent
+            ) as mock_get_agent,
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type=patrol_type,
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert mock_get_agent.call_args.kwargs["max_steps"] == expected
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_unknown_type_keeps_default_steps(self) -> None:
+        """A patrol type without an explicit budget leaves max_steps unset —
+        get_agent then falls back to the interactive MAX_AGENT_STEPS."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": json.dumps({"matches": []}),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch(
+                "backend.service.patrol.get_agent", return_value=mock_agent
+            ) as mock_get_agent,
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="event_driven",
+                trigger="webhook",
+                system_prompt="test prompt",
+            )
+
+        assert mock_get_agent.call_args.kwargs.get("max_steps") is None
 
     @pytest.mark.asyncio
     async def test_run_patrol_marks_interrupted_on_interrupt(self) -> None:
@@ -582,6 +657,200 @@ class TestRunPatrol:
         assert update_calls, "expected a patrol_logs UPDATE on cancellation"
         assert update_calls[0].args[1]["status"] == "failed"
         session.commit.assert_awaited()
+
+
+class TestRepairFindings:
+    """One bounded repair attempt after contract-validation failure."""
+
+    # A weekly-shaped report in prose — long enough to repair (over the
+    # fragment threshold) and structurally equivalent to the JSON contract.
+    _PROSE_REPORT = (
+        "# Weekly report\n\n"
+        "## Contradictions\n"
+        "- memory-a vs memory-b: opposite recommendations\n"
+        "## Decay\n"
+        "- memory-1: decay 0.005, recommend archive\n"
+        "## Entity coverage\n"
+        "- PostgreSQL: missing backup/recovery domain\n"
+    ) * 4  # ~900 chars, far above the fragment threshold
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_repairs_malformed_prose(self) -> None:
+        """A prose report that fails validation is repaired to JSON and the
+        patrol persists 'completed' instead of 'failed'."""
+        valid = {"contradictions": [], "decay_alerts": [], "entity_coverage": []}
+        mock_provider = AsyncMock()
+        mock_provider.chat = AsyncMock(return_value=json.dumps(valid))
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": self._PROSE_REPORT,
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+            patch(
+                "backend.service.patrol.get_llm_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="weekly",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "completed"
+        findings = json.loads(update_calls[0].args[1]["findings"])
+        assert "parse_error" not in findings
+
+        # The repair call is made exactly once, with the raw report as input.
+        mock_provider.chat.assert_awaited_once()
+        repair_content = mock_provider.chat.await_args.args[0][0]["content"]
+        assert self._PROSE_REPORT[:100] in repair_content
+        assert "contradictions" in repair_content
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_skips_repair_for_fragment_output(self) -> None:
+        """A short mid-thought fragment is not a report — no repair call is
+        made and the patrol is recorded failed (a re-emitted empty report
+        would be a misleading 'completed')."""
+        mock_provider = AsyncMock()
+        mock_provider.chat = AsyncMock()
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "Let me scan for more memories to get a fuller picture.",
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+            patch(
+                "backend.service.patrol.get_llm_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        mock_provider.chat.assert_not_called()
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_keeps_failed_when_repair_invalid(self) -> None:
+        """A repair that still fails validation keeps the patrol 'failed' —
+        the retry never papers over a genuinely unusable report."""
+        mock_provider = AsyncMock()
+        mock_provider.chat = AsyncMock(
+            return_value="Still not the JSON contract at all."
+        )
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": self._PROSE_REPORT,
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+            patch(
+                "backend.service.patrol.get_llm_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="weekly",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "failed"
+        findings = json.loads(update_calls[0].args[1]["findings"])
+        assert "parse_error" in findings
+
+    @pytest.mark.asyncio
+    async def test_repair_provider_error_keeps_patrol_failed(self) -> None:
+        """A repair call that raises must not crash the patrol — it records
+        'failed' exactly as if no repair had been attempted."""
+        mock_provider = AsyncMock()
+        mock_provider.chat = AsyncMock(side_effect=RuntimeError("provider down"))
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": self._PROSE_REPORT,
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+            patch(
+                "backend.service.patrol.get_llm_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            patrol_id = await run_patrol(
+                patrol_type="weekly",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        assert len(patrol_id) == 36
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "failed"
+
+    @pytest.mark.asyncio
+    async def test_repair_skips_unknown_type(self) -> None:
+        """A patrol type without a contract has nothing to repair against."""
+        result = await _repair_findings("some long output " * 50, "err", "future_type")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_repair_min_chars_threshold(self) -> None:
+        """Outputs below the fragment threshold are never sent to the LLM."""
+        assert (
+            await _repair_findings("short", "err", "weekly") is None
+        )
+        assert len(self._PROSE_REPORT) >= _PATROL_REPAIR_MIN_CHARS
 
 
 class TestMarkStalePatrols:

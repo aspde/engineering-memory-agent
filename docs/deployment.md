@@ -97,6 +97,7 @@ curl -H "Authorization: Bearer <your-key>" http://localhost:8000/api/memory/stat
 - **启动配置校验**：启动时运行 `validate_config()`，检查巡检时间范围（`PATROL_DAILY_HOUR` 等 0-23 / 0-6）、重试与熔断参数边界、`LLM_API_KEY` 非空（`APP_ENV=test` 豁免）。配置非法直接拒绝启动，而非等首个请求才报错或静默产生无效调度。
 - **健康检查**：`GET /health` 返回 `{"status", "database", "llm", "embedding"}`——除数据库连通性外，廉价上报 LLM/Embedding provider 的配置状态与熔断器开关（`circuit: closed/open/n/a`，不做真实 LLM 调用，避免探活烧 token）；数据库不可达时返回 503 `{"status": "degraded", "database": "unreachable"}`，供负载均衡 / 容器探活使用。
 - **巡检兜底**：启动时把上次进程残留的 `running` 巡检日志标记为 `failed`（`mark_stale_patrols_failed`）；单次巡检受 `PATROL_TIMEOUT`（默认 600s）约束，同类型巡检互斥（已在运行时直接跳过）。此外，若某类巡检已有计划历史、但最近一个计划槽（daily/hour 或 weekly/day+hour）内没有运行记录——即进程在计划时刻停机——启动时补跑一次（`trigger=cron_catchup`），避免重启静默丢一轮巡检；全新部署（无历史）不触发补跑。
+- **巡检可靠性**：巡检是全库扫描，扫描步数与输出空间独立于交互式配置——`daily` 用 15 步、`weekly`/`contradiction_scan` 用 20 步（交互式 `MAX_AGENT_STEPS` 默认 5 会把巡检在扫描中途强停）；最终报告合成输出上限为 `PATROL_MAX_TOKENS`（默认 8000，独立于交互式 `LLM_MAX_TOKENS`），且 daily/weekly prompt 限制各类条目数，保证完整 JSON 能单次输出。校验失败（缺键或非 JSON）时做一次有界的修复重试：短片段（<300 字符，如"Let me scan more…"）不算报告、直接失败，只有实质报告才经一次强指令 LLM 调用重写为合规 JSON，重写仍不合规则保持 `failed` 并保留原始输出。
 
 ## Runtime Architecture
 

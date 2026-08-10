@@ -29,6 +29,16 @@ const logSummary = {
   completed_at: '2026-08-08T09:01:00Z',
 };
 
+/** A patrol log whose started_at falls on *today* in the local timezone —
+ *  built fresh so the date matches whenever the test runs. */
+function todayLog(overrides: Partial<typeof logSummary> = {}) {
+  return {
+    ...logSummary,
+    started_at: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 const contradictionFinding = {
   memory_a_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
   memory_a_summary: 'Use PostgreSQL for storage',
@@ -59,6 +69,49 @@ describe('PatrolPage', () => {
       conflict_id: 'conflict-1',
       status: 'queued',
     });
+  });
+
+  it('renders entity coverage findings with their entity name, not placeholders', async () => {
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      findings: {
+        entity_coverage: [
+          {
+            entity_name: 'PostgreSQL',
+            total_memories: 30,
+            covered_domains: ['deployment', 'monitoring'],
+            missing_domains: ['backup', 'security'],
+            recommendation: '补充备份与安全相关的文档',
+          },
+          {
+            entity_name: 'CI/CD',
+            total_memories: 18,
+            missing_domains: [],
+            recommendation: '',
+          },
+        ],
+      },
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/1 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/1 个发现/));
+
+    await waitFor(() => {
+      expect(screen.getByText(/实体覆盖/)).toBeDefined();
+    });
+    // Entity names render as card titles.
+    expect(screen.getByText('PostgreSQL')).toBeDefined();
+    expect(screen.getByText('CI/CD')).toBeDefined();
+    // Missing domains surface in the description.
+    expect(screen.getByText(/缺失领域：backup、security/)).toBeDefined();
+    // No placeholder titles.
+    expect(screen.queryByText(/#1/)).toBeNull();
+    expect(screen.queryByText(/#2/)).toBeNull();
   });
 
   it('queues a contradiction finding for arbitration from the card', async () => {
@@ -111,5 +164,50 @@ describe('PatrolPage', () => {
     });
     // Still marked arbitrated so the user does not re-click.
     expect(screen.getByText('已转入仲裁')).toBeDefined();
+  });
+
+  it('shows a hint that today’s patrol already ran, without blocking re-trigger', async () => {
+    // A completed daily patrol today + an older weekly run (not today).
+    mockListPatrolLogs.mockResolvedValue({
+      items: [
+        todayLog({ id: 'log-daily', patrol_type: 'daily', status: 'completed' }),
+        { ...logSummary, id: 'log-weekly-old', patrol_type: 'weekly' },
+      ],
+      total: 2,
+    });
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/今日每日巡检已执行/)).toBeDefined();
+    });
+
+    // The hint is informational — the trigger button stays enabled.
+    const dailyButton = screen.getByRole('button', { name: /▶ 每日/ });
+    expect((dailyButton as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('marks a today run as incomplete when the patrol failed', async () => {
+    mockListPatrolLogs.mockResolvedValue({
+      items: [todayLog({ id: 'log-daily-fail', patrol_type: 'daily', status: 'failed' })],
+      total: 1,
+    });
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/未完成（可再次执行）/)).toBeDefined();
+    });
+  });
+
+  it('shows no hint when no patrol ran today', async () => {
+    mockListPatrolLogs.mockResolvedValue({
+      items: [{ ...logSummary, id: 'log-weekly-old', patrol_type: 'weekly' }],
+      total: 1,
+    });
+    renderPage();
+
+    await waitFor(() => {
+      expect(screen.getByText(/1 个发现/)).toBeDefined();
+    });
+    expect(screen.queryByText(/今日.*已执行/)).toBeNull();
   });
 });

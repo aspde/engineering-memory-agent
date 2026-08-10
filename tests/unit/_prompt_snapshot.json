@@ -36,16 +36,20 @@
     "sha256": "60a826b86a906508f8b5a9b62813d05cf471ceb94dd245a4f3dda64a3fb63508"
   },
   "patrol.daily": {
-    "version": "2",
-    "sha256": "7089907f310ca098065c8417f7e4eea176300cc4d1405798600a727d8bcf1e19"
+    "version": "3",
+    "sha256": "6a08005d70cf2a062ea25e4a3dd92425083c30ea5f80b43e9d5fc08a98aa7e7c"
   },
   "patrol.jira_resolved": {
     "version": "2",
     "sha256": "7581fcad8bbb3199305eb8ba73b475f4836d65c5f8138e780bd94b4e53776102"
   },
+  "patrol.repair": {
+    "version": "3",
+    "sha256": "699ef0454585e207b29fcd1c25b27d6c3e00dc9ae03103c40c54c3e245f7c88d"
+  },
   "patrol.weekly": {
-    "version": "2",
-    "sha256": "0621fc793846e0fdd91191123c1c7b414e102ee5837f6f53131443dfa82a168f"
+    "version": "3",
+    "sha256": "2c3b3b60295ceb938bb5b0239ec3b96c8debfe766423c1f955a80aa562a3bf84"
   },
   "query_rewrite": {
     "version": "3",
