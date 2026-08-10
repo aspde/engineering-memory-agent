@@ -5,9 +5,9 @@ pgvector columns (vectors of the old size can't fit the resized column) and
 resizes them.  This script re-embeds the affected rows from their stored text
 so retrieval works again:
 
-    python reembed_embeddings.py                 # chunks + memories
-    python reembed_embeddings.py --table chunks  # one table only
-    python reembed_embeddings.py --dry-run       # report counts without writing
+    python -m scripts.reembed_embeddings                 # chunks + memories
+    python -m scripts.reembed_embeddings --table chunks  # one table only
+    python -m scripts.reembed_embeddings --dry-run       # report counts without writing
 
 Text columns: ``chunks.content``, ``memories.summary``.  Only rows with a NULL
 embedding are touched, so the script is idempotent and safe to re-run.  Rows
@@ -100,7 +100,7 @@ async def backfill(tables: list[str], dry_run: bool = False) -> dict[str, int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python reembed_embeddings.py",
+        prog="python -m scripts.reembed_embeddings",
         description="Re-embed rows whose embedding column is NULL (after a dimension migration).",
     )
     parser.add_argument(

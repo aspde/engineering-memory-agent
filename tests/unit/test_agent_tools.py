@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from agent.tools import (
+from backend.agent.tools import (
     extract_memory_tool,
     ingest_document_tool,
     ingest_git_repo_tool,
@@ -20,7 +20,7 @@ from agent.tools import (
 class TestSearchMemoriesTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         async def mock_query(*args, **kwargs):
             return [
@@ -47,7 +47,7 @@ class TestSearchMemoriesTool:
 
     @pytest.mark.asyncio
     async def test_empty_results(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "query_memories", AsyncMock(return_value=[]))
         result = await search_memories_tool.ainvoke({"query": "nothing"})
@@ -57,7 +57,7 @@ class TestSearchMemoriesTool:
 class TestRetrieveChunksTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         from backend.service.retrieval import RetrievalResult
 
@@ -78,7 +78,7 @@ class TestRetrieveChunksTool:
 
     @pytest.mark.asyncio
     async def test_empty_results(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "retrieve_hybrid", AsyncMock(return_value=[]))
         result = await retrieve_chunks_tool.ainvoke({"query": "nothing"})
@@ -126,7 +126,7 @@ class TestQueryRewriteAndSearchTool:
 class TestWriteMemoryTool:
     @pytest.mark.asyncio
     async def test_inserts_and_returns_json(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         async def mock_write(content, source_type, metadata):
             return {"id": "abc-123", "action": "inserted", "summary": "A new memory."}
@@ -142,7 +142,7 @@ class TestWriteMemoryTool:
     async def test_conflict_returns_structured_data(self, monkeypatch) -> None:
         """When write_memory detects a conflict, the JSON result includes
         existing_id, existing_summary, and _deferred for HITL resolution."""
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         async def mock_write(content, source_type, metadata):
             return {
@@ -173,7 +173,7 @@ class TestWriteMemoryTool:
 class TestExtractMemoryTool:
     @pytest.mark.asyncio
     async def test_extracts_and_returns_json(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         async def mock_extract(content):
             return {
@@ -193,7 +193,7 @@ class TestExtractMemoryTool:
 class TestIngestGitRepo:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         async def mock_ingest(repo_path, max_commits, branch):
             return [
@@ -209,7 +209,7 @@ class TestIngestGitRepo:
 
     @pytest.mark.asyncio
     async def test_empty_repo(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "ingest_repo", AsyncMock(return_value=[]))
         result = await ingest_git_repo_tool.ainvoke({"repo_path": "/tmp/empty"})
@@ -219,7 +219,7 @@ class TestIngestGitRepo:
 class TestIngestDocument:
     @pytest.mark.asyncio
     async def test_returns_count(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "chunk_text", lambda content, **kw: ["chunk1", "chunk2"])
         monkeypatch.setattr(mod, "write_chunks", AsyncMock(return_value=2))
@@ -232,7 +232,7 @@ class TestIngestDocument:
 
     @pytest.mark.asyncio
     async def test_python_language_uses_chunk_code(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "chunk_code", lambda code, **kw: ["def foo(): pass", "class Bar: pass"])
         monkeypatch.setattr(mod, "write_chunks", AsyncMock(return_value=2))
@@ -245,7 +245,7 @@ class TestIngestDocument:
 
     @pytest.mark.asyncio
     async def test_python_language_includes_language_in_metadata(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "chunk_code", lambda code, **kw: ["chunk1"])
         mock_write = AsyncMock(return_value=1)
@@ -261,7 +261,7 @@ class TestIngestDocument:
 
     @pytest.mark.asyncio
     async def test_default_language_uses_chunk_text(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "chunk_text", lambda content, **kw: ["paragraph 1"])
         monkeypatch.setattr(mod, "write_chunks", AsyncMock(return_value=1))
@@ -275,8 +275,8 @@ class TestIngestDocument:
 class TestQueryEntityTool:
     @pytest.mark.asyncio
     async def test_returns_entity_profile(self, monkeypatch) -> None:
-        from agent import tools as mod
-        from agent.tools import query_entity_tool
+        from backend.agent import tools as mod
+        from backend.agent.tools import query_entity_tool
 
         async def mock_get_entity(name: str):
             return {
@@ -310,8 +310,8 @@ class TestQueryEntityTool:
 
     @pytest.mark.asyncio
     async def test_entity_not_found(self, monkeypatch) -> None:
-        from agent import tools as mod
-        from agent.tools import query_entity_tool
+        from backend.agent import tools as mod
+        from backend.agent.tools import query_entity_tool
 
         monkeypatch.setattr(mod, "get_entity_by_name", AsyncMock(return_value=None))
 
@@ -324,8 +324,8 @@ class TestQueryEntityTool:
 class TestSearchMemoriesToolWithEntities:
     @pytest.mark.asyncio
     async def test_includes_entities_in_sources(self, monkeypatch) -> None:
-        from agent import tools as mod
-        from agent.tools import search_memories_tool
+        from backend.agent import tools as mod
+        from backend.agent.tools import search_memories_tool
 
         async def mock_query(*args, **kwargs):
             return [
@@ -363,7 +363,7 @@ class TestNotifyFeishuTool:
     @pytest.mark.asyncio
     async def test_returns_error_when_not_configured(self, monkeypatch) -> None:
         """When FEISHU_WEBHOOK_URL is empty, the tool returns ok=false."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         monkeypatch.setattr(
             "backend.shared.config.config.feishu_webhook_url", ""
@@ -379,7 +379,7 @@ class TestNotifyFeishuTool:
     @pytest.mark.asyncio
     async def test_tool_schema_has_required_params(self) -> None:
         """Verify the tool has the expected parameter schema."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         schema = notify_feishu_tool.args_schema.model_json_schema()
         props = schema.get("properties", {})
@@ -409,7 +409,7 @@ class TestConnectorAwareness:
 
     def test_tool_count(self):
         """Sanity check: the ALL_TOOLS roster should have 9 tools (7 core + query_rewrite + notify)."""
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         assert len(ALL_TOOLS) == 9
 
@@ -440,7 +440,7 @@ class TestToolParamBounds:
     @pytest.mark.parametrize("top_k", [0, -5])
     async def test_retrieval_rejects_out_of_range_top_k(self, monkeypatch, top_k) -> None:
         """A below-bounds top_k is rejected before any backend call."""
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "query_memories", AsyncMock())
         with pytest.raises(Exception, match="greater than or equal to 1"):
@@ -449,7 +449,7 @@ class TestToolParamBounds:
 
     @pytest.mark.asyncio
     async def test_ingest_rejects_out_of_range_max_commits(self, monkeypatch) -> None:
-        from agent import tools as mod
+        from backend.agent import tools as mod
 
         monkeypatch.setattr(mod, "ingest_repo", AsyncMock())
         with pytest.raises(Exception, match="greater than or equal to 1"):

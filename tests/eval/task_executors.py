@@ -30,7 +30,7 @@ and pollute the eval corpus.
 
 ``make_task_runner`` accepts ``tools`` for test injection; unit tests drive
 the real graph with fake ``@tool`` functions and a patched
-``agent.nodes.get_llm_provider`` (the same convention as
+``backend.agent.nodes.get_llm_provider`` (the same convention as
 ``tests.eval.llm_executors.make_tool_selector``).
 """
 
@@ -44,7 +44,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
-from agent.tool_envelope import parse_tool_envelope, truncate_tool_content
+from backend.agent.tool_envelope import parse_tool_envelope, truncate_tool_content
 
 # query → the agent's trajectory + answer for one task
 TaskRunner = Callable[[str], Awaitable["TaskOutcome"]]
@@ -137,8 +137,8 @@ def make_task_runner(
             ``config.agent_timeout``).  A timeout is recorded as
             ``had_error`` with ``error="timeout"``.
     """
-    from agent.nodes import CHAT_APPROVAL_TOOLS
-    from agent.tools import ALL_TOOLS
+    from backend.agent.nodes import CHAT_APPROVAL_TOOLS
+    from backend.agent.tools import ALL_TOOLS
 
     from backend.shared.config import config
 
@@ -157,7 +157,7 @@ def make_task_runner(
     resume_policy = resume or auto_approve_resume
     task_timeout = timeout if timeout is not None else config.agent_timeout
 
-    from agent.graph import build_agent_graph
+    from backend.agent.graph import build_agent_graph
 
     graph = build_agent_graph(
         tools=roster,

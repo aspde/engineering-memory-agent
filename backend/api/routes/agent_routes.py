@@ -18,8 +18,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from agent.nodes import CHAT_APPROVAL_TOOLS
-from agent.tool_envelope import parse_tool_envelope
+from backend.agent.nodes import CHAT_APPROVAL_TOOLS
+from backend.agent.tool_envelope import parse_tool_envelope
 from backend.service.agent_service import (
     _release_agent_slot,
     _try_acquire_agent_slot,
@@ -146,7 +146,7 @@ def _extract_tool_traces(
         raw = str(m.content) if m.content else ""
 
         # Try to extract structured sources from the tool-result JSON envelope
-        # (shared parser — agent.tool_envelope).  Non-envelope results
+        # (shared parser — backend.agent.tool_envelope).  Non-envelope results
         # (plain text, write/ingest/entity JSON) fall back to the raw text.
         parsed_sources: list[dict[str, Any]] | None = None
         envelope = parse_tool_envelope(raw)

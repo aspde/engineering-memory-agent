@@ -15,7 +15,7 @@ from typing import Any
 from langchain_core.tools import tool
 from pydantic import Field
 
-from agent.tool_envelope import build_tool_envelope
+from backend.agent.tool_envelope import build_tool_envelope
 from backend.service.chunk import chunk_code, chunk_text
 from backend.service.entity import (
     get_entity_by_name,

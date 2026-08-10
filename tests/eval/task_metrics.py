@@ -25,7 +25,7 @@ from typing import Any
 
 from tests.eval.llm_metrics import answer_deterministic_metrics
 
-# The two apology strings the agent's failure path streams (agent/nodes.py).
+# The two apology strings the agent's failure path streams (backend/agent/nodes.py).
 # A final answer that is exactly one of these is an error stub, not a
 # completed task — even though the graph "ended" normally.
 APOLOGY_MARKERS: tuple[str, ...] = (

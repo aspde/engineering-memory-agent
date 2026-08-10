@@ -148,8 +148,8 @@ S = 1 + recall_count × 2
 pgvector 的向量只能放进「维度 ≤ 自身」的列，改大改小都要求列先为空；填充/截断会产生与文本不符的垃圾向量，所以迁移选择清空。向量是派生数据，清空后需从存储文本重嵌：
 
 ```bash
-python reembed_embeddings.py --dry-run   # 先查看有多少行待重嵌
-python reembed_embeddings.py             # chunks + memories 分批重嵌（可重复执行）
+python -m scripts.reembed_embeddings --dry-run   # 先查看有多少行待重嵌
+python -m scripts.reembed_embeddings             # chunks + memories 分批重嵌（可重复执行）
 ```
 
 脚本只处理 `embedding IS NULL` 的行，幂等且安全。

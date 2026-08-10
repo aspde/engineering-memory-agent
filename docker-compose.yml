@@ -28,6 +28,13 @@ services:
       TRANSFORMERS_OFFLINE: "1"
     ports:
       - "8000:8000"
+    volumes:
+      # Embedding model cache (BGE-M3 etc.) - not baked into the image.
+      # Bind-mount the host HF cache (set HF_CACHE_DIR in .env to point at
+      # an existing ~/.cache/huggingface, no copy; default ./docker/models).
+      # Runtime HOME is /home/ema (uid 10001), so sentence-transformers
+      # finds the cache here. See docs/deployment.md.
+      - ${HF_CACHE_DIR:-./docker/models}:/home/ema/.cache/huggingface
     depends_on:
       postgres:
         condition: service_healthy

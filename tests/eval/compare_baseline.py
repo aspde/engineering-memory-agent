@@ -1,6 +1,6 @@
 """Compare a fresh LLM eval report against the committed baseline.
 
-The eval report file (``docs/interview/llm-eval-report.json``) is overwritten
+The eval report file (``tests/eval/reports/llm-eval-report.json``) is overwritten
 every run, so on its own it can't answer "did this prompt/model change move
 quality?"  This script diffs a fresh report against the committed baseline
 (``docs/interview/llm-eval-baseline.json``) and prints per-metric deltas —
@@ -92,8 +92,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--report",
-        default="docs/interview/llm-eval-report.json",
-        help="Fresh eval report JSON (default: docs/interview/llm-eval-report.json).",
+        default="tests/eval/reports/llm-eval-report.json",
+        help="Fresh eval report JSON (default: tests/eval/reports/llm-eval-report.json).",
     )
     parser.add_argument(
         "--baseline",
@@ -121,7 +121,7 @@ def main() -> int:
             "are not comparable; a semantic judge always grades stricter. "
             "Refusing to diff.  Run the eval with --judge "
             f"{base_judge}, or compare against a same-mode baseline "
-            "(e.g. --baseline docs/interview/llm-eval-semantic-baseline.json).",
+            "(e.g. --baseline tests/eval/reports/llm-eval-semantic-baseline.json).",
             file=sys.stderr,
         )
         return 1

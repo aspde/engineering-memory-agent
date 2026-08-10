@@ -318,7 +318,7 @@ def get_embedding_provider() -> EmbeddingProvider:
                 "vector(%d), so embedding writes will fail. Align "
                 "EMBEDDING_MODEL with the schema, or switch models and let "
                 "init_db resize the columns, then re-embed with "
-                "`python reembed_embeddings.py`.",
+                "`python -m scripts.reembed_embeddings`.",
                 _provider.dimension,
                 embedding.dimension,
                 embedding.model,

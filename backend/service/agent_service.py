@@ -25,8 +25,8 @@ import threading
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
-from agent.graph import build_agent_graph
-from agent.tools import ALL_TOOLS
+from backend.agent.graph import build_agent_graph
+from backend.agent.tools import ALL_TOOLS
 from backend.shared.config import config
 
 logger = logging.getLogger(__name__)

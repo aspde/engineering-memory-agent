@@ -45,7 +45,6 @@ from backend.shared.runtime_metrics import MetricsMiddleware, render_metrics
 
 # Paths relative to backend/main.py
 _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-_FRONTEND_STATIC = Path(__file__).resolve().parent.parent / "frontend" / "static"
 
 
 @asynccontextmanager
@@ -59,7 +58,7 @@ async def lifespan(app: FastAPI):
             level=_log_level,
             format="%(asctime)s %(levelname)s %(name)s %(message)s",
         )
-    for _name in ("backend", "agent"):
+    for _name in ("backend", "backend.agent"):
         logging.getLogger(_name).setLevel(_log_level)
 
     # ── Fail fast on invalid configuration instead of mid-request errors or
@@ -407,12 +406,21 @@ async def metrics_endpoint() -> PlainTextResponse:
 
 
 # ── SPA static files & fallback ──
-# Mount asset directories so the browser can load JS/CSS/images.
+# Mount the built JS/CSS so the browser can load them.  The favicon (and any
+# other static assets) live under frontend/public — Vite's convention — and
+# are copied verbatim into frontend/dist at build time; the dev server serves
+# them at / directly, so no mount is needed for them here.
 if _FRONTEND_DIST.joinpath("assets").is_dir():
     app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
 
-if _FRONTEND_STATIC.is_dir():
-    app.mount("/static", StaticFiles(directory=str(_FRONTEND_STATIC)), name="static")
+
+@app.get("/brain_favicon.png", include_in_schema=False)
+async def favicon():
+    """Serve the favicon (Vite copies frontend/public/ into dist at build)."""
+    path = _FRONTEND_DIST / "brain_favicon.png"
+    if path.is_file():
+        return FileResponse(str(path))
+    return JSONResponse({"detail": "favicon not built"}, status_code=404)
 
 
 @app.get("/{full_path:path}", include_in_schema=False)

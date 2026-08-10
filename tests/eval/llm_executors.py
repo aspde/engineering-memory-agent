@@ -5,7 +5,7 @@ what makes them unit-testable with fakes.  The *default* executors here are
 the faithful path: they drive the same code a real user request drives, so
 the eval measures production behavior rather than a simplified harness.
 
-- ``make_tool_selector`` — runs ``agent.nodes.call_llm_node`` with the real
+- ``make_tool_selector`` — runs ``backend.agent.nodes.call_llm_node`` with the real
   tool roster (real system prompt, real schema serialization, real message
   conversion, real streaming provider call).  Only the *decision* is
   measured — tools are never actually executed.
@@ -31,8 +31,8 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage
 
-from agent.nodes import call_llm_node
-from agent.tools import ALL_TOOLS
+from backend.agent.nodes import call_llm_node
+from backend.agent.tools import ALL_TOOLS
 
 # query → list of {"name": str, "args": dict} tool-call decisions
 ToolSelector = Callable[[str], Awaitable[list[dict[str, Any]]]]
@@ -79,7 +79,7 @@ def make_extractor() -> Extractor:
 def make_answer_generator(provider: Any | None = None) -> AnswerGenerator:
     """Executor that generates a final answer from a golden context.
 
-    Prompt assembly mirrors ``agent.nodes.generate_final_node``: the
+    Prompt assembly mirrors ``backend.agent.nodes.generate_final_node``: the
     ``agent.system`` template receives the context through its ``{context}``
     placeholder, wrapped in the same ``<memory source=...>`` framing a real
     retrieval ToolMessage would produce, and the answer is streamed via the
@@ -126,7 +126,7 @@ def make_answer_generator(provider: Any | None = None) -> AnswerGenerator:
 # ``make_answer_generator`` (golden context) this measures what a real user
 # question actually pulls back.
 
-# Source-tag for the context block, matching ``agent.nodes._CONTEXT_DOC_TOOLS``:
+# Source-tag for the context block, matching ``backend.agent.nodes._CONTEXT_DOC_TOOLS``:
 # chunk-derived context is framed as <doc> (untrusted document data), memory
 # results as <memory>.
 _MEMORY_CONTEXT_TAG = 'memory source="search_memories_tool"'
@@ -149,7 +149,7 @@ class E2EOutcome:
 def _format_memory_display(results: list[dict[str, Any]]) -> tuple[str, list[str]]:
     """Render memory results exactly as ``search_memories_tool`` does.
 
-    Mirrors the production display (``agent.tools.search_memories_tool``):
+    Mirrors the production display (``backend.agent.tools.search_memories_tool``):
     each line carries the ``memory: <short_id>`` prefix the tool exposes, so
     the e2e suite measures the same citation material the production agent
     gives the model.  Returns ``(display_text, source_ids)``.

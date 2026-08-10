@@ -12,13 +12,7 @@ vi.mock('../api/patrol', () => ({
   triggerPatrol: vi.fn(),
 }));
 
-import {
-  dismissFinding,
-  getPatrolLog,
-  listPatrolLogs,
-  queuePatrolConflict,
-  triggerPatrol,
-} from '../api/patrol';
+import { dismissFinding, getPatrolLog, listPatrolLogs, queuePatrolConflict } from '../api/patrol';
 
 const mockListPatrolLogs = listPatrolLogs as ReturnType<typeof vi.fn>;
 const mockGetPatrolLog = getPatrolLog as ReturnType<typeof vi.fn>;

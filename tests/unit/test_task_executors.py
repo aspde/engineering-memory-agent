@@ -1,7 +1,7 @@
 """Unit tests for tests/eval/task_executors.py — the real agent graph.
 
 Drives ``make_task_runner`` (which builds the production ``build_agent_graph``)
-with fake ``@tool`` functions and a patched ``agent.nodes.get_llm_provider``,
+with fake ``@tool`` functions and a patched ``backend.agent.nodes.get_llm_provider``,
 so the tests exercise the *real graph machinery* — ReAct loop routing,
 HITL interrupts and auto-resume, max_steps force-termination, timeout — with
 zero LLM / DB access.  Tools are real LangChain tools with fake bodies; the
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from langchain_core.tools import tool
 
-from agent.tool_envelope import build_tool_envelope
+from backend.agent.tool_envelope import build_tool_envelope
 from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
 from tests.eval.task_executors import auto_approve_resume, make_task_runner
 
@@ -70,7 +70,7 @@ async def conflict_write_tool(content: str) -> str:
 
 
 def _patch_provider(monkeypatch: pytest.MonkeyPatch, provider: Mock) -> None:
-    import agent.nodes as nodes_mod
+    import backend.agent.nodes as nodes_mod
 
     monkeypatch.setattr(nodes_mod, "get_llm_provider", lambda: provider)
 
@@ -141,7 +141,7 @@ class TestTaskRunnerGraph:
     @pytest.mark.asyncio
     async def test_conflict_interrupt_auto_resolved(self, monkeypatch) -> None:
         """A conflict write pauses at check_conflict; the runner keeps existing."""
-        from agent import nodes as nodes_mod
+        from backend.agent import nodes as nodes_mod
 
         async def _fake_resolve(resolution: str, existing_id: str, deferred: dict):
             return {

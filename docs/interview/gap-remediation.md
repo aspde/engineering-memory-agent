@@ -488,14 +488,14 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 | 模块 | 深度 | 能扛追问 | 代码证据 | 策略 |
 |------|------|---------|---------|------|
 | 四级去重 + 冲突 | 🟢 深 | 3 层 | [memory.py:63-77](../../backend/service/memory.py) 四分支 + [memory.py:247-256](../../backend/service/memory.py) `_deferred` 载荷 + [memory.py:429-434](../../backend/service/memory.py) 关系三元组去重 | **主打** |
-| 双 HITL LangGraph | 🟢 深 | 3 层 | [graph.py:41-51](../../agent/graph.py) max_steps 防循环 + Command(goto) 动态路由 | **主打** |
+| 双 HITL LangGraph | 🟢 深 | 3 层 | [graph.py:41-51](../../backend/agent/graph.py) max_steps 防循环 + Command(goto) 动态路由 | **主打** |
 | 实体归一化双层 | 🟢 深 | 2-3 层 | [entity.py:67-91](../../backend/service/entity.py) 向量粗筛 + [entity.py:160-189](../../backend/service/entity.py) LLM 精判 fails safe | **主打** |
 | LLMProvider 抽象 | 🟢 中深 | 2 层 | [llm_service.py:191-199](../../backend/service/llm_service.py) Anthropic system 拆分 + [llm_service.py:157-174](../../backend/service/llm_service.py) tool_calls 双形态处理 | 主打 |
 | 衰减加权整合 | 🟡 中 | 2 层 | [retrieval.py:161](../../backend/service/retrieval.py) top_k*4 + [retrieval.py:171](../../backend/service/retrieval.py) `_RERANK_FLOOR=0.15` | 讲整合不讲公式 |
 | 三阶段提取 | 🟡 薄 | 1 层 | [extraction.py:153-156](../../backend/service/extraction.py) gather 并行 + zero-shot | 见 §10 优化 |
 | rerank | 🟡 薄 | 1-2 层 | [rerank.py:57](../../backend/service/rerank.py) SDK 调用 + [rerank.py:95](../../backend/service/rerank.py) pointwise gather | cross-encoder 原理必须会 |
 | vector_search | 🟡 薄 | 1 层 | [retrieval.py:99-104](../../backend/service/retrieval.py) 白名单 filter | 讲 SQL 可见 |
-| RAG 高级技巧 | 🟢 有 | 2 层 | jieba 中文分词 hybrid + query_rewrite_and_search tool（[retrieval.py](../../backend/service/retrieval.py) sparse_search / [tools.py](../../agent/tools.py)） | 主动讲，三次假设迭代是亮点 |
+| RAG 高级技巧 | 🟢 有 | 2 层 | jieba 中文分词 hybrid + query_rewrite_and_search tool（[retrieval.py](../../backend/service/retrieval.py) sparse_search / [tools.py](../../backend/agent/tools.py)） | 主动讲，三次假设迭代是亮点 |
 | Prompt 高级技巧 | ❌ 无 | 0 层 | 全 zero-shot，无 few-shot / CoT | 不主动提 |
 | 模型微调 | ❌ 无 | 0 层 | 直接用预训练 BGE-M3 | 不主动提 |
 
@@ -712,7 +712,7 @@ async def eval_extraction():
 
 ### 11.1 现状问题（实测数据支撑）
 
-**评估数据**（[eval-report.json](eval-report.json)，30 query；**注**：以下为 08-06 06:11 旧 baseline，基于重新播种前的语料——当前语料下 dense 单独即 Recall@5=1.000）：
+**评估数据**（[eval-report.json](../../tests/eval/reports/eval-report.json)，30 query；**注**：以下为 08-06 06:11 旧 baseline，基于重新播种前的语料——当前语料下 dense 单独即 Recall@5=1.000）：
 - Recall@5=0.833（25 命中 / 5 miss）
 - 5 个 miss query 的相关结果**均不在 top-20 候选池** → rerank 无法救回
 - miss 全是概念查询，query 和相关记忆词重合度低：

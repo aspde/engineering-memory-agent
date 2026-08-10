@@ -9,7 +9,7 @@ Embedding columns are ``vector(<dimension>)`` where *dimension* comes from
 configured embedding model changes dimension, :func:`init_db` migrates the
 existing columns instead of failing every write: embeddings are derived data,
 so the column is emptied, resized, and re-embedded from the stored text via
-``python reembed_embeddings.py``.
+``python -m scripts.reembed_embeddings``.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def _resize_statement(table: str, index: str, dimension: int) -> str:
 
     pgvector vectors only fit a same-or-smaller column type; resizing either
     direction requires the column to be empty.  Embeddings are derived data
-    (recomputable from stored text via ``reembed_embeddings.py``), so the
+    (recomputable from stored text via ``python -m scripts.reembed_embeddings``), so the
     migration drops the index, empties the column, resizes it, and rebuilds
     the index — a dimension change is never a silent truncation/padding.
     """

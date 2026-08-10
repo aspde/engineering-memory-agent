@@ -73,7 +73,7 @@ backend/service/scenarios/
 4. 调用 `get_default_agent().ainvoke()` 执行
 5. 返回格式化结果
 
-**不改 `agent/graph.py`。不改已有 tool。不新增数据库表。** 场景是纯消费层。
+**不改 `backend/agent/graph.py`。不改已有 tool。不新增数据库表。** 场景是纯消费层。
 
 ### 场景注册
 

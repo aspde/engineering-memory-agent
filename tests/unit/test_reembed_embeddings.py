@@ -1,4 +1,4 @@
-"""Tests for reembed_embeddings.backfill — NULL-embedding re-embed after a
+"""Tests for scripts.reembed_embeddings.backfill — NULL-embedding re-embed after a
 dimension migration.
 
 DB and embedding provider are mocked: verify dry-run writes nothing (and
@@ -50,18 +50,18 @@ class _FakeProvider:
 class TestBackfill:
     @pytest.mark.asyncio
     async def test_dry_run_counts_without_loading_provider(self, monkeypatch) -> None:
-        from reembed_embeddings import backfill
+        from scripts.reembed_embeddings import backfill
 
         session = AsyncMock()
         count_result = MagicMock()
         count_result.scalar.return_value = 3
         session.execute.return_value = count_result
-        monkeypatch.setattr("reembed_embeddings.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.reembed_embeddings.get_session_factory", _mock_factory(session))
 
         def _fail(*args, **kwargs):
             raise AssertionError("dry-run must not instantiate the embedding provider")
 
-        monkeypatch.setattr("reembed_embeddings.get_embedding_provider", _fail)
+        monkeypatch.setattr("scripts.reembed_embeddings.get_embedding_provider", _fail)
 
         counts = await backfill(["chunks"], dry_run=True)
 
@@ -72,7 +72,7 @@ class TestBackfill:
 
     @pytest.mark.asyncio
     async def test_reembeds_rows_in_one_executemany_per_batch(self, monkeypatch) -> None:
-        from reembed_embeddings import backfill
+        from scripts.reembed_embeddings import backfill
 
         session = AsyncMock()
         rows = [_row("uuid-1", "pgvector 向量检索"), _row("uuid-2", "BGE-M3 CPU 推理")]
@@ -80,10 +80,10 @@ class TestBackfill:
         select_result.__iter__ = lambda self: iter(rows)
         # SELECT rows → UPDATE → SELECT empty (loop terminates).
         session.execute.side_effect = [select_result, AsyncMock(), _empty_result()]
-        monkeypatch.setattr("reembed_embeddings.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.reembed_embeddings.get_session_factory", _mock_factory(session))
 
         provider = _FakeProvider()
-        monkeypatch.setattr("reembed_embeddings.get_embedding_provider", lambda: provider)
+        monkeypatch.setattr("scripts.reembed_embeddings.get_embedding_provider", lambda: provider)
 
         counts = await backfill(["chunks"], dry_run=False)
 
@@ -98,12 +98,12 @@ class TestBackfill:
 
     @pytest.mark.asyncio
     async def test_no_rows_to_reembed(self, monkeypatch) -> None:
-        from reembed_embeddings import backfill
+        from scripts.reembed_embeddings import backfill
 
         session = AsyncMock()
         session.execute.return_value = _empty_result()
-        monkeypatch.setattr("reembed_embeddings.get_session_factory", _mock_factory(session))
-        monkeypatch.setattr("reembed_embeddings.get_embedding_provider", _FakeProvider)
+        monkeypatch.setattr("scripts.reembed_embeddings.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.reembed_embeddings.get_embedding_provider", _FakeProvider)
 
         counts = await backfill(["memories"], dry_run=False)
 

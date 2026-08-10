@@ -20,7 +20,7 @@
 ### 工具选择（tool_selection）
 
 标注集：`查询 → 必须调用的工具 + 禁止调用的工具 + 可接受的替代工具 + 可选参数约束`。
-执行器 `make_tool_selector` 直接驱动 `agent.nodes.call_llm_node`（完整工具表），
+执行器 `make_tool_selector` 直接驱动 `backend.agent.nodes.call_llm_node`（完整工具表），
 只测"决策"，不真正执行工具。
 
 指标（每条查询）：
@@ -173,7 +173,7 @@ tests/eval/
 
 - **基线文件**：`docs/interview/llm-eval-baseline.json`——一次干净运行
   （0 执行错误、0 judge 降级）的逐指标结果，提交进仓库，不被每次 run 覆盖。
-- **语义基线**：`docs/interview/llm-eval-semantic-baseline.json`——judge 通道稳定后
+- **语义基线**：`tests/eval/reports/llm-eval-semantic-baseline.json`——judge 通道稳定后
   用 `--judge llm` 跑出的语义判定结果（groundedness / hallucination_rate /
   summary_faithfulness / summary_completeness），供手动分析；不进 CI 门禁。
 - **对比**：`python -m tests.eval.compare_baseline` 把当前报告与基线做 diff，
@@ -181,7 +181,7 @@ tests/eval/
   运行间噪声）的下降都以非零退出码标红。**每次改 prompt 或模型后跑一次**，
   用 delta 判断该改动是提升还是回归。确定性报告与 LLM-judge 报告混比会被
   拒绝（judge 模式不匹配时脚本明确报错，避免把语义判定的更严当成回归）；
-  语义对比用 `--baseline docs/interview/llm-eval-semantic-baseline.json`。
+  语义对比用 `--baseline tests/eval/reports/llm-eval-semantic-baseline.json`。
 - **重标定**：有意的行为变更（prompt 版本号 bump、模型切换、工具表调整）落地后，
   重新生成基线并同步 eval.yml 阈值。
 
@@ -286,7 +286,7 @@ LangGraph 1.2.10 在 resume 被 `interrupt()` 暂停的节点时，会同时走�
 都指向 tools（无害），但**拒绝路径返回 `Command(goto="call_llm")` 时，静态边仍把
 路由拉到 tools，ToolNode 执行了刚被拒绝的 tool_calls**——审批门对拒绝路径形同虚设。
 
-修复（`agent/graph.py`）：`check_approval` 每条路径都返回 `Command`，因此删掉它的
+修复（`backend/agent/graph.py`）：`check_approval` 每条路径都返回 `Command`，因此删掉它的
 静态条件边，让 Command 成为唯一路由机制。回归测试
 `test_agent_graph.test_rejected_approval_does_not_execute_tool` 用真实图驱动拒绝
 路径并断言写操作未执行。这个 bug 暴露了 task_eval 的真正价值：**它能抓到组件级

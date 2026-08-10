@@ -1,4 +1,4 @@
-"""Unit tests for agent/tool_envelope.py — the shared tool-result envelope.
+"""Unit tests for backend/agent/tool_envelope.py — the shared tool-result envelope.
 
 The envelope is the single contract between tools (which build it) and the
 nodes / API (which parse and truncate it).  These tests pin the exact shape
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 
-from agent.tool_envelope import (
+from backend.agent.tool_envelope import (
     build_tool_envelope,
     envelope_display,
     parse_tool_envelope,

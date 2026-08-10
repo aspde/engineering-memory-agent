@@ -7,7 +7,7 @@ import pytest
 from langgraph.types import Command
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from agent.nodes import (
+from backend.agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
     _MAX_TOOL_CONTENT_CHARS,
     _estimate_tokens,
@@ -17,7 +17,7 @@ from agent.nodes import (
     _truncate_tool_content,
     _window_messages,
 )
-from agent.state import AgentState
+from backend.agent.state import AgentState
 from backend.shared import config as config_mod
 
 
@@ -35,7 +35,7 @@ def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 def _heuristic_token_estimator(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force the heuristic token estimate — windowing assertions pin exact
     token counts that tiktoken (when available) would shift."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     monkeypatch.setattr(mod, "_get_tokenizer", lambda: None)
 
@@ -212,7 +212,7 @@ class TestMessageConversion:
         assert "I'll write it" in dicts[-1]["content"]
 
     def test_to_openai_tools_returns_schemas(self) -> None:
-        from agent.tools import search_memories_tool
+        from backend.agent.tools import search_memories_tool
 
         schemas = _to_openai_tools([search_memories_tool])
         assert len(schemas) == 1
@@ -288,10 +288,10 @@ class TestCallLLMNode:
             content_stream("Hello, how can I help?")
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         result = await mod.call_llm_node(
             _make_state([HumanMessage(content="hi")]), tools=ALL_TOOLS
@@ -309,10 +309,10 @@ class TestCallLLMNode:
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         result = await mod.call_llm_node(
             _make_state([HumanMessage(content="hi")]), tools=ALL_TOOLS
@@ -330,10 +330,10 @@ class TestCallLLMNode:
             raise_stream(RuntimeError("API down"))
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         result = await mod.call_llm_node(
             _make_state([HumanMessage(content="hi")]), tools=ALL_TOOLS
@@ -357,7 +357,7 @@ class TestCallLLMNode:
             raise_stream(RuntimeError("API down"))
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         emitted: list[dict[str, str]] = []
@@ -384,7 +384,7 @@ class TestCallLLMNode:
         mock_provider = Mock()
         mock_provider.chat_raw_stream.side_effect = _partial_then_raise
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         emitted: list[dict[str, str]] = []
@@ -419,10 +419,10 @@ class TestCallLLMNode:
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         # Second user turn — the prior turn already exhausted the budget.
         result = await mod.call_llm_node(
@@ -455,10 +455,10 @@ class TestCallLLMNode:
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         result = await mod.call_llm_node(
             AgentState(
@@ -489,7 +489,7 @@ class TestCallLLMNode:
         """
         from tests._fake_llm import raise_stream, sequential_stream
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(
@@ -517,7 +517,7 @@ class TestCallLLMNode:
 class TestGenerateFinalNode:
     @pytest.mark.asyncio
     async def test_produces_final_prompt(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
         # The synthesis path calls the real provider; on CI the empty
@@ -568,7 +568,7 @@ class TestGenerateFinalNode:
             raise_stream(RuntimeError("synthesis down"))
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         emitted: list[dict[str, str]] = []
@@ -613,7 +613,7 @@ class TestGenerateFinalNode:
         mock_provider = Mock()
         mock_provider.chat_stream.side_effect = _partial_then_raise
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         emitted: list[dict[str, str]] = []
@@ -649,7 +649,7 @@ class TestGenerateFinalNode:
 
         from tests._fake_llm import text_stream
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -694,7 +694,7 @@ class TestGenerateFinalNode:
         """
         from tests._fake_llm import text_stream
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -740,10 +740,10 @@ class TestGenerateFinalNode:
         turn whose last tool call was a chunk search synthesized its answer
         without the chunks it had retrieved.
         """
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
-        from agent.tool_envelope import build_tool_envelope
+        from backend.agent.tool_envelope import build_tool_envelope
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -779,7 +779,7 @@ class TestGenerateFinalNode:
     @pytest.mark.asyncio
     async def test_no_tools_produces_prompt(self, monkeypatch) -> None:
         """Without any tool results, still produces a valid prompt (no context block)."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
         # Same fake-provider requirement as test_produces_final_prompt: the
@@ -804,7 +804,7 @@ class TestGenerateFinalNode:
     async def test_plain_chat_reuses_call_llm_output(self, monkeypatch) -> None:
         """No tool results this turn → the last call_llm AIMessage is the
         final answer; no second LLM call is made."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat.return_value = "should not be used"
@@ -827,7 +827,7 @@ class TestGenerateFinalNode:
         tool output can be folded into the final-answer context."""
         from tests._fake_llm import text_stream
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Synthesized from tool output.")
@@ -856,7 +856,7 @@ class TestGenerateFinalNode:
 
         In a multi-turn thread the history keeps prior tool results; a later
         plain-chat turn must still skip the second LLM call."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat.return_value = "should not be used"
@@ -890,7 +890,7 @@ class TestCheckApprovalNode:
         """Safe tools (search, retrieve, extract) pass straight to tools node."""
         from langgraph.types import Command
 
-        from agent.nodes import check_approval_node
+        from backend.agent.nodes import check_approval_node
 
         state = _make_state(
             messages=[
@@ -931,10 +931,10 @@ class TestCheckApprovalNode:
             ])
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.graph import build_agent_graph
+        from backend.agent.graph import build_agent_graph
 
         graph = build_agent_graph(tools, checkpointer=None)
         result = await graph.ainvoke(
@@ -963,10 +963,10 @@ class TestCheckApprovalNode:
             ])
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.graph import build_agent_graph
+        from backend.agent.graph import build_agent_graph
 
         graph = build_agent_graph(tools, checkpointer=None)
         result = await graph.ainvoke(
@@ -981,7 +981,7 @@ class TestCheckApprovalNode:
         """When last AI message has no tool_calls, route back to call_llm."""
         from langgraph.types import Command
 
-        from agent.nodes import check_approval_node
+        from backend.agent.nodes import check_approval_node
 
         state = _make_state(
             messages=[
@@ -1014,7 +1014,7 @@ class TestCheckApprovalNode:
         """
         from langgraph.types import Command
 
-        from agent.nodes import check_approval_node
+        from backend.agent.nodes import check_approval_node
 
         state = _make_state(
             messages=[
@@ -1033,7 +1033,7 @@ class TestCheckApprovalNode:
             ],
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(
             mod,
             "interrupt",
@@ -1066,7 +1066,7 @@ class TestCheckApprovalNode:
         sensitive call, matched by id so same-named calls both get rejected."""
         from langgraph.types import Command
 
-        from agent.nodes import check_approval_node
+        from backend.agent.nodes import check_approval_node
 
         state = _make_state(
             messages=[
@@ -1083,7 +1083,7 @@ class TestCheckApprovalNode:
             ],
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(
             mod,
             "interrupt",
@@ -1118,7 +1118,7 @@ class TestCheckConflictNode:
         """Non-conflict results pass straight to call_llm."""
         from langgraph.types import Command
 
-        from agent.nodes import check_conflict_node
+        from backend.agent.nodes import check_conflict_node
 
         state = _make_state(
             messages=[
@@ -1157,8 +1157,8 @@ class TestCheckConflictNode:
         # Step 2: write_memory_tool returns conflict → check_conflict interrupt
         from tests._fake_llm import sequential_stream, tool_call_stream
 
-        from agent.graph import build_agent_graph
-        from agent.tools import write_memory_tool
+        from backend.agent.graph import build_agent_graph
+        from backend.agent.tools import write_memory_tool
 
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(
@@ -1168,9 +1168,9 @@ class TestCheckConflictNode:
             }])
         )
 
-        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_provider)
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_provider)
         monkeypatch.setattr(
-            "agent.tools.write_memory",
+            "backend.agent.tools.write_memory",
             AsyncMock(return_value={
                 "action": "conflict",
                 "summary": "EMA uses MySQL",
@@ -1214,7 +1214,7 @@ class TestCheckConflictNode:
         """ToolMessages from search tools are ignored by check_conflict."""
         from langgraph.types import Command
 
-        from agent.nodes import check_conflict_node
+        from backend.agent.nodes import check_conflict_node
 
         state = _make_state(
             messages=[
@@ -1249,7 +1249,7 @@ class TestCheckConflictNode:
         """
         from langgraph.types import Command
 
-        from agent.nodes import check_conflict_node
+        from backend.agent.nodes import check_conflict_node
 
         state = _make_state(
             messages=[
@@ -1302,7 +1302,7 @@ class TestContextBounding:
 
     def test_estimate_tokens_delegates_to_tokenizer(self, monkeypatch) -> None:
         """With a tokenizer available, _estimate_tokens uses its real count."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         class _FakeEncoder:
             def encode(self, text: str) -> list[int]:
@@ -1446,10 +1446,10 @@ class TestContextBounding:
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        from agent.tools import ALL_TOOLS
+        from backend.agent.tools import ALL_TOOLS
 
         _disable_compaction(monkeypatch)  # assert pure windowing, not summary
         # Each "old message N" is ~4 estimated tokens; a 48-token budget keeps
@@ -1468,7 +1468,7 @@ class TestContextBounding:
         """The synthesis prompt carries a windowed history, not all of it."""
         from tests._fake_llm import text_stream
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")

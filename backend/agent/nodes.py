@@ -19,8 +19,8 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
-from agent.state import AgentState
-from agent.tool_envelope import envelope_display, truncate_tool_content
+from backend.agent.state import AgentState
+from backend.agent.tool_envelope import envelope_display, truncate_tool_content
 from backend.service.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
 from backend.service.memory import resolve_conflict, write_memory
@@ -437,7 +437,7 @@ _TRANSCRIPT_TOOL_CHAR_CAP = 200
 def _tool_display_text(message: ToolMessage) -> str:
     """The display text of a tool result, unwrapped from its JSON envelope.
 
-    Delegates to :func:`agent.tool_envelope.envelope_display` — the shared
+    Delegates to :func:`backend.agent.tool_envelope.envelope_display` — the shared
     unwrapper — so this path and the other consumers agree on what an
     envelope is.  Non-envelope results return their raw text.
     """
@@ -696,7 +696,7 @@ def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> s
     Envelope-aware: a ``{"display", "sources"}`` tool result is unwrapped to
     its display text *before* truncating, so the model never re-reads a
     half-cut JSON blob as history.  Non-envelope text is truncated verbatim.
-    The logic lives in :mod:`agent.tool_envelope`; this alias keeps the
+    The logic lives in :mod:`backend.agent.tool_envelope`; this alias keeps the
     existing call sites and tests working.
     """
     return truncate_tool_content(text, limit)
@@ -1320,7 +1320,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         if not raw.strip():
             continue
         # Envelope-aware truncation: the display text is unwrapped *before*
-        # capping (see agent.tool_envelope.truncate_tool_content) — the
+        # capping (see backend.agent.tool_envelope.truncate_tool_content) — the
         # sources array alone can exceed the cap, and cutting the raw JSON
         # first would send the LLM truncated raw JSON instead of the clean
         # display text.

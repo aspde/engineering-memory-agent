@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agent.state import AgentState
+from backend.agent.state import AgentState
 from backend.shared import config as config_mod
 
 
@@ -50,8 +50,8 @@ def _mock_services(
     extract_raises: Exception | None = None,
     write_raises: Exception | None = None,
 ) -> tuple[AsyncMock, AsyncMock]:
-    """Patch agent.nodes.extract_memory / write_memory; return their mocks."""
-    import agent.nodes as mod
+    """Patch backend.agent.nodes.extract_memory / write_memory; return their mocks."""
+    import backend.agent.nodes as mod
 
     mock_extract = AsyncMock(
         return_value={"summary": summary, "entities": entities or [], "relations": []}
@@ -75,7 +75,7 @@ class TestAutoMemoryGate:
 
     @pytest.mark.asyncio
     async def test_enabled_by_default(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         mock_extract, mock_write = _mock_services(monkeypatch)
         assert config_mod.config.auto_memory_enabled is True
@@ -87,7 +87,7 @@ class TestAutoMemoryGate:
 
     @pytest.mark.asyncio
     async def test_disabled_does_not_extract_or_write(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, False)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -102,7 +102,7 @@ class TestAutoMemoryGate:
     async def test_memory_pipeline_disabled_blocks_auto_memory(self, monkeypatch) -> None:
         """MEMORY_ENABLED=false turns the agent into pure chat — auto capture
         must not keep extracting and writing memories behind the scenes."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         # auto_memory_enabled is on (the default), but the whole memory
         # pipeline is off.
@@ -118,7 +118,7 @@ class TestAutoMemoryGate:
 
     @pytest.mark.asyncio
     async def test_enabled_writes_substantive_message(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -138,7 +138,7 @@ class TestAutoMemorySubstance:
 
     @pytest.mark.asyncio
     async def test_short_or_empty_summary_is_not_written(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch, summary="ok", entities=[])
@@ -151,7 +151,7 @@ class TestAutoMemorySubstance:
 
     @pytest.mark.asyncio
     async def test_entities_alone_can_trigger_write(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(
@@ -173,7 +173,7 @@ class TestAutoMemorySubstance:
         degrades to [] — a combination that cleared the old length-only
         substance gate and polluted the memory store with raw truncations.
         """
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         user_content = "记住：用 PostgreSQL 存向量，且连接池超时配置是 30 秒"
@@ -197,7 +197,7 @@ class TestAutoMemorySubstance:
         runs the real extraction chain, so it guards the *combination* of the
         degradation fallback and the substance gate.
         """
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service.extraction import extract_memory
 
         _set_auto_memory(monkeypatch, True)
@@ -248,7 +248,7 @@ class TestAutoMemorySubstance:
 
     @pytest.mark.asyncio
     async def test_no_human_message_is_noop(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -265,7 +265,7 @@ class TestAutoMemorySuppression:
     async def test_write_tool_call_this_turn_suppresses_auto_write(
         self, monkeypatch
     ) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -289,7 +289,7 @@ class TestAutoMemorySuppression:
     async def test_write_tool_result_this_turn_suppresses_auto_write(
         self, monkeypatch
     ) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -317,7 +317,7 @@ class TestAutoMemorySuppression:
     @pytest.mark.asyncio
     async def test_previous_turn_write_does_not_suppress(self, monkeypatch) -> None:
         """A write in an earlier turn doesn't suppress this turn's auto memory."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -351,7 +351,7 @@ class TestAutoMemoryFailures:
 
     @pytest.mark.asyncio
     async def test_extraction_failure_is_swallowed(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(
@@ -365,7 +365,7 @@ class TestAutoMemoryFailures:
 
     @pytest.mark.asyncio
     async def test_write_failure_is_swallowed(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         _, mock_write = _mock_services(monkeypatch, write_raises=RuntimeError("db down"))
@@ -381,7 +381,7 @@ class TestAutoMemoryWiring:
 
     @pytest.mark.asyncio
     async def test_plain_chat_path_auto_writes_when_enabled(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
         _set_auto_memory(monkeypatch, True)
@@ -404,7 +404,7 @@ class TestAutoMemoryWiring:
 
     @pytest.mark.asyncio
     async def test_tool_path_auto_writes_when_enabled(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
         _set_auto_memory(monkeypatch, True)
@@ -433,7 +433,7 @@ class TestAutoMemoryWiring:
 
     @pytest.mark.asyncio
     async def test_plain_chat_path_does_not_write_when_disabled(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, False)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -461,7 +461,7 @@ class TestAutoMemoryQualityGate:
 
     @pytest.mark.asyncio
     async def test_question_turn_is_not_extracted(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -474,7 +474,7 @@ class TestAutoMemoryQualityGate:
 
     @pytest.mark.asyncio
     async def test_request_turn_is_not_extracted(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -487,7 +487,7 @@ class TestAutoMemoryQualityGate:
 
     @pytest.mark.asyncio
     async def test_short_fragment_is_not_extracted(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -498,7 +498,7 @@ class TestAutoMemoryQualityGate:
 
     @pytest.mark.asyncio
     async def test_chatty_filler_is_not_extracted(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -512,7 +512,7 @@ class TestAutoMemoryQualityGate:
     @pytest.mark.asyncio
     async def test_symbol_noise_is_not_extracted(self, monkeypatch) -> None:
         """Emoji/symbol runs pass the raw-length gate but carry zero knowledge."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -527,7 +527,7 @@ class TestAutoMemoryQualityGate:
     async def test_long_acknowledgement_is_not_extracted(self, monkeypatch) -> None:
         """A longer polite acknowledgement exceeds the raw length gate but has
         no informative content after stripping chatty words."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -540,7 +540,7 @@ class TestAutoMemoryQualityGate:
 
     @pytest.mark.asyncio
     async def test_declarative_statement_is_extracted(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -565,7 +565,7 @@ class TestAutoMemoryLlmGate:
 
     @pytest.mark.asyncio
     async def test_gate_worthy_true_still_extracts(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -583,7 +583,7 @@ class TestAutoMemoryLlmGate:
 
     @pytest.mark.asyncio
     async def test_gate_worthy_false_skips(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -603,7 +603,7 @@ class TestAutoMemoryLlmGate:
     async def test_gate_failure_allows_through(self, monkeypatch) -> None:
         """A gate outage must not drop a heuristic-passing turn — the later
         substance check still guards the write."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -623,7 +623,7 @@ class TestAutoMemoryLlmGate:
         """A message containing braces (code snippets) must not crash the
         gate — .format() interpolates them as literal text, so the gate still
         judges instead of failing open on a KeyError."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -656,7 +656,7 @@ class TestAutoMemoryLlmGate:
         Under the old keyword heuristic (gate off) this message would have
         been rejected for containing 为什么/？ — a false negative this gate
         fixes."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -680,7 +680,7 @@ class TestAutoMemoryLlmGate:
 
         "今天天气不错…" carries no question marker, so the keyword heuristic
         let it through to extraction — a false positive the gate fixes."""
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
@@ -704,7 +704,7 @@ class TestAutoMemoryThrottle:
 
     @pytest.mark.asyncio
     async def test_repeat_content_in_same_thread_is_skipped(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -722,7 +722,7 @@ class TestAutoMemoryThrottle:
 
     @pytest.mark.asyncio
     async def test_min_interval_throttles_rapid_writes(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -743,7 +743,7 @@ class TestAutoMemoryThrottle:
 
     @pytest.mark.asyncio
     async def test_interval_disabled_when_zero(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         monkeypatch.setattr(config_mod.config, "auto_memory_min_interval", 0)
@@ -760,7 +760,7 @@ class TestAutoMemoryThrottle:
 
     @pytest.mark.asyncio
     async def test_per_thread_cap_limits_writes(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         monkeypatch.setattr(config_mod.config, "auto_memory_max_per_thread", 2)
@@ -783,7 +783,7 @@ class TestAutoMemoryThrottle:
 
     @pytest.mark.asyncio
     async def test_global_window_cap_across_threads(self, monkeypatch) -> None:
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
         monkeypatch.setattr(config_mod.config, "auto_memory_max_per_window", 2)
@@ -815,7 +815,7 @@ class TestAutoMemoryBackgrounding:
     async def test_node_returns_before_slow_capture_completes(self, monkeypatch) -> None:
         import asyncio
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         from tests._fake_llm import text_stream
 
         _set_auto_memory(monkeypatch, True)

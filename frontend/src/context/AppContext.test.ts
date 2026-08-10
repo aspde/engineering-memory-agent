@@ -12,6 +12,7 @@ const initialState: AppState = {
   threadsFetchedAt: 0,
   loadedThreadId: null,
   memFilterId: null,
+  activeScenario: null,
 };
 
 afterEach(() => {

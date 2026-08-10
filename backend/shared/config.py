@@ -254,7 +254,7 @@ class AppConfig:
     # (summary + entities + relations) plus embedding and a similarity scan,
     # so capture is throttled: a per-thread minimum interval, a per-thread
     # lifetime cap, and a process-wide rolling-window cap (see the throttle
-    # helpers in ``agent.nodes``).
+    # helpers in ``backend.agent.nodes``).
     auto_memory_min_interval: int = field(
         default_factory=lambda: int(os.getenv("AUTO_MEMORY_MIN_INTERVAL", "60"))
     )
@@ -283,7 +283,7 @@ class AppConfig:
     )
     # Target token budget for the agent context window (conversation history +
     # tool results) sent to the LLM each turn.  The windowing/compaction logic
-    # in ``agent.nodes`` retains history under this budget using a rough
+    # in ``backend.agent.nodes`` retains history under this budget using a rough
     # CJK-aware token estimate — an approximate ceiling, not an exact one.
     context_token_budget: int = field(
         default_factory=lambda: int(os.getenv("CONTEXT_TOKEN_BUDGET", "12000"))

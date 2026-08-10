@@ -18,11 +18,11 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 
 | 节点 | 实现 | 职责 |
 |------|------|------|
-| `call_llm` | `agent/nodes.py` | 将对话历史 + tool schema 发给 LLM，解析返回的 `AIMessage`（含 `tool_calls`，如有） |
-| `check_approval` | `agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批。审批集合由 `approval_required_tools` 参数化：默认集写/摄入供自动化流程（巡检/场景）自主执行；交互式 chat 路径用 `CHAT_APPROVAL_TOOLS`，额外把 `notify_feishu_tool`（外发到团队飞书群）纳入审批 |
+| `call_llm` | `backend/agent/nodes.py` | 将对话历史 + tool schema 发给 LLM，解析返回的 `AIMessage`（含 `tool_calls`，如有） |
+| `check_approval` | `backend/agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批。审批集合由 `approval_required_tools` 参数化：默认集写/摄入供自动化流程（巡检/场景）自主执行；交互式 chat 路径用 `CHAT_APPROVAL_TOOLS`，额外把 `notify_feishu_tool`（外发到团队飞书群）纳入审批 |
 | `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage` |
-| `check_conflict` | `agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
-| `generate_final` | `agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；本轮无工具结果（纯聊天）时直接复用 `call_llm` 输出，不重复调用 LLM |
+| `check_conflict` | `backend/agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
+| `generate_final` | `backend/agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；本轮无工具结果（纯聊天）时直接复用 `call_llm` 输出，不重复调用 LLM |
 
 路由：`tools_condition`（LangGraph 内置）—— AIMessage 有 `tool_calls` 则进入 `check_approval`（HITL 审批），无则去 `generate_final`（终止）。
 
@@ -62,13 +62,12 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 ## 文件结构
 
 ```
-agent/
-  state.py    # AgentState TypedDict (messages, final_response, final_prompt, error, pending_approval)
-  tools.py    # 9 个 @tool 薄封装 → 调用 backend/service/
-  nodes.py    # call_llm_node, check_approval_node, check_conflict_node, generate_final_node
-  graph.py    # build_agent_graph(), get_default_agent()
-
 backend/
+  agent/
+    state.py    # AgentState TypedDict (messages, final_response, final_prompt, error, pending_approval)
+    tools.py    # 9 个 @tool 薄封装 → 调用 backend/service/
+    nodes.py    # call_llm_node, check_approval_node, check_conflict_node, generate_final_node
+    graph.py    # build_agent_graph(), get_default_agent()
   api/routes/agent_routes.py    # POST /api/agent/chat
   service/agent_service.py      # get_agent(), get_agent_for_thread()
 ```

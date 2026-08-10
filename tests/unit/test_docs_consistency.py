@@ -79,7 +79,7 @@ def test_tech_stack_matches_requirements() -> None:
         ("pgvector", "pgvector"),
         ("sqlalchemy", "SQLAlchemy"),
         ("pytest", "pytest"),
-        ("gitpython", "GitPython"),
+        ("pygit2", "pygit2"),
     ]
 
     for pkg, label in claims:
@@ -111,17 +111,17 @@ def test_project_structure_matches_docs() -> None:
     """Key directories docs reference actually exist."""
     failures: list[Failure] = []
 
-    expected = ["backend", "frontend", "agent", "tests", "docs"]
+    expected = ["backend", "frontend", "tests", "docs"]
     for d in expected:
         if not (PROJECT_ROOT / d).is_dir():
             failures.append(Failure("structure", f"docs references '{d}/' but directory does not exist"))
 
-    # agent/ sub-modules must exist
-    agent_dir = PROJECT_ROOT / "agent"
+    # backend/agent sub-modules must exist
+    agent_dir = PROJECT_ROOT / "backend" / "agent"
     agent_files = ["state.py", "tools.py", "nodes.py", "graph.py"]
     for f in agent_files:
         if not (agent_dir / f).exists():
-            failures.append(Failure("structure", f"agent/{f} does not exist"))
+            failures.append(Failure("structure", f"backend/agent/{f} does not exist"))
 
     assert not failures, _failures_to_message(failures)
 

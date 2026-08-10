@@ -3,7 +3,7 @@
 These wrap production functions; each test patches its production seam so
 the default path is exercised without a real LLM:
 
-- ``make_tool_selector`` → patch ``agent.nodes.call_llm_node``.
+- ``make_tool_selector`` → patch ``backend.agent.nodes.call_llm_node``.
 - ``make_extractor`` → patch ``backend.service.extraction.extract_memory``.
 - ``make_answer_generator`` → inject a fake provider (no patching needed —
   this is why the factory accepts ``provider``).

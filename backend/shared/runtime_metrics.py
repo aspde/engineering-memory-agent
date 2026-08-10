@@ -44,6 +44,7 @@ from prometheus_client import (
     Counter,
     Gauge,
     Histogram,
+    Summary,
     generate_latest,
 )
 
@@ -315,10 +316,14 @@ def render_metrics() -> str:
 def reset_runtime_metrics() -> None:
     """Clear every metric — tests call this for isolation.
 
-    Labeled metrics are cleared via ``clear()`` (drops every label set; the
-    parent's ``_value`` is None so ``reset()`` would raise); unlabeled ones
-    via ``reset()``.  Each guarded — clearing must never mask a bug in a
-    single metric.
+    Labeled metrics are cleared via ``clear()``.  Label-less metrics keep
+    their data in instance attributes and can't go through that path:
+    prometheus_client 0.26's ``clear()`` returns early when there are no
+    labels, and ``reset()`` exists only on ``Counter`` — the earlier
+    ``reset()``-based branch silently skipped ``AGENT_STEPS`` (a label-less
+    Histogram), leaking samples across tests.  Each label-less type is
+    therefore zeroed explicitly.  Each guard is independent — clearing must
+    never mask a bug in a single metric.
     """
     for metric in (
         HTTP_REQUESTS,
@@ -336,8 +341,19 @@ def reset_runtime_metrics() -> None:
         try:
             if getattr(metric, "_labelnames", None):
                 metric.clear()
-            else:
+                continue
+            if isinstance(metric, Counter):
                 metric.reset()
+            elif isinstance(metric, Gauge):
+                metric._value.set(0.0)
+            elif isinstance(metric, Histogram):
+                metric._sum.set(0.0)
+                for bucket in metric._buckets:
+                    bucket.set(0.0)
+                metric._created = 0.0
+            elif isinstance(metric, Summary):
+                metric._sum.set(0.0)
+                metric._count.set(0.0)
+                metric._created = 0.0
         except Exception:
             pass
-    AGENT_SLOTS_IN_USE.set(0.0)

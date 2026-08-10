@@ -6,8 +6,8 @@ tokens.  This script re-segments each chunk's content with jieba and
 populates the column so ``sparse_search`` can use the GIN index.
 
 Usage:
-    python backfill_tokens.py            # backfill all empty-token rows
-    python backfill_tokens.py --dry-run  # preview without writing
+    python -m scripts.backfill_tokens            # backfill all empty-token rows
+    python -m scripts.backfill_tokens --dry-run  # preview without writing
 """
 
 from __future__ import annotations
@@ -63,7 +63,7 @@ async def backfill(dry_run: bool = False) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        prog="python backfill_tokens.py",
+        prog="python -m scripts.backfill_tokens",
         description="Backfill the tokens column for pre-existing chunks.",
     )
     parser.add_argument(

@@ -12,6 +12,9 @@ __pycache__/
 .vscode/
 .trae/
 
+# Dev scratch notes (phase planning docs)
+.scratch/
+
 # OS
 .DS_Store
 Thumbs.db
@@ -22,6 +25,9 @@ Thumbs.db
 # Database
 *.db
 *.sqlite3
+
+# Local embedding model cache (mounted into the container, not in git)
+docker/models/
 
 # Build
 dist/

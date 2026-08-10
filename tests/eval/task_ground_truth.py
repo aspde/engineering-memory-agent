@@ -168,8 +168,8 @@ def _normalize_name(name: str) -> str:
 
 
 def _valid_tool_names() -> set[str]:
-    """Names of the tools registered in ``agent.tools.ALL_TOOLS``."""
-    from agent.tools import ALL_TOOLS
+    """Names of the tools registered in ``backend.agent.tools.ALL_TOOLS``."""
+    from backend.agent.tools import ALL_TOOLS
 
     return {t.name for t in ALL_TOOLS}
 

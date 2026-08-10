@@ -79,7 +79,7 @@ RELATION_TYPES: tuple[str, ...] = (
 )
 
 # Contexts over 800 chars get truncated by the agent's tool-result cap
-# (agent/nodes.py ``_truncate_tool_content``); the answer suite injects
+# (backend/agent/nodes.py ``_truncate_tool_content``); the answer suite injects
 # context directly, but keeping items under the cap keeps the eval honest to
 # what the model would actually see through the retrieval path.
 ANSWER_CONTEXT_HARD_CAP = 2000
@@ -680,8 +680,8 @@ def _normalize_name(name: str) -> str:
 
 
 def _valid_tool_names() -> set[str]:
-    """Names of the tools registered in ``agent.tools.ALL_TOOLS``."""
-    from agent.tools import ALL_TOOLS
+    """Names of the tools registered in ``backend.agent.tools.ALL_TOOLS``."""
+    from backend.agent.tools import ALL_TOOLS
 
     return {t.name for t in ALL_TOOLS}
 

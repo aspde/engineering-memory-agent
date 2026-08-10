@@ -27,7 +27,7 @@ class TestNotifyFeishu:
     @pytest.mark.asyncio
     async def test_notify_feishu_formats_text_message(self, monkeypatch) -> None:
         """The tool should POST to the Feishu webhook URL with correct text payload."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         monkeypatch.setattr(
             "backend.shared.config.config.feishu_webhook_url",
@@ -58,7 +58,7 @@ class TestNotifyFeishu:
     @pytest.mark.asyncio
     async def test_notify_feishu_formats_interactive_message(self, monkeypatch) -> None:
         """Interactive cards should include header and markdown elements."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         monkeypatch.setattr(
             "backend.shared.config.config.feishu_webhook_url",
@@ -90,7 +90,7 @@ class TestNotifyFeishu:
     @pytest.mark.asyncio
     async def test_notify_feishu_returns_error_when_not_configured(self) -> None:
         """When FEISHU_WEBHOOK_URL is empty, return ok=false."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         result = await notify_feishu_tool.ainvoke({
             "message": "test",
@@ -103,7 +103,7 @@ class TestNotifyFeishu:
     @pytest.mark.asyncio
     async def test_notify_feishu_handles_timeout(self, monkeypatch) -> None:
         """A timeout should return ok=false, not crash."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         monkeypatch.setattr(
             "backend.shared.config.config.feishu_webhook_url",
@@ -127,7 +127,7 @@ class TestNotifyFeishu:
     @pytest.mark.asyncio
     async def test_tool_schema_has_required_params(self) -> None:
         """Verify the tool has the expected parameter schema."""
-        from agent.tools import notify_feishu_tool
+        from backend.agent.tools import notify_feishu_tool
 
         schema = notify_feishu_tool.args_schema.model_json_schema()
         props = schema.get("properties", {})

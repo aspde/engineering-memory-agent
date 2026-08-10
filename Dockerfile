@@ -7,18 +7,18 @@
 # backend/main.py mounts frontend/dist and falls back to index.html for
 # any non-API route, so the backend container *is* the web server.
 #
-# The local BGE-M3 embedding model is baked into the image at build time
-# (backend/service/embedding_service.py loads with local_files_only=True,
-# so it must already be on disk).  Baking it here makes the runtime fully
-# offline — no HF download at container start.
-#   To switch the model, pass --build-arg EMBEDDING_MODEL=<model-id>.
-#   To skip baking (e.g. mounting the model cache as a volume instead),
-#   comment out the "Bake BGE-M3" step.
+# The BGE-M3 embedding model is NOT baked into the image.  It is mounted
+# from the host at runtime: docker-compose mounts ./docker/models to
+# /home/ema/.cache/huggingface (the runtime HOME), where
+# backend/service/embedding_service.py's local_files_only=True load finds
+# it.  The image stays model-free (~3GB); the model lives on the host and
+# can be swapped without rebuilding.
+#   To switch the model, change EMBEDDING_MODEL in .env and prepare the
+#   matching HF cache under docker/models (see docs/deployment.md).
 # ─────────────────────────────────────────────────────────────────────
 
 ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=22
-ARG EMBEDDING_MODEL=BAAI/bge-m3
 
 # ── Stage 1: build the React SPA ─────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS frontend-build
@@ -40,12 +40,6 @@ ENV PYTHONUNBUFFERED=1 \
     TRANSFORMERS_OFFLINE=1 \
     HF_ENDPOINT=https://hf-mirror.com
 
-# psycopg / pygit2 / onnxruntime publish manylinux wheels; only git is
-# needed by pygit2 at build time.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends git curl \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt ./
 # torch==<ver>+cpu is published only on PyTorch's own CPU index — the
 # +cpu local-version suffix does not exist on pypi.org, so the two
@@ -60,17 +54,14 @@ RUN pip install --no-cache-dir --timeout 120 --retries 5 \
     && pip install --no-cache-dir --timeout 120 --retries 5 \
     -r requirements.txt
 
-# ── Bake the embedding model into the image (offline runtime) ────────
-# SentenceTransformer caches under $HOME/.cache/huggingface; HOME=/root,
-# so the runtime's local_files_only=True load hits this cache directly.
-RUN python -c \
-    "from sentence_transformers import SentenceTransformer; \
-     SentenceTransformer('${EMBEDDING_MODEL}')"
+# ── Embedding model: mounted at runtime, not baked ───────────────────
+# The model lives on the host under docker/models and is mounted to
+# /home/ema/.cache/huggingface by docker-compose (runtime HOME is
+# /home/ema, uid 10001).  See the header comment and docs/deployment.md.
 
-COPY agent/ agent/
 COPY backend/ backend/
+# frontend/public assets (favicon) are copied verbatim into dist by Vite.
 COPY --from=frontend-build /app/frontend/dist frontend/dist
-COPY frontend/static frontend/static
 
 # Run as non-root.
 RUN useradd --create-home --uid 10001 ema

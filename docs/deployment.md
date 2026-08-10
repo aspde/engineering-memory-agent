@@ -13,9 +13,37 @@ services:
 `backend` 使用根目录 `Dockerfile` 构建**单镜像**——FastAPI 同时托管前端构建产物（`backend/main.py` 挂载 `frontend/dist` 并对非 API 路由回退到 index.html），因此不需要单独的 frontend 服务。构建流程：
 
 - **Stage 1**（`node:22-alpine`）：`npm ci && npm run build` 产出 SPA
-- **Stage 2**（`python:3.12-slim`）：装依赖 + 将 BGE-M3 权重烘焙进镜像（离线运行）+ 拷贝前端产物
+- **Stage 2**（`python:3.12-slim`）：装依赖 + 拷贝前端产物（镜像不含 embedding 模型，见下文"Embedding 模型挂载"）
 
 **torch 分步安装**：`torch==2.13.0+cpu` 只发布在 PyTorch 官方 CPU index（`+cpu` 后缀在 PyPI 不存在），因此 Dockerfile 先用 `--no-deps --index-url https://download.pytorch.org/whl/cpu` 单独装 torch，再用纯 PyPI 装其余依赖——不能合并为一个 `--extra-index-url`，否则 PyTorch index 的旧包快照会污染 charset-normalizer 等共享包的解析。
+
+## Embedding 模型挂载
+
+BGE-M3 等 embedding 模型**不烘焙进镜像**，而是放在宿主机、通过 **bind mount** 挂载进容器（不复制数据，宿主机与容器共享同一份文件）：
+
+```yaml
+services:
+  backend:
+    volumes:
+      - ${HF_CACHE_DIR:-./docker/models}:/home/ema/.cache/huggingface
+```
+
+- 容器运行时 `HOME=/home/ema`（uid 10001），`backend/service/embedding_service.py` 用 `local_files_only=True` 加载，直接命中该挂载的 HF 缓存；运行期仍完全离线（`HF_HUB_OFFLINE=1`）。
+- **推荐：复用已有 HF 缓存**。宿主机已有 `~/.cache/huggingface`（含目标模型）时，`.env` 中设 `HF_CACHE_DIR` 指向它即可零复制：
+  ```
+  HF_CACHE_DIR=C:/Users/<you>/.cache/huggingface
+  ```
+  挂载源目录结构须为 HF hub 缓存：`hub/models--BAAI--bge-m3/...`（`.env` 不在版本库，此变量仅本机生效）。
+- **默认（新部署）**：不设 `HF_CACHE_DIR` 时挂载项目内 `./docker/models/`（相对 compose 文件解析），用已构建的镜像一次性下载到该目录（示例）：
+  ```bash
+  docker run --rm -u root -v "$(pwd)/docker/models:/models" \
+    -e HF_HOME=/models -e HF_HUB_OFFLINE=0 -e TRANSFORMERS_OFFLINE=0 \
+    ema-backend python -c \
+    "from sentence_transformers import SentenceTransformer; \
+     SentenceTransformer('BAAI/bge-m3')"
+  ```
+  `docker/models/` 已加入 `.gitignore` 与 `.dockerignore`，模型不进版本库、不进构建上下文。
+- 换模型只需改 `.env` 的 `EMBEDDING_MODEL` 并准备对应缓存，无需重建镜像。
 
 ## Services
 
@@ -122,7 +150,7 @@ docker compose logs -f backend
 ```
 
 - `.env` 通过 `env_file` 注入；compose 内 `DATABASE_URL` 覆盖指向 `postgres` 服务名（`.env` 里的 localhost 不适用容器网络）。
-- BGE-M3 权重已烘焙进镜像，运行期完全离线（`HF_HUB_OFFLINE=1`）。
+- Embedding 模型经 `./docker/models` 挂载进容器，运行期完全离线（`HF_HUB_OFFLINE=1`），见上文"Embedding 模型挂载"。
 - **Linux 容器顺带解决了 Windows 平台的 checkpointer 限制**：`AsyncPostgresSaver`（psycopg 异步）在 Linux 原生可用，对话 checkpoint 落 PostgreSQL；Windows 下降级为 `InMemorySaver` 仅是开发期兼容（见 `backend/main.py`）。
 
 ### 方式 B：裸进程（开发 / 调试）
@@ -144,9 +172,9 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000
 | 状态 | 位置 | 多副本后果 |
 |------|------|-----------|
 | LLM / Embedding 熔断器（开关状态、半开探测） | `backend/shared/resilience.py` | 每个副本各自计数熔断、半开探测互相打散，一个实例熔断不保护其他实例；/health 只反映本副本状态 |
-| auto-memory 节流（per-thread 间隔/上限、进程级滚动窗口） | `agent/nodes.py` | 每个副本独立计数，实际写入频率放大到上限的 N 倍 |
+| auto-memory 节流（per-thread 间隔/上限、进程级滚动窗口） | `backend/agent/nodes.py` | 每个副本独立计数，实际写入频率放大到上限的 N 倍 |
 | LLM usage 缓冲（`_pending`，由后台 flusher 批量入库） | `backend/service/usage.py` | 缓冲只记录本副本的调用；写入 `llm_usage` 的行不重复，但 `USAGE_BUFFER_MAX` 兜底语义按副本独立 |
-| 会话压缩摘要缓存 / in-flight 去重 | `agent/nodes.py` | 跨副本完全失效，每副本各自付一次压缩 LLM 调用（结果一致，仅浪费 token） |
+| 会话压缩摘要缓存 / in-flight 去重 | `backend/agent/nodes.py` | 跨副本完全失效，每副本各自付一次压缩 LLM 调用（结果一致，仅浪费 token） |
 | 对话 checkpoint（`AsyncPostgresSaver` 连接池） | `backend/service/agent_service.py` | 唯一已持久化的状态；`checkpoints` 表在 PG 中，多副本下对话历史仍一致，但同一 `thread_id` 的并发续写由哪副本处理不可控 |
 
 巡检互斥（`patrol_logs` 中 `status='running'` 的查重）在数据库层，多副本下仍有效；其余状态均受上述约束。

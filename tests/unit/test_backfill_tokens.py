@@ -1,4 +1,4 @@
-"""Tests for backfill_tokens.backfill — tokens column backfill for old rows.
+"""Tests for scripts.backfill_tokens.backfill — tokens column backfill for old rows.
 
 DB is mocked at the session-factory boundary: verify dry-run writes nothing,
 and the real path issues exactly one executemany UPDATE for all rows.
@@ -34,13 +34,13 @@ def _row(id_: str, content: str) -> MagicMock:
 class TestBackfill:
     @pytest.mark.asyncio
     async def test_dry_run_does_not_write(self, monkeypatch) -> None:
-        from backfill_tokens import backfill
+        from scripts.backfill_tokens import backfill
 
         session = AsyncMock()
         result = MagicMock()
         result.__iter__ = lambda self: iter([_row("uuid-1", "pgvector 向量检索")])
         session.execute.return_value = result
-        monkeypatch.setattr("backfill_tokens.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.backfill_tokens.get_session_factory", _mock_factory(session))
 
         n = await backfill(dry_run=True)
 
@@ -50,7 +50,7 @@ class TestBackfill:
 
     @pytest.mark.asyncio
     async def test_backfills_rows_in_one_executemany(self, monkeypatch) -> None:
-        from backfill_tokens import backfill
+        from scripts.backfill_tokens import backfill
 
         session = AsyncMock()
         rows = [
@@ -60,7 +60,7 @@ class TestBackfill:
         select_result = MagicMock()
         select_result.__iter__ = lambda self: iter(rows)
         session.execute.side_effect = [select_result, AsyncMock()]
-        monkeypatch.setattr("backfill_tokens.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.backfill_tokens.get_session_factory", _mock_factory(session))
 
         n = await backfill(dry_run=False)
 
@@ -75,13 +75,13 @@ class TestBackfill:
 
     @pytest.mark.asyncio
     async def test_no_rows_to_backfill(self, monkeypatch) -> None:
-        from backfill_tokens import backfill
+        from scripts.backfill_tokens import backfill
 
         session = AsyncMock()
         result = MagicMock()
         result.__iter__ = lambda self: iter([])
         session.execute.return_value = result
-        monkeypatch.setattr("backfill_tokens.get_session_factory", _mock_factory(session))
+        monkeypatch.setattr("scripts.backfill_tokens.get_session_factory", _mock_factory(session))
 
         n = await backfill(dry_run=False)
 

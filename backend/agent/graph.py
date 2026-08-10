@@ -29,14 +29,14 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
-from agent.nodes import (
+from backend.agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
     call_llm_node,
     check_approval_node,
     check_conflict_node,
     generate_final_node,
 )
-from agent.state import AgentState
+from backend.agent.state import AgentState
 
 
 def _make_route_after_call_llm(max_steps: int):
@@ -128,6 +128,6 @@ def build_agent_graph(
 
 def get_default_agent() -> CompiledStateGraph:
     """Return a compiled agent with all default tools and InMemorySaver."""
-    from agent.tools import ALL_TOOLS
+    from backend.agent.tools import ALL_TOOLS
 
     return build_agent_graph(tools=ALL_TOOLS)

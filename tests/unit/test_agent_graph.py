@@ -6,7 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
-from agent.graph import build_agent_graph
+from backend.agent.graph import build_agent_graph
 from backend.shared import config as config_mod
 
 
@@ -94,7 +94,7 @@ class TestGraphStructure:
         )
         provider.chat_stream = text_stream("好的。")  # tool turn → synthesis path
 
-        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: provider)
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: provider)
 
         graph = build_agent_graph(
             [fake_write],
@@ -136,7 +136,7 @@ class TestGraphRouting:
             content_stream("I can answer that directly.")
         )
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         graph = build_agent_graph([], checkpointer=None)
@@ -172,7 +172,7 @@ class TestGraphRouting:
         )
         mock_provider.chat_stream = text_stream("Final synthesized answer.")
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         graph = build_agent_graph(tools, checkpointer=None)
@@ -194,7 +194,7 @@ class TestGraphHITLRouting:
         """Safe tools route through check_approval → tools without interrupt."""
         from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
 
-        from agent.nodes import check_approval_node
+        from backend.agent.nodes import check_approval_node
 
         tools = [_make_fake_tool()]
 
@@ -213,7 +213,7 @@ class TestGraphHITLRouting:
         mock_provider.chat_stream = text_stream("Final answer.")
 
         monkeypatch.setattr(
-            "agent.nodes.get_llm_provider",
+            "backend.agent.nodes.get_llm_provider",
             lambda: mock_provider,
         )
 
@@ -243,8 +243,8 @@ class TestGraphHITLRouting:
 
         from tests._fake_llm import sequential_stream, tool_call_stream
 
-        from agent.graph import build_agent_graph
-        from agent.tools import write_memory_tool
+        from backend.agent.graph import build_agent_graph
+        from backend.agent.tools import write_memory_tool
 
         mock_provider = AsyncMock()
         # First call_llm: approve the tool call
@@ -256,7 +256,7 @@ class TestGraphHITLRouting:
             }])
         )
 
-        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_provider)
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_provider)
 
         graph = build_agent_graph([write_memory_tool], checkpointer=None)
         result = await graph.ainvoke(
@@ -283,8 +283,8 @@ class TestGraphHITLRouting:
             tool_call_stream,
         )
 
-        from agent.nodes import CHAT_APPROVAL_TOOLS
-        from agent.tools import notify_feishu_tool
+        from backend.agent.nodes import CHAT_APPROVAL_TOOLS
+        from backend.agent.tools import notify_feishu_tool
         from backend.shared.config import config
 
         monkeypatch.setattr(config, "feishu_webhook_url", "")
@@ -302,7 +302,7 @@ class TestGraphHITLRouting:
             content_stream("Notified."),
         )
         mock_default.chat_stream = text_stream("Final.")
-        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_default)
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_default)
 
         graph_default = build_agent_graph([notify_feishu_tool], checkpointer=None)
         result_default = await graph_default.ainvoke(
@@ -314,7 +314,7 @@ class TestGraphHITLRouting:
         # Chat approval set: notify is gated → the graph pauses for approval.
         mock_chat = AsyncMock()
         mock_chat.chat_raw_stream = sequential_stream(tool_call_stream([notify_call]))
-        monkeypatch.setattr("agent.nodes.get_llm_provider", lambda: mock_chat)
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_chat)
 
         graph_chat = build_agent_graph(
             [notify_feishu_tool],
@@ -373,7 +373,7 @@ class TestStepCountResetAcrossTurns:
         )
         mock_provider.chat_stream = text_stream("Final.", "Final.")
 
-        import agent.nodes as mod
+        import backend.agent.nodes as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         graph = build_agent_graph([fake_search], checkpointer=None, max_steps=2)

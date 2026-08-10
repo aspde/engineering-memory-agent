@@ -30,7 +30,7 @@ def _disable_auto_memory(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _make_tool_state(tool_name: str, content: str) -> dict:
     """Build an AgentState where *tool_name* returned *content* this turn."""
-    from agent.state import AgentState
+    from backend.agent.state import AgentState
 
     return AgentState(
         messages=[
@@ -53,7 +53,7 @@ def _make_tool_state(tool_name: str, content: str) -> dict:
 @pytest.mark.asyncio
 async def test_context_isolation_declaration_present(monkeypatch) -> None:
     """The final system prompt carries the untrusted-data isolation declaration."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     mock_provider = AsyncMock()
     mock_provider.chat_stream = text_stream("Final.")
@@ -72,7 +72,7 @@ async def test_context_isolation_declaration_present(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_memory_context_is_wrapped_in_marker(monkeypatch) -> None:
     """Memory-tool results are wrapped in a <memory> marker."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     mock_provider = AsyncMock()
     mock_provider.chat_stream = text_stream("Final.")
@@ -88,7 +88,7 @@ async def test_memory_context_is_wrapped_in_marker(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_doc_context_is_wrapped_in_marker(monkeypatch) -> None:
     """Chunk/doc-tool results are wrapped in a <doc> marker."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     mock_provider = AsyncMock()
     mock_provider.chat_stream = text_stream("Final.")
@@ -106,7 +106,7 @@ async def test_doc_context_is_wrapped_in_marker(monkeypatch) -> None:
 async def test_injected_instruction_is_contained_inside_marker(monkeypatch) -> None:
     """An 'ignore previous instructions' payload stays inside the <memory>
     data block and is never lifted into the instruction part of the prompt."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     mock_provider = AsyncMock()
     mock_provider.chat_stream = text_stream("Final.")
@@ -128,7 +128,7 @@ async def test_injected_instruction_is_contained_inside_marker(monkeypatch) -> N
 
 def test_wrap_context_item_tags_doc_vs_memory() -> None:
     """_wrap_context_item picks the marker by tool class."""
-    import agent.nodes as mod
+    import backend.agent.nodes as mod
 
     memory = mod._wrap_context_item("search_memories_tool", "m")
     assert memory.startswith('<memory source="search_memories_tool">')

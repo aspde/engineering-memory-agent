@@ -15,6 +15,9 @@ __pycache__/
 .env
 *.env.local
 
+# Local embedding model cache — mounted at runtime, never in the image
+docker/models/
+
 # Node
 frontend/node_modules/
 frontend/dist/
@@ -25,4 +28,5 @@ docs/
 .scratch/
 .trae/
 tests/
+scripts/
 *.bat
