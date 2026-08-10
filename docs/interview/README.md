@@ -11,13 +11,14 @@
 | [tech-qa-drill.md](./tech-qa-drill.md) | 技术问题演练 Q&A 库（按主题分类） | — |
 | [behavioral-star.md](./behavioral-star.md) | 行为面试 STAR 案例库 | — |
 | [gap-remediation.md](./gap-remediation.md) | 已知短板诊断 + 评估体系补全方案 | — |
+| [script-cards.md](./script-cards.md) | **应答话术卡（13 段必背 + 补充高危口径），临场只带这一份** | 15 分钟/轮 |
 
 ## 使用方式
 
 1. **第一遍**：通读 4 份文档，标出与个人经历不符的内容，用 `[需要你补充：XXX]` 占位符填实
 2. **第二遍**：背诵 self-introduction.md，对着 ema-deep-dive.md 复述项目讲解
 3. **第三遍**：找人模拟面试，用 tech-qa-drill.md 做技术问答，用 behavioral-star.md 做行为问答
-4. **临场**：只带 ema-deep-dive.md 的"一句话架构图"和"3 个关键决策"小抄
+4. **临场**：带 script-cards.md（应答话术卡）+ ema-deep-dive.md 的"一句话架构图"和"3 个关键决策"小抄
 
 ## 占位符说明
 
