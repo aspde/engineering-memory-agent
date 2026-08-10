@@ -39,3 +39,7 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+# starlette.testclient falls back from httpx2 to httpx with a deprecation
+# warning; we pin httpx and the fallback is fully supported, so the notice
+# is noise in every test run.
+filterwarnings = ["ignore::starlette.exceptions.StarletteDeprecationWarning"]
