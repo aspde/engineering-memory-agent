@@ -98,10 +98,15 @@ class CircuitBreaker:
       HALF-OPEN.
     - **HALF-OPEN**: exactly one recovery probe is admitted; every other
       caller keeps failing fast (no probe stampede against a still-down
-      provider).  Probe success (:meth:`record_success`) → CLOSED; probe
-      failure (:meth:`record_failure`) → back to OPEN.  A probe that never
-      resolves (e.g. its task was cancelled) is treated as stale after one
-      cooldown window and a fresh probe may be admitted.
+      provider).  The probe's caller passes the token :meth:`before_call`
+      returned to :meth:`record_success`, and that is the *only* call that may
+      close the breaker; probe failure (:meth:`record_failure`) puts it back to
+      OPEN.  A stale success from a call admitted before the breaker tripped
+      carries no token and is ignored, so a late success can't re-close a
+      breaker that has since opened (which would oscillate
+      OPEN→CLOSED→OPEN while hammering a still-down provider).  A probe that
+      never resolves (e.g. its task was cancelled) is treated as stale after
+      one cooldown window and a fresh probe may be admitted.
 
     Thread-safe via a ``threading.Lock`` since the async and sync provider
     paths share one instance per name.
@@ -121,6 +126,8 @@ class CircuitBreaker:
         self._open_until = 0.0  # time.monotonic() deadline; 0.0 = closed
         self._probing = False  # half-open: a recovery probe is in flight
         self._probe_deadline = 0.0  # stale-probe guard, time.monotonic()
+        self._probe_token: int | None = None  # identity of the admitted probe
+        self._probe_seq = 0  # monotonic probe ids (stale tokens never collide)
         self._lock = threading.Lock()
 
     @property
@@ -135,19 +142,22 @@ class CircuitBreaker:
                 self._probing and self._probe_deadline > now
             )
 
-    def before_call(self) -> None:
-        """Raise :class:`CircuitOpenError` if the breaker is not admitting calls.
+    def before_call(self) -> int | None:
+        """Admit a call or raise :class:`CircuitOpenError`; return a probe token.
 
-        Closed → pass.  OPEN (cooldown not elapsed) → fail fast.  HALF-OPEN
-        (cooldown elapsed, live probe in flight) → only the probe's caller was
-        admitted earlier; everyone else fails fast until the probe's outcome is
-        recorded.  When the cooldown has elapsed and no live probe exists, the
-        next caller is admitted as the single recovery probe.
+        Closed → pass (returns ``None``).  OPEN (cooldown not elapsed) → fail
+        fast.  HALF-OPEN (cooldown elapsed, live probe in flight) → only the
+        probe's caller was admitted earlier; everyone else fails fast until the
+        probe's outcome is recorded.  When the cooldown has elapsed and no live
+        probe exists, the next caller is admitted as the single recovery probe
+        and gets a fresh probe token — that caller must pass the token back to
+        :meth:`record_success` so a stale success from an earlier call cannot
+        close the breaker.
         """
         now = time.monotonic()
         with self._lock:
             if self._open_until == 0.0 and not self._probing:
-                return
+                return None
             if now < self._open_until:
                 remaining = self._open_until - now
                 inc_circuit_breaker_rejections(self._name)
@@ -167,15 +177,34 @@ class CircuitBreaker:
             self._failures = 0
             self._probing = True
             self._probe_deadline = now + self._cooldown_seconds
+            self._probe_seq += 1
+            self._probe_token = self._probe_seq
             set_circuit_breaker_state(self._name, True)  # half-open
+            return self._probe_token
 
-    def record_success(self) -> None:
-        """Reset failure count (consecutive-failure semantics) and close."""
+    def record_success(self, probe_token: int | None = None) -> None:
+        """Reset the consecutive-failure count and, for the admitted probe,
+        close the breaker.
+
+        Only the half-open recovery probe may close the breaker: its caller
+        passes the token :meth:`before_call` returned when admitting it.  A
+        success from a call admitted *before* the breaker tripped (still in
+        flight, no token) — or from a stale earlier probe — must not re-close
+        an OPEN / HALF-OPEN breaker; doing so would let the breaker oscillate
+        OPEN→CLOSED→OPEN against a still-down provider.
+        """
         with self._lock:
-            self._failures = 0
-            self._open_until = 0.0
-            self._probing = False
-        set_circuit_breaker_state(self._name, False)
+            if self._probing:
+                if probe_token is not None and probe_token == self._probe_token:
+                    self._probing = False
+                    self._probe_token = None
+                    self._open_until = 0.0
+                    self._failures = 0
+                    set_circuit_breaker_state(self._name, False)
+                return
+            if self._open_until == 0.0:
+                self._failures = 0
+                set_circuit_breaker_state(self._name, False)
 
     def record_failure(self) -> None:
         """Count one retryable failure; trip the breaker at the threshold.
@@ -292,7 +321,7 @@ async def call_with_resilience(
     non-retryable ones propagate untouched.
     """
     breaker = get_circuit_breaker(name)
-    breaker.before_call()
+    probe_token = breaker.before_call()
     retrier = AsyncRetrying(**_retry_kwargs())
     try:
         result = await retrier(operation)
@@ -306,7 +335,7 @@ async def call_with_resilience(
             # CircuitBreaker.settle_probe_failure).
             breaker.settle_probe_failure()
         raise
-    breaker.record_success()
+    breaker.record_success(probe_token)
     return result
 
 
@@ -316,7 +345,7 @@ def call_with_resilience_sync(
 ) -> T:
     """Sync variant of :func:`call_with_resilience`."""
     breaker = get_circuit_breaker(name)
-    breaker.before_call()
+    probe_token = breaker.before_call()
     retrier = Retrying(**_retry_kwargs())
     try:
         result = retrier(operation)
@@ -326,7 +355,7 @@ def call_with_resilience_sync(
         else:
             breaker.settle_probe_failure()
         raise
-    breaker.record_success()
+    breaker.record_success(probe_token)
     return result
 
 
@@ -339,7 +368,7 @@ async def circuit_breaker_guard(name: str):
     the provider is down.
     """
     breaker = get_circuit_breaker(name)
-    breaker.before_call()
+    probe_token = breaker.before_call()
     try:
         yield
     except Exception as exc:
@@ -348,7 +377,7 @@ async def circuit_breaker_guard(name: str):
         else:
             breaker.settle_probe_failure()
         raise
-    breaker.record_success()
+    breaker.record_success(probe_token)
 
 
 @contextlib.asynccontextmanager
@@ -367,7 +396,7 @@ async def resilient_stream_guard(name: str, connect: Callable[[], Awaitable[T]])
     once; only connection establishment retries.
     """
     breaker = get_circuit_breaker(name)
-    breaker.before_call()
+    probe_token = breaker.before_call()
     retrier = AsyncRetrying(**_retry_kwargs())
     try:
         stream = await retrier(connect)
@@ -385,4 +414,4 @@ async def resilient_stream_guard(name: str, connect: Callable[[], Awaitable[T]])
         else:
             breaker.settle_probe_failure()
         raise
-    breaker.record_success()
+    breaker.record_success(probe_token)

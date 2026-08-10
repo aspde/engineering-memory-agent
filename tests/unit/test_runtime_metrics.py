@@ -9,6 +9,8 @@ no mock of the metric library.
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from backend.shared import config as config_mod
@@ -132,8 +134,17 @@ class TestCircuitBreakerMetrics:
             cb.before_call()
         assert 'ema_circuit_breaker_rejections_total{name="llm:test"} 1.0' in _sample_lines()
 
-        # A success closes the breaker → gauge back to 0.
+        # A success from a call admitted before the trip (no probe token) must
+        # NOT close an OPEN breaker — a stale in-flight success re-closing
+        # would let a dead provider oscillate OPEN→CLOSED→OPEN.
         cb.record_success()
+        assert 'ema_circuit_breaker_state{name="llm:test"} 1.0' in _sample_lines()
+
+        # After the cooldown elapses the next call is admitted as the single
+        # recovery probe; its success (with the probe token) closes the breaker.
+        time.sleep(0.06)
+        token = cb.before_call()
+        cb.record_success(token)
         assert 'ema_circuit_breaker_state{name="llm:test"} 0.0' in _sample_lines()
 
     def test_direct_helpers(self) -> None:

@@ -776,3 +776,83 @@ class TestAgentStream:
         assert '"type": "conflict"' in response.text
         # Stream returns at the interrupt — the trailing token never reaches the client.
         assert "IGNORED" not in response.text
+
+    @pytest.mark.asyncio
+    async def test_stream_disconnect_closes_stream_and_marks_interrupted(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A disconnected SSE client must close the underlying agent stream and
+        mark the thread interrupted.
+
+        Regression: the disconnect path only ``return``ed — the ``agent.astream``
+        generator was abandoned (LangGraph "Task was destroyed" warnings) and
+        ``_mark_interrupted_thread`` was never called.  The checkpoint kept the
+        user's message, so retrying the same question appended a second
+        identical user turn the model read as an independent ask.
+        """
+        from unittest.mock import AsyncMock
+
+        from langchain_core.messages import SystemMessage
+
+        import backend.api.routes.agent_routes as routes_mod
+
+        # The SSE client goes away as soon as streaming begins.
+        monkeypatch.setattr(
+            routes_mod, "_is_disconnected", AsyncMock(return_value=True)
+        )
+
+        closed: list[bool] = []
+
+        class _FakeStream:
+            """Minimal async iterator standing in for the graph's astream.
+
+            Records ``aclose()`` so the test can assert the route explicitly
+            closes the underlying stream on disconnect.
+            """
+
+            def __init__(self, events):
+                self._events = iter(events)
+                self._closed = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._events)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+            async def aclose(self):
+                if not self._closed:
+                    self._closed = True
+                    closed.append(True)
+
+        mock_agent = AsyncMock()
+        mock_agent.astream = lambda *a, **k: _FakeStream([
+            ((), "updates", {"call_llm": None}),
+        ])
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat/stream",
+            json={"message": "hi", "thread_id": "disconnect-thread-1"},
+        )
+        assert response.status_code == 200
+
+        # The graph stream generator was explicitly closed — no dangling task.
+        assert closed == [True]
+
+        # The thread was marked interrupted (a SystemMessage appended to state)
+        # so a retry reads as a continuation, not a duplicate user turn.
+        mock_agent.aupdate_state.assert_awaited_once()
+        update = mock_agent.aupdate_state.call_args.args[1]
+        msgs = update.get("messages", [])
+        assert any(
+            isinstance(m, SystemMessage) and "interrupted" in str(m.content)
+            for m in msgs
+        )

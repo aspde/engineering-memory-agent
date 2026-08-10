@@ -30,12 +30,15 @@ async def insert_test_memory(
     summary: str = "Test memory for delete API",
     entities: list | None = None,
     relations: list | None = None,
+    embedding: list | None = None,
 ) -> str:
     """Insert a memory row directly via the DB session; return its UUID string."""
     entities_json = json.dumps(entities or [])
     relations_json = json.dumps(relations or [])
-    # Dummy 1024-dim embedding to satisfy the vector(1024) column.
-    embedding = "[{}]".format(",".join(["0.1", "0.2"] * 512))
+    if embedding is None:
+        # Dummy 1024-dim embedding to satisfy the vector(1024) column.
+        embedding = [0.1, 0.2] * 512
+    embedding_str = "[{}]".format(",".join(str(x) for x in embedding))
 
     async with session_factory() as session:
         result = await session.execute(
@@ -50,11 +53,33 @@ async def insert_test_memory(
                 "summary": summary,
                 "entities": entities_json,
                 "relations": relations_json,
-                "embedding": embedding,
+                "embedding": embedding_str,
             },
         )
         await session.commit()
         return str(result.fetchone()[0])
+
+
+def embedding_near(stored: list, cos_sim: float) -> list:
+    """Return a unit vector whose cosine similarity to *stored* is *cos_sim*.
+
+    Decomposes along an orthonormal basis: ``v_hat = stored / |stored|`` and a
+    fixed ``w_hat`` perpendicular to the all-ones direction (which every test
+    embedding below is parallel to).  The result
+    ``cos_sim * v_hat + sqrt(1 - cos_sim**2) * w_hat`` has unit length and dot
+    product ``cos_sim`` with ``v_hat``, so its cosine similarity to *stored* is
+    exactly ``cos_sim`` — letting the test pin a new-content embedding into a
+    chosen similarity band (e.g. the conflict band [0.75, 0.92)).
+    """
+    v = [float(x) for x in stored]
+    norm = sum(x * x for x in v) ** 0.5
+    v_hat = [x / norm for x in v]
+    w_hat = [0.0] * len(v)
+    if len(v) >= 2:
+        w_hat[0] = 1.0 / 2 ** 0.5
+        w_hat[1] = -1.0 / 2 ** 0.5
+    r = (1 - cos_sim ** 2) ** 0.5
+    return [cos_sim * a + r * b for a, b in zip(v_hat, w_hat)]
 
 
 class TestDeleteMemory:
@@ -156,3 +181,82 @@ class TestSoftDeleteEffects:
         after_total = after_resp.json()["total_memories"]
 
         assert after_total == before_total - 1
+
+
+class TestWriteConflict:
+    """POST /api/memory/memories/write must not 500 when the new content lands
+    in the conflict-detection band.
+
+    Regression: ``_mark_conflict`` returns a dict without an ``id`` key, and the
+    route used to do ``id=result["id"]`` directly — a conflict was an uncaught
+    KeyError → 500, and the conflicting content was neither stored nor queued.
+    The conflict branch must instead persist to the pending_conflicts queue and
+    return conflict semantics with a ``conflict_id``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_conflict_branch_returns_conflict_and_queues(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        # Existing memory whose embedding is the all-ones vector.
+        session_factory = get_session_factory()
+        stored_embedding = [1.0] * 1024
+        memory_id = await insert_test_memory(
+            session_factory,
+            source_type="test",
+            summary="Existing memory about service X",
+            embedding=stored_embedding,
+        )
+
+        # New-content embedding pinned at ~0.85 cosine-similarity to the stored
+        # one — inside the conflict band [0.75, 0.92), below the merge 0.92.
+        new_embedding = embedding_near(stored_embedding, 0.85)
+
+        provider = AsyncMock()
+        provider.embed.return_value = [new_embedding]
+        monkeypatch.setattr(
+            "backend.service.memory.get_embedding_provider", lambda: provider
+        )
+        monkeypatch.setattr(
+            "backend.service.memory.extract_memory",
+            AsyncMock(
+                return_value={
+                    "summary": "New content that contradicts existing memory",
+                    "entities": [],
+                    "relations": [],
+                }
+            ),
+        )
+        # The conflict-detection LLM says: contradiction found.
+        monkeypatch.setattr(
+            "backend.service.memory._detect_conflict", AsyncMock(return_value=True)
+        )
+
+        response = await async_client.post(
+            "/api/memory/memories/write",
+            json={"content": "new content", "source_type": "api", "metadata": {}},
+        )
+
+        # No longer a 500: the route returns explicit conflict semantics.
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["action"] == "conflict"
+        assert data["conflict_id"]
+        assert data["existing_id"] == memory_id
+        assert data["id"] is None
+
+        # The conflicting content landed in the pending_conflicts queue (HITL),
+        # not silently dropped.
+        async with session_factory() as session:
+            row = await session.execute(
+                text(
+                    "SELECT existing_id, status, new_summary FROM pending_conflicts "
+                    "WHERE id = :cid"
+                ),
+                {"cid": data["conflict_id"]},
+            )
+            pending = row.fetchone()
+        assert pending is not None
+        assert str(pending[0]) == memory_id
+        assert pending[1] == "pending"
+        assert pending[2] == "New content that contradicts existing memory"

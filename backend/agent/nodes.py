@@ -348,6 +348,24 @@ def _context_budget() -> int:
     return max(config.context_token_budget, 1)
 
 
+def _patrol_synthesis_max_tokens() -> int | None:
+    """Larger output ceiling for a patrol's final synthesis, else None.
+
+    A patrol report is generated in one LLM call and must arrive as complete
+    JSON.  Once the model spends part of its interactive ``LLM_MAX_TOKENS``
+    budget on internal reasoning the final message is truncated and the run
+    fails contract validation — the budget that produced the 2026-08-10
+    daily/weekly failures.  Patrol threads are recognised by their thread_id
+    prefix (set by ``run_patrol``); the ``PATROL_MAX_TOKENS`` ceiling gives the
+    report headroom while the patrol prompts cap per-category counts.
+    """
+    from backend.shared.config import config, current_thread_id
+
+    if current_thread_id.get("").startswith("patrol-"):
+        return config.patrol_max_tokens
+    return None
+
+
 def _window_messages(
     messages: list[BaseMessage], max_tokens: int | None = None
 ) -> list[BaseMessage]:
@@ -1364,8 +1382,17 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     provider = get_llm_provider()
     writer = _stream_writer()
     response_parts: list[str] = []
+    max_tokens = _patrol_synthesis_max_tokens()
     try:
-        async for token in provider.chat_stream(messages, scenario="agent_final"):
+        # Patrol threads raise the output ceiling (see
+        # ``_patrol_synthesis_max_tokens``) so a complete report fits; the
+        # interactive chat path keeps the provider default.
+        final_kwargs: dict[str, Any] = {}
+        if max_tokens:
+            final_kwargs["max_tokens"] = max_tokens
+        async for token in provider.chat_stream(
+            messages, scenario="agent_final", **final_kwargs
+        ):
             response_parts.append(token)
             writer({"type": "token", "content": token})
         response = "".join(response_parts)
@@ -1445,6 +1472,13 @@ def _build_partial_approval_command(
     exactly which writes actually ran — previously the per-row buttons were a
     lie: the whole batch was routed to the reject branch and tools never ran
     while approved rows still got a fake ``[APPROVED]`` result.
+
+    The rejection feedback is folded into ``exec_msg.content`` as well: the
+    ``[REJECTED]`` ToolMessages are orphans (their ``tool_call_id`` is on no
+    retained AIMessage), which the serialization layer drops — without the
+    note the next ``call_llm`` would never see which writes were declined and
+    could silently retry them.  ToolNode re-executes nothing rejected (those
+    calls stay out of ``exec_msg.tool_calls``).
     """
     safe_ids = {_tool_call_id(c) for c in safe}
     rejection_msgs: list[ToolMessage] = []
@@ -1474,8 +1508,25 @@ def _build_partial_approval_command(
         for tc in (last_ai.tool_calls if last_ai else [])
         if _tool_call_id(tc) in approved_ids or _tool_call_id(tc) in safe_ids
     ]
+    # The [REJECTED] ToolMessages are orphans for serialization — their
+    # tool_call_id is on no retained AIMessage (exec_msg only carries approved
+    # + safe calls), so ``_messages_to_dicts`` drops them and the next
+    # call_llm would never learn which writes were declined.  Fold a summary
+    # into exec_msg's content instead: the model sees the rejected calls and
+    # reason, while ToolNode still only executes the approved subset (the
+    # rejected calls stay out of exec_msg.tool_calls).
+    rejection_note = ""
+    if rejection_msgs:
+        rejected_desc = "; ".join(
+            f"{getattr(m, 'name', '') or 'tool'} (id: {m.tool_call_id})"
+            for m in rejection_msgs
+        )
+        rejection_note = (
+            f"\n\n[REJECTED] These tool call(s) were rejected by the user and "
+            f"NOT executed: {rejected_desc}. Reason: {reason}"
+        )
     exec_msg = AIMessage(
-        content=last_ai.content if last_ai else "",
+        content=(last_ai.content if last_ai else "") + rejection_note,
         tool_calls=exec_tool_calls,
         id=last_ai.id if last_ai else None,
     )

@@ -26,6 +26,39 @@ from backend.shared.resilience import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+# ── Circuit-breaker naming ───────────────────────────────────────────
+# Embedding breakers are keyed by ``base_url|model`` so a fallback provider
+# never shares the primary's breaker (mirrors ``llm_service.breaker_name``).
+# This is the single naming source: the provider computes its instance name
+# from it, and ``embedding_breaker_name`` reads the configured primary through
+# it, so a naming change lands in one place instead of being kept "in
+# lockstep" across modules.
+
+
+def breaker_name(base_url: str, model: str) -> str:
+    """Circuit-breaker name for an OpenAI-compatible embedding endpoint.
+
+    Keyed by ``base_url|model`` (e.g. ``embedding:https://api.openai.com/v1|
+    text-embedding-3-small``) so the primary and its fallback each get their
+    own breaker.  The base URL is normalised the same way the provider's
+    ``__init__`` normalises it (trailing slash stripped, empty → the OpenAI
+    default), keeping ``/health`` and the provider in lockstep.
+    """
+    base = base_url.rstrip("/") if base_url else "https://api.openai.com/v1"
+    return f"embedding:{base}|{model}"
+
+
+def embedding_breaker_name() -> str:
+    """Circuit-breaker name for the configured primary embedding provider.
+
+    Mirrors the per-instance names the provider classes compute in
+    ``__init__`` (``base_url|model``) so ``/health`` can report the primary's
+    breaker state without reaching into provider internals.  Only meaningful
+    for the remote ``openai`` provider — the local BGE provider makes no
+    remote calls and has no breaker.
+    """
+    return breaker_name(config.embedding.base_url, config.embedding.model)
+
 # ── Dimension resolution ───────────────────────────────────────────────
 # The model→dimension map lives in ``config.EmbeddingConfig`` (single source
 # of truth); the schema and every provider read it from there.  OpenAI has no
@@ -105,6 +138,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         from openai import AsyncOpenAI, OpenAI
 
         base = base_url.rstrip("/") if base_url else "https://api.openai.com/v1"
+        self._base_url = base
         self._async_client = AsyncOpenAI(api_key=api_key, base_url=base, timeout=timeout)
         self._client = OpenAI(api_key=api_key, base_url=base, timeout=timeout)
         self._model = model
@@ -130,6 +164,19 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
             batch_size,
         )
 
+    def _breaker_name(self) -> str:
+        """Per-endpoint circuit-breaker name — keyed by ``base_url|model``.
+
+        A primary provider and its fallback must not share one breaker:
+        tripping the primary (which is exactly when failover engages) would
+        otherwise fast-fail the healthy fallback too (see the failover tests).
+        Mirrors ``llm_service.breaker_name``.  The ``_base_url`` getattr
+        fallback keeps the ``object.__new__`` construction in
+        ``test_resilience`` (which sets ``_model`` only) working.
+        """
+        base = getattr(self, "_base_url", "")
+        return breaker_name(base, self._model)
+
     # ── async ─────────────────────────────────────────────────────────
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
@@ -144,7 +191,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                     input=batch,
                 )
 
-            response = await call_with_resilience("embedding:openai", _op)
+            response = await call_with_resilience(self._breaker_name(), _op)
             all_embeddings.extend(
                 [d.embedding for d in response.data]
             )
@@ -169,7 +216,7 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
                     input=batch,
                 )
 
-            response = call_with_resilience_sync("embedding:openai", _op)
+            response = call_with_resilience_sync(self._breaker_name(), _op)
             all_embeddings.extend(
                 [d.embedding for d in response.data]
             )
@@ -281,11 +328,15 @@ def _build_embedding_provider(
     raise ValueError(f"Unsupported embedding provider: {provider_name!r}")
 
 
-def get_embedding_provider() -> EmbeddingProvider:
-    """Return a singleton embedding provider based on config.
+def _get_or_create_provider() -> EmbeddingProvider:
+    """Build and cache the singleton provider (thread-safe).
 
-    Thread-safe: the lock prevents the background warmup and the first
-    real request from racing to initialise the provider.
+    Single source of truth for construction, shared by the sync
+    (:func:`get_embedding_provider`) and async (:func:`get_embedding_provider_async`)
+    entry points so the two paths can never double-build or cache separately.
+    The ``threading.Lock`` is only contended while a build is in flight; after
+    startup (the warmup is awaited in ``main.py`` lifespan before the app
+    serves requests) it is uncontended on the request path.
 
     When ``EMBEDDING_FALLBACK_PROVIDER`` is set, returns a
     :class:`FallbackEmbeddingProvider` wrapping the primary and the configured
@@ -300,7 +351,7 @@ def get_embedding_provider() -> EmbeddingProvider:
             return _provider
 
         embedding = config.embedding
-        _provider = _build_embedding_provider(
+        provider = _build_embedding_provider(
             embedding.provider,
             api_key=embedding.api_key,
             base_url=embedding.base_url,
@@ -311,7 +362,7 @@ def get_embedding_provider() -> EmbeddingProvider:
             hf_endpoint=embedding.hf_endpoint,
         )
 
-        if _provider.dimension != embedding.dimension:
+        if provider.dimension != embedding.dimension:
             logger.warning(
                 "Embedding provider reports dimension %d but config/schema "
                 "assumes %d (model=%r) — the pgvector columns were built as "
@@ -319,7 +370,7 @@ def get_embedding_provider() -> EmbeddingProvider:
                 "EMBEDDING_MODEL with the schema, or switch models and let "
                 "init_db resize the columns, then re-embed with "
                 "`python -m scripts.reembed_embeddings`.",
-                _provider.dimension,
+                provider.dimension,
                 embedding.dimension,
                 embedding.model,
                 embedding.dimension,
@@ -336,6 +387,33 @@ def get_embedding_provider() -> EmbeddingProvider:
                 normalize=embedding.normalize,
                 hf_endpoint=embedding.hf_endpoint,
             )
-            _provider = FallbackEmbeddingProvider(_provider, fallback)
+            provider = FallbackEmbeddingProvider(provider, fallback)
 
+        _provider = provider
         return _provider
+
+
+def get_embedding_provider() -> EmbeddingProvider:
+    """Return the singleton embedding provider (sync, for scripts/threads).
+
+    Thread-safe and idempotent: concurrent callers share a single build and a
+    single cached instance.  In the app, prefer :func:`get_embedding_provider_async`
+    in event-loop contexts so a first-time load (BGE-M3 takes 30s+) never
+    blocks the event loop.
+    """
+    return _get_or_create_provider()
+
+
+async def get_embedding_provider_async() -> EmbeddingProvider:
+    """Return the singleton embedding provider without blocking the event loop.
+
+    The heavy construction (loading BGE-M3 can take 30s+) runs in a background
+    thread; the event loop awaits it instead of blocking on the
+    ``threading.Lock``, so an embedding request or health probe arriving
+    mid-load cannot freeze the loop.  Shares the singleton and build lock with
+    :func:`get_embedding_provider` — whichever path loads first wins and
+    everyone else returns the same cached instance.
+    """
+    if _provider is not None:
+        return _provider
+    return await asyncio.to_thread(_get_or_create_provider)

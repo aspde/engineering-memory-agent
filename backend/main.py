@@ -136,22 +136,27 @@ async def lifespan(app: FastAPI):
             _exc,
         )
 
-    # Warm the embedding model in a background thread so the first
-    # request doesn't block for 30+ seconds loading BGE-M3.
+    # Warm the embedding model so the first request doesn't block for 30+
+    # seconds loading BGE-M3.  Awaited before serving (not fire-and-forget):
+    # the async loader builds the provider in a background thread while the
+    # event loop yields, so startup waits for the model but a request arriving
+    # mid-load (or a health probe) can never block the event loop on the
+    # singleton's threading.Lock — the failure mode that used to freeze the
+    # whole loop for 30s+.
     try:
-        from backend.service.embedding_service import get_embedding_provider
+        from backend.service.embedding_service import get_embedding_provider_async
 
         async def _warm_embedding() -> None:
             try:
-                await asyncio.to_thread(get_embedding_provider)
+                await get_embedding_provider_async()
             except Exception:
 
                 logging.getLogger(__name__).warning(
-                    "Background embedding warmup failed — model will "
-                    "load on first use (may delay the first request)."
+                    "Embedding warmup failed — model will load on first "
+                    "use (may delay the first request)."
                 )
 
-        asyncio.create_task(_warm_embedding())
+        await _warm_embedding()
     except Exception:
         pass
 
@@ -359,12 +364,15 @@ async def health_check() -> JSONResponse:
     # ``primary_breaker_name``), so the health probe reads the *same* breaker
     # the primary provider guards with.
     from backend.service.llm_service import primary_breaker_name
+    from backend.service.embedding_service import embedding_breaker_name
 
     llm_breaker = get_circuit_breaker(primary_breaker_name())
     # Local BGE embeddings make no remote calls and have no breaker; only the
-    # remote OpenAI-compatible embedder participates in resilience.
+    # remote OpenAI-compatible embedder participates in resilience.  The name
+    # follows the provider's per-endpoint scheme (``base_url|model``) so this
+    # reports the same breaker the primary provider guards with.
     if config.embedding.provider == "openai":
-        embed_breaker = get_circuit_breaker("embedding:openai")
+        embed_breaker = get_circuit_breaker(embedding_breaker_name())
         embed_circuit = "open" if embed_breaker.is_open else "closed"
     else:
         embed_circuit = "n/a"

@@ -12,6 +12,7 @@ from backend.service.extraction import (
     extract_relations,
     extract_summary,
 )
+from backend.shared.resilience import CircuitOpenError
 
 
 class TestExtractSummary:
@@ -62,6 +63,24 @@ class TestExtractEntities:
         assert result == []
         assert failures == ["extraction_entities"]
 
+    @pytest.mark.asyncio
+    async def test_circuit_open_degrades_to_empty(self, monkeypatch) -> None:
+        """Circuit breaker open → chat_structured fails fast with
+        CircuitOpenError; enrichment must degrade to [] so the memory write
+        proceeds instead of crashing write_memory."""
+        import backend.service.extraction as mod
+        failures = []
+
+        async def _raise(*args, **kwargs):
+            raise CircuitOpenError("Circuit breaker 'x' is open")
+
+        monkeypatch.setattr(mod, "chat_structured", _raise)
+        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
+
+        result = await extract_entities("some summary")
+        assert result == []
+        assert failures == ["extraction_entities"]
+
 
 class TestExtractRelations:
     @pytest.mark.asyncio
@@ -104,6 +123,25 @@ class TestExtractRelations:
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")
+
+        monkeypatch.setattr(mod, "chat_structured", _raise)
+        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
+
+        entities = [{"name": "A", "type": "concept"}, {"name": "B", "type": "concept"}]
+        result = await extract_relations("summary", entities)
+        assert result == []
+        assert failures == ["extraction_relations"]
+
+    @pytest.mark.asyncio
+    async def test_circuit_open_degrades_to_empty(self, monkeypatch) -> None:
+        """Circuit breaker open → chat_structured fails fast with
+        CircuitOpenError; relation extraction must degrade to [] so the memory
+        write proceeds instead of crashing write_memory."""
+        import backend.service.extraction as mod
+        failures = []
+
+        async def _raise(*args, **kwargs):
+            raise CircuitOpenError("Circuit breaker 'x' is open")
 
         monkeypatch.setattr(mod, "chat_structured", _raise)
         monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))

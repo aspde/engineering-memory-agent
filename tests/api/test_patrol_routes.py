@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -69,6 +71,8 @@ class TestManualTrigger:
 
     def test_manual_patrol_trigger_returns_accepted(self, client):
         """Trigger endpoint returns 202 with accepted status."""
+        import backend.api.routes.patrol_routes as mod
+
         with patch(
             "backend.api.routes.patrol_routes.get_session_factory",
             return_value=_make_mock_session(),
@@ -86,6 +90,13 @@ class TestManualTrigger:
             data = resp.json()
             assert data["status"] == "accepted"
 
+            # The patrol runs in a tracked background task (see the GC-guard
+            # regression test below).  Wait for it to finish under the mock so
+            # it never escapes to the real run_patrol after the patch exits.
+            deadline = time.monotonic() + 5.0
+            while mod._patrol_tasks and time.monotonic() < deadline:
+                time.sleep(0.01)
+
     def test_trigger_invalid_type_returns_422(self, client):
         """Invalid patrol_type should return 422."""
         with patch(
@@ -97,6 +108,56 @@ class TestManualTrigger:
                 json={"patrol_type": "invalid_type"},
             )
             assert resp.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_background_task_is_held_by_strong_reference(
+        self, async_client: AsyncClient
+    ) -> None:
+        """Manual patrol runs in a tracked task, not an unreferenced one.
+
+        ``asyncio.create_task`` keeps no strong reference, so an unreferenced
+        patrol can be garbage-collected at its first await while the agent is
+        still running — the run would silently vanish.  The task must be held
+        in a module-level set for its whole lifetime and dropped only after it
+        finishes.
+        """
+        import backend.api.routes.patrol_routes as mod
+
+        release = asyncio.Event()
+
+        async def _blocking_run(**kwargs):
+            # Hold the run open so the test can inspect the task set while the
+            # patrol is genuinely in flight.
+            await release.wait()
+            return "test-patrol-id"
+
+        # Keep the mock installed until the task completes — the route fires
+        # the run in the background, so it must not outlive the patch.
+        with patch(
+            "backend.api.routes.patrol_routes.run_patrol",
+            new_callable=AsyncMock,
+            side_effect=_blocking_run,
+        ):
+            resp = await async_client.post(
+                "/api/patrol/trigger",
+                json={"patrol_type": "daily", "scope": "all"},
+            )
+            assert resp.status_code == 202
+
+            # While the patrol is in flight, it must be tracked.
+            assert mod._patrol_tasks, (
+                "background patrol task must be held by a strong reference"
+            )
+
+            # Let the patrol finish; the task then drops its own reference.
+            release.set()
+            deadline = time.monotonic() + 5.0
+            while mod._patrol_tasks and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+
+        assert not mod._patrol_tasks, (
+            "completed patrol task must be removed from the task set"
+        )
 
 
 class TestListLogs:

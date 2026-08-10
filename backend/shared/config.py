@@ -240,6 +240,23 @@ class AppConfig:
     patrol_timeout: int = field(
         default_factory=lambda: int(os.getenv("PATROL_TIMEOUT", "600"))
     )
+    # Scenario runs invoke the full agent (recursion_limit=50) for their whole
+    # compose chain, so a stuck scenario can hang the request indefinitely.
+    # This bounds each run — beyond SCENARIO_TIMEOUT_SECONDS the scenario
+    # endpoint answers 504 (see scenario_routes) instead of leaving the
+    # request open forever.
+    scenario_timeout: int = field(
+        default_factory=lambda: int(os.getenv("SCENARIO_TIMEOUT_SECONDS", "300"))
+    )
+    # Max simultaneous scenario runs.  Each run holds agent/LLM slots for its
+    # whole compose chain (up to SCENARIO_TIMEOUT_SECONDS), so an unbounded
+    # number of concurrent scenarios would together saturate the provider rate
+    # limit and can only be stopped by a restart.  Beyond this cap the scenario
+    # endpoint answers 503 (refuse, not queue) — see scenario_routes' slot
+    # counter in ``backend.service.scenarios``.
+    max_scenario_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("MAX_SCENARIO_CONCURRENCY", "2"))
+    )
     memory_enabled: bool = field(
         default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() == "true"
     )
@@ -362,6 +379,17 @@ class AppConfig:
     patrol_weekly_hour: int = field(
         default_factory=lambda: int(os.getenv("PATROL_WEEKLY_HOUR", "9"))
     )
+    # Output ceiling for the patrol *final synthesis* call (and the repair
+    # retry), independent of the interactive LLM_MAX_TOKENS.  A patrol report
+    # is generated in one LLM call and must arrive as complete JSON; once the
+    # model spends part of its 4096-token budget on internal reasoning the
+    # final message gets truncated and the run fails contract validation
+    # (see ``_validate_findings`` in patrol.py).  PATROL_MAX_TOKENS gives the
+    # report headroom; the daily/weekly prompts cap per-category entry counts
+    # so the report stays small enough to fit.
+    patrol_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("PATROL_MAX_TOKENS", "8000"))
+    )
     feishu_webhook_url: str = field(
         default_factory=lambda: os.getenv("FEISHU_WEBHOOK_URL", "")
     )
@@ -458,6 +486,18 @@ def validate_config() -> list[str]:
         )
     if config.patrol_timeout <= 0:
         problems.append(f"PATROL_TIMEOUT={config.patrol_timeout} must be > 0")
+    if config.patrol_max_tokens < 1:
+        problems.append(
+            f"PATROL_MAX_TOKENS={config.patrol_max_tokens} must be >= 1"
+        )
+    if config.scenario_timeout <= 0:
+        problems.append(
+            f"SCENARIO_TIMEOUT_SECONDS={config.scenario_timeout} must be > 0"
+        )
+    if config.max_scenario_concurrency < 1:
+        problems.append(
+            f"MAX_SCENARIO_CONCURRENCY={config.max_scenario_concurrency} must be >= 1"
+        )
     if config.context_token_budget < 1:
         problems.append(
             f"CONTEXT_TOKEN_BUDGET={config.context_token_budget} must be >= 1"

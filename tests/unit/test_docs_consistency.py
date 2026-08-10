@@ -96,7 +96,7 @@ def test_database_matches_docker_compose() -> None:
     if not compose.exists():
         return  # no docker-compose means nothing to check
 
-    compose_text = compose.read_text()
+    compose_text = compose.read_text(encoding="utf-8")
     failures: list[Failure] = []
 
     if "pgvector" not in compose_text:

@@ -481,3 +481,64 @@ class TestWebhookConflict:
             assert row.source == "fake_ci"
             assert row.status == "pending"
             assert row.new_summary == "New conflicting summary"
+
+
+# ── Background task lifetime (GC guard) ───────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_background_delivery_task_is_held_by_strong_reference(
+    async_client: AsyncClient,
+) -> None:
+    """The fire-and-forget delivery task is tracked, not left to the GC.
+
+    ``asyncio.create_task`` keeps no strong reference: an unreferenced task
+    can be garbage-collected at its first await (the 10-40s LLM call), which
+    would leave the delivery-log row stuck at ``received`` forever with no
+    retry.  The task must be held in a module-level set for its whole lifetime
+    and dropped only after it finishes.
+    """
+    import backend.api.routes.webhook_routes as mod
+
+    release = asyncio.Event()
+
+    async def _blocking_write(content, **kwargs):
+        # Hold the pipeline open so the test can inspect the task set while
+        # the background delivery is genuinely in flight.
+        await release.wait()
+        return {
+            "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+            "action": "inserted",
+            "summary": "Build held-job failed",
+            "entity_ids": [],
+        }
+
+    with patch(
+        "backend.service.memory.write_memory",
+        new_callable=AsyncMock,
+        side_effect=_blocking_write,
+    ):
+        raw, headers = _signed_post({"job_name": "gc-guard-job"})
+        resp = await async_client.post(
+            "/api/webhook/fake_ci", content=raw, headers=headers
+        )
+        assert resp.status_code == 202
+        delivery_id = resp.json()["delivery_id"]
+
+        # While the task is awaiting the (slow) pipeline, it must be tracked.
+        assert mod._webhook_tasks, (
+            "background delivery task must be held by a strong reference"
+        )
+
+        # Let the pipeline finish; the task then drops its own reference.
+        release.set()
+        row = await _wait_for_status(delivery_id, "processed")
+        assert row is not None
+
+    # The completed delivery task must have dropped its reference from the set.
+    deadline = time.monotonic() + 5.0
+    while mod._webhook_tasks and time.monotonic() < deadline:
+        await asyncio.sleep(0.01)
+    assert not mod._webhook_tasks, (
+        "completed delivery task must be removed from the task set"
+    )

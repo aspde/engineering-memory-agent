@@ -101,23 +101,25 @@ async def write_memory(
         # ids are recorded on the new memory's meta as ``supplements`` so a
         # multi-match is visible instead of silently favouring the closest.
         supplement_ids: list[str] = []
-        # Of those supplements, the ones sitting in the conflict-detection band
-        # [CONFLICT_CHECK, MERGE_THRESHOLD) that only the *closest* match ever
-        # runs _detect_conflict against.  They are recorded as supplements but
-        # were never vetted for a contradiction — flagged on the meta as
-        # ``supplements_unchecked`` so readers can tell vetted from unvetted.
-        unchecked_ids: list[str] = []
+        # Design tradeoff: only the *closest* match ever runs _detect_conflict
+        # against the new content.  Additional close candidates sitting in the
+        # conflict-detection band [CONFLICT_CHECK, MERGE_THRESHOLD) are recorded
+        # as supplements below but are NOT individually vetted for a
+        # contradiction — a 2nd/3rd near-relative could contradict the new
+        # content and still land in the store.  Vet-and-upgrade-to-conflict for
+        # every band candidate was considered and rejected: it would add one
+        # structured LLM call (with retries) per candidate, i.e. up to N-1 extra
+        # calls per write, to catch a rare event.  This is a documented gap, not
+        # a silently-ignored flag — so no ``supplements_unchecked`` marker is
+        # written (that field was dead: written but never consumed anywhere).
         for sim, row in similar[1:]:
             rid = str(row["id"])
             if sim < SUPPLEMENT_THRESHOLD or rid == str(existing["id"]):
                 continue
             supplement_ids.append(rid)
-            if CONFLICT_CHECK <= sim < MERGE_THRESHOLD:
-                unchecked_ids.append(rid)
     else:
         grade, existing = 0.0, None
         supplement_ids = []
-        unchecked_ids = []
 
     logger.info(
         "Similarity grade: %s (thresholds: merge=%.2f, conflict=%.2f, supplement=%.2f)",
@@ -132,8 +134,6 @@ async def write_memory(
     write_meta = metadata or {}
     if supplement_ids:
         write_meta = {**write_meta, "supplements": supplement_ids}
-    if unchecked_ids:
-        write_meta = {**write_meta, "supplements_unchecked": unchecked_ids}
 
     # 4. Act on the grade
     if grade >= MERGE_THRESHOLD and existing:

@@ -52,6 +52,16 @@ _WEBHOOK_MAX_CONCURRENCY = 4
 _webhook_active = 0
 _webhook_slots_lock = threading.Lock()
 
+# Strong references to in-flight background delivery tasks.
+# ``asyncio.create_task`` keeps no strong reference of its own: the loop's
+# bookkeeping is weak, so a fire-and-forget task can be garbage-collected at
+# its first await — while the delivery is waiting on the LLM (10-40s) — and
+# the ``received`` delivery-log row would silently never advance (no retry,
+# only a log line).  Holding the task here extends its lifetime until it
+# finishes; ``_process_delivery`` drops it in its ``finally``.  (Same pattern
+# as ``_normalization_tasks`` in ``backend/service/memory.py``.)
+_webhook_tasks: set[asyncio.Task] = set()
+
 
 class WebhookResponse(BaseModel):
     source: str
@@ -265,6 +275,7 @@ async def _process_delivery(
     finally:
         current_trace_id.reset(trace_token)
         _release_slot()
+        _webhook_tasks.discard(asyncio.current_task())
 
 
 # ── Route ─────────────────────────────────────────────────────────────
@@ -348,9 +359,10 @@ async def receive_webhook(source: str, request: Request) -> WebhookResponse:
     # 9. Record the delivery and dispatch processing to the background.
     try:
         delivery_id = await _log_delivery(source, event_type, "received", payload_summary)
-        asyncio.create_task(
+        task = asyncio.create_task(
             _process_delivery(delivery_id, source, connector, content, metadata)
         )
+        _webhook_tasks.add(task)
     except Exception as exc:
         _release_slot()
         logger.exception("Failed to dispatch webhook delivery (source=%s)", source)

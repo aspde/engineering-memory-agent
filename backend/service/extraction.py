@@ -15,6 +15,7 @@ from backend.service.llm_service import get_llm_provider
 from backend.service.prompts import get_prompt
 from backend.service.structured import chat_structured
 from backend.shared.metrics import record_structured_failure
+from backend.shared.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,11 @@ async def extract_entities(content_or_summary: str) -> list[dict]:
             scenario="extraction_entities",
         )
         return data if isinstance(data, list) else []
-    except LLMStructuredError:
+    except (LLMStructuredError, CircuitOpenError):
+        # Structured output exhausted its retries (LLMStructuredError) or the
+        # circuit breaker is open and chat_structured failed fast
+        # (CircuitOpenError).  Enrichment is not correctness-critical — degrade
+        # to [] so the memory write proceeds rather than dropping the content.
         record_structured_failure("extraction_entities")
         logger.error(
             "Entity extraction degraded to [] after retries (content=%r)",
@@ -147,7 +152,11 @@ async def extract_relations(
                 len(relations) - len(filtered),
             )
         return filtered
-    except LLMStructuredError:
+    except (LLMStructuredError, CircuitOpenError):
+        # Same fail-safe as entities: structured output exhausted its retries
+        # (LLMStructuredError) or the circuit breaker is open and
+        # chat_structured failed fast (CircuitOpenError).  Degrade to [] so the
+        # memory write proceeds.
         record_structured_failure("extraction_relations")
         logger.error(
             "Relation extraction degraded to [] after retries (summary=%r)",

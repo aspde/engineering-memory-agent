@@ -300,3 +300,169 @@ class TestFallbackEmbeddingProvider:
                 FakeEmbeddingProvider(dimension=4), FakeEmbeddingProvider(dimension=8)
             )
         assert "dimension mismatch" in caplog.text
+
+
+# ── Breaker isolation between primary and fallback ───────────────────
+# Regression: both OpenAIEmbeddingProvider paths used to hard-code the same
+# ``"embedding:openai"`` breaker name, so an open primary breaker fast-failed
+# the healthy fallback too — exactly when failover is supposed to engage.
+
+
+class TestOpenAIBreakerIsolation:
+    """Primary and fallback OpenAI embedding providers get distinct breakers."""
+
+    @staticmethod
+    def _status_error(status: int) -> RuntimeError:
+        err = RuntimeError(f"status {status}")
+        err.status_code = status  # is_retryable classifies by status_code
+        return err
+
+    @pytest.mark.asyncio
+    async def test_primary_breaker_open_does_not_block_fallback(
+        self, monkeypatch,
+    ) -> None:
+        from backend.shared import resilience
+        from backend.shared.config import config
+        from backend.shared.resilience import get_circuit_breaker
+
+        from backend.service.embedding_service import (
+            FallbackEmbeddingProvider,
+            OpenAIEmbeddingProvider,
+        )
+
+        try:
+            primary = OpenAIEmbeddingProvider(
+                api_key="sk-test",
+                base_url="https://api.primary.example/v1",
+                model="text-embedding-3-small",
+            )
+            fallback = OpenAIEmbeddingProvider(
+                api_key="sk-test",
+                base_url="https://api.fallback.example/v1",
+                model="text-embedding-3-small",
+            )
+
+            assert primary._breaker_name() != fallback._breaker_name()
+
+            # One retryable failure trips the primary's breaker (no retries).
+            monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
+            monkeypatch.setattr(config.resilience, "max_attempts", 1)
+            monkeypatch.setattr(config.resilience, "backoff_base", 0.01)
+            monkeypatch.setattr(config.resilience, "backoff_max", 0.05)
+
+            primary._async_client.embeddings.create = AsyncMock(
+                side_effect=self._status_error(429)
+            )
+            with pytest.raises(RuntimeError):
+                await primary.embed(["text"])
+            assert get_circuit_breaker(primary._breaker_name()).is_open
+
+            # The fallback carries its own closed breaker, so failover still
+            # succeeds — with the old shared "embedding:openai" name this call
+            # would have raised CircuitOpenError instead.
+            fallback._async_client.embeddings.create = AsyncMock(
+                return_value=_make_embedding_response([[0.5, 0.5]])
+            )
+            result = await FallbackEmbeddingProvider(primary, fallback).embed(
+                ["text"]
+            )
+            assert result == [[0.5, 0.5]]
+            assert not get_circuit_breaker(fallback._breaker_name()).is_open
+        finally:
+            resilience.reset_circuit_breakers()
+
+
+# ── Provider loading path: concurrent, idempotent, loop-friendly ─────
+# Regression: the singleton getter held a threading.Lock while loading the
+# model; a request arriving mid-warmup blocked the *event loop* on
+# Lock.acquire() and froze it for 30s+.  The async getter must await the load
+# in a background thread (loop stays responsive) and both getters must build
+# exactly once under concurrency.
+
+
+class TestEmbeddingProviderLoadingPath:
+    """Loading the singleton is idempotent under concurrency."""
+
+    @staticmethod
+    def _fake_build(calls: list, dimension: int, delay: float = 0.05):
+        import time
+
+        def _build(*args, **kwargs):
+            time.sleep(delay)  # simulate a slow BGE-M3 load
+            calls.append(1)
+            return FakeEmbeddingProvider(dimension=dimension)
+
+        return _build
+
+    def test_sync_getter_concurrent_load_builds_once(self, monkeypatch) -> None:
+        import threading
+
+        import backend.service.embedding_service as mod
+        from backend.shared.config import config
+
+        monkeypatch.setattr(mod, "_provider", None)
+        monkeypatch.setattr(config.embedding, "fallback_provider", "")
+        calls: list = []
+        monkeypatch.setattr(
+            mod,
+            "_build_embedding_provider",
+            self._fake_build(calls, dimension=config.embedding.dimension),
+        )
+
+        results: list = []
+        errors: list = []
+
+        def _call() -> None:
+            try:
+                results.append(mod.get_embedding_provider())
+            except Exception as exc:  # pragma: no cover - assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_call) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert not errors
+        assert len(calls) == 1  # built exactly once under contention
+        assert all(r is results[0] for r in results)  # one shared instance
+
+    @pytest.mark.asyncio
+    async def test_async_getter_awaits_load_without_blocking_loop(
+        self, monkeypatch,
+    ) -> None:
+        import backend.service.embedding_service as mod
+        from backend.shared.config import config
+
+        monkeypatch.setattr(mod, "_provider", None)
+        monkeypatch.setattr(config.embedding, "fallback_provider", "")
+        calls: list = []
+        monkeypatch.setattr(
+            mod,
+            "_build_embedding_provider",
+            self._fake_build(
+                calls, dimension=config.embedding.dimension, delay=0.15
+            ),
+        )
+
+        # A heartbeat task proves the event loop keeps scheduling while the
+        # model "loads": if the loader blocked the loop (threading.Lock held
+        # on the event loop thread), the heartbeat would never tick.
+        heartbeat: list[int] = []
+
+        async def _beat() -> None:
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                heartbeat.append(1)
+
+        beat_task = asyncio.create_task(_beat())
+        providers = await asyncio.gather(
+            *[mod.get_embedding_provider_async() for _ in range(5)]
+        )
+        await beat_task
+
+        assert len(calls) == 1  # concurrent async loaders share one build
+        assert all(p is providers[0] for p in providers)
+        assert len(heartbeat) > 0  # the event loop stayed responsive
+

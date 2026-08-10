@@ -610,44 +610,63 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                 #             final answer is generated, not replayed).
                 # With subgraphs=True + a mode list, events arrive as
                 # (namespace, mode, data) tuples.
-                async for _, mode, event_data in agent.astream(
+                stream = agent.astream(
                     graph_input,
                     config=run_config,
                     stream_mode=["updates", "custom"],
                     subgraphs=True,
-                ):
-                    # Client disconnected — abort so later tool/LLM steps
-                    # don't burn tokens for nobody.
-                    if await _is_disconnected(request):
-                        logger.info("SSE client disconnected mid-run — aborting agent stream")
-                        return
+                )
+                try:
+                    async for _, mode, event_data in stream:
+                        # Client disconnected — abort so later tool/LLM steps
+                        # don't burn tokens for nobody.
+                        if await _is_disconnected(request):
+                            logger.info(
+                                "SSE client disconnected mid-run — aborting agent stream"
+                            )
+                            # The checkpoint keeps the user's message; mark the
+                            # thread (same marker the timeout path writes) so a
+                            # retry reads as a continuation, not a second
+                            # identical user turn.
+                            await _mark_interrupted_thread(agent, req.thread_id)
+                            return
 
-                    if mode == "custom":
-                        # Token delta emitted by call_llm_node /
-                        # generate_final_node while the LLM generates.
-                        if isinstance(event_data, dict) and event_data.get("type") == "token":
-                            yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
-                        elif isinstance(event_data, dict) and event_data.get("type") == "error":
-                            # A node failed after streaming partial tokens — it
-                            # deliberately did NOT append the error to the answer,
-                            # so surface it as its own error event (the client
-                            # renders it separately instead of gluing it on).
-                            yield f"data: {json.dumps({'type': 'error', 'message': event_data.get('message', '生成出错，请稍后重试。')}, ensure_ascii=False)}\n\n"
-                        continue
+                        if mode == "custom":
+                            # Token delta emitted by call_llm_node /
+                            # generate_final_node while the LLM generates.
+                            if isinstance(event_data, dict) and event_data.get("type") == "token":
+                                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                            elif isinstance(event_data, dict) and event_data.get("type") == "error":
+                                # A node failed after streaming partial tokens — it
+                                # deliberately did NOT append the error to the answer,
+                                # so surface it as its own error event (the client
+                                # renders it separately instead of gluing it on).
+                                yield f"data: {json.dumps({'type': 'error', 'message': event_data.get('message', '生成出错，请稍后重试。')}, ensure_ascii=False)}\n\n"
+                            continue
 
-                    # mode == "updates": node completions + interrupts.
-                    # Check for interrupts
-                    if event_data and "__interrupt__" in event_data:
-                        interrupts = event_data["__interrupt__"]
-                        payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
-                        yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
-                        return
+                        # mode == "updates": node completions + interrupts.
+                        # Check for interrupts
+                        if event_data and "__interrupt__" in event_data:
+                            interrupts = event_data["__interrupt__"]
+                            payload = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+                            yield f"data: {json.dumps({'type': 'interrupt', 'data': payload}, ensure_ascii=False)}\n\n"
+                            return
 
-                    # Node completion events.  The final answer's tokens
-                    # already arrived via the custom stream while the LLM
-                    # was generating — nothing to replay here.
-                    for node_name, node_state in (event_data or {}).items():
-                        yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
+                        # Node completion events.  The final answer's tokens
+                        # already arrived via the custom stream while the LLM
+                        # was generating — nothing to replay here.
+                        for node_name, node_state in (event_data or {}).items():
+                            yield f"data: {json.dumps({'type': 'node', 'node': node_name}, ensure_ascii=False)}\n\n"
+                finally:
+                    # Close the graph stream on every exit — normal completion,
+                    # interrupt, client disconnect, or an internal error.  An
+                    # abandoned ``astream`` leaves LangGraph's streaming task
+                    # dangling ("Task was destroyed") and can leave a half-run
+                    # checkpoint that a retry reads as a duplicate user turn.
+                    try:
+                        await stream.aclose()
+                    except Exception:
+                        logger.debug("agent stream close failed", exc_info=True)
 
                 # Fetch the final graph state once: tool traces for the meta
                 # event, plus the ReAct loop length (agent_steps histogram) —

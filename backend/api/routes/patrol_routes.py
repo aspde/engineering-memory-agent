@@ -23,6 +23,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/patrol", tags=["patrol"])
 
+# Strong references to in-flight background patrol tasks.
+# ``asyncio.create_task`` keeps no strong reference of its own: the loop's
+# bookkeeping is weak, so a fire-and-forget manual patrol can be
+# garbage-collected at its first await — while it is still running the agent —
+# and the run silently vanishes (only a log line would remain).  Holding the
+# task here keeps it alive until it finishes; ``_run_and_capture`` drops it in
+# its ``finally``.  (Same pattern as ``_normalization_tasks`` in
+# ``backend/service/memory.py``.)
+_patrol_tasks: set[asyncio.Task] = set()
+
 
 # ── Request / Response models ──────────────────────────────────────────
 
@@ -96,15 +106,21 @@ async def trigger_patrol(body: PatrolTriggerRequest):
     patrol_id_holder: list[str] = []
 
     async def _run_and_capture() -> None:
-        pid = await run_patrol(
-            patrol_type=body.patrol_type,
-            trigger="manual",
-            system_prompt=prompt,
-            scope=body.scope,
-        )
-        patrol_id_holder.append(pid)
+        try:
+            pid = await run_patrol(
+                patrol_type=body.patrol_type,
+                trigger="manual",
+                system_prompt=prompt,
+                scope=body.scope,
+            )
+            patrol_id_holder.append(pid)
+        except Exception:
+            logger.exception("Manual patrol (%s) failed", body.patrol_type)
+        finally:
+            _patrol_tasks.discard(asyncio.current_task())
 
-    asyncio.create_task(_run_and_capture())
+    task = asyncio.create_task(_run_and_capture())
+    _patrol_tasks.add(task)
 
     # We don't have the patrol_id yet (run_patrol creates it internally).
     # Return a "scheduled" response and let the client poll /logs.

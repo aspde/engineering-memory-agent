@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from backend.db import get_session_factory
 from backend.service.chunk import chunk_text
+from backend.service.conflicts import persist_pending_conflict
 from backend.service.memory import write_memory
 from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
 
@@ -53,10 +54,12 @@ class MemoryWriteRequest(BaseModel):
 
 
 class MemoryWriteResponse(BaseModel):
-    id: str
+    id: str | None = None
     action: str  # "inserted" | "merged" | "conflict"
     summary: str
     entity_ids: list[str] = Field(default_factory=list)
+    conflict_id: str | None = None
+    existing_id: str | None = None
 
 
 class MemorySearchRequest(BaseModel):
@@ -160,15 +163,28 @@ async def memory_write(req: MemoryWriteRequest) -> MemoryWriteResponse:
     """
     try:
         result = await write_memory(req.content, source_type=req.source_type, metadata=req.metadata)
+        if result.get("action") == "conflict":
+            # A plain REST write has no interactive session to pause for HITL —
+            # persist the conflict to the pending_conflicts queue so a human can
+            # resolve it later (same non-interactive handling as the webhook
+            # path).  The conflict result carries no ``id`` (nothing was
+            # written), so the response exposes the queue row's ``conflict_id``
+            # instead of crashing on a missing ``id`` key.
+            pending = await persist_pending_conflict(req.source_type, result)
+            return MemoryWriteResponse(
+                action="conflict",
+                summary=result["summary"],
+                conflict_id=pending["id"],
+                existing_id=result.get("existing_id"),
+            )
+        return MemoryWriteResponse(
+            id=result["id"],
+            action=result["action"],
+            summary=result["summary"],
+            entity_ids=result.get("entity_ids", []),
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-    return MemoryWriteResponse(
-        id=result["id"],
-        action=result["action"],
-        summary=result["summary"],
-        entity_ids=result.get("entity_ids", []),
-    )
 
 
 @router.post("/memories/search", response_model=MemorySearchResponse)

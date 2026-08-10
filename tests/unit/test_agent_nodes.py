@@ -554,6 +554,75 @@ class TestGenerateFinalNode:
         assert "Engineering Memory Agent" in context_block[0]["content"]
 
     @pytest.mark.asyncio
+    async def test_final_synthesis_uses_patrol_max_tokens(self, monkeypatch) -> None:
+        """Patrol threads raise the final-synthesis output ceiling so a complete
+        report fits in one message — the interactive LLM_MAX_TOKENS truncates
+        once the model spends part of its budget on internal reasoning."""
+        import backend.agent.nodes as mod
+        from backend.shared.config import config, current_thread_id
+
+        captured: dict = {}
+
+        async def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            yield "Final answer."
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = _capture
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        token = current_thread_id.set("patrol-0000-0000-0000")
+        try:
+            await mod.generate_final_node(_make_state(messages=[
+                HumanMessage(content="run the patrol"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_1", "name": "search_memories_tool",
+                         "args": {"query": "x"}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(content="Found 1 memory", tool_call_id="call_1"),
+            ]))
+        finally:
+            current_thread_id.reset(token)
+
+        assert captured.get("max_tokens") == config.patrol_max_tokens
+
+    @pytest.mark.asyncio
+    async def test_final_synthesis_keeps_default_for_chat_thread(
+        self, monkeypatch
+    ) -> None:
+        """A normal chat thread keeps the provider's own output ceiling — no
+        max_tokens override is injected into the synthesis call."""
+        import backend.agent.nodes as mod
+
+        captured: dict = {}
+
+        async def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            yield "Final answer."
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = _capture
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        # No thread_id set → the contextvar default "" (a chat conversation).
+        await mod.generate_final_node(_make_state(messages=[
+            HumanMessage(content="hi"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call_1", "name": "search_memories_tool",
+                     "args": {"query": "x"}, "type": "tool_call"}
+                ],
+            ),
+            ToolMessage(content="Found 1 memory", tool_call_id="call_1"),
+        ]))
+
+        assert "max_tokens" not in captured
+
+    @pytest.mark.asyncio
     async def test_streams_error_text_when_final_call_fails(self, monkeypatch) -> None:
         """Synthesis failure must stream the error text to the client.
 
@@ -1059,6 +1128,154 @@ class TestCheckApprovalNode:
         # Approved sensitive call (call_a) plus the safe call (call_c);
         # call_b must NOT be executed.
         assert [tc["id"] for tc in exec_ai.tool_calls] == ["call_a", "call_c"]
+
+    @pytest.mark.asyncio
+    async def test_partial_approval_rejection_feedback_reaches_llm(
+        self, monkeypatch
+    ) -> None:
+        """A partially-approved batch must not swallow the rejected call's feedback.
+
+        Regression: the partial path replaced the tool-call AIMessage with one
+        holding only approved + safe calls, leaving the rejected call's
+        ``[REJECTED]`` ToolMessage an orphan — its ``tool_call_id`` is on no
+        retained AIMessage, so ``_messages_to_dicts`` dropped it and the next
+        ``call_llm`` never learned which write was rejected (it could silently
+        retry the very operation the human declined).
+        """
+        from langgraph.types import Command
+
+        from backend.agent.nodes import check_approval_node
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="remember A and B"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "call_a", "name": "write_memory_tool",
+                         "args": {"content": "A"}, "type": "tool_call"},
+                        {"id": "call_b", "name": "write_memory_tool",
+                         "args": {"content": "B"}, "type": "tool_call"},
+                        {"id": "call_c", "name": "search_memories_tool",
+                         "args": {"query": "x"}, "type": "tool_call"},
+                    ],
+                ),
+            ],
+        )
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(
+            mod,
+            "interrupt",
+            lambda payload: {
+                "calls": [
+                    {"id": "call_a", "tool_name": "write_memory_tool", "approved": True},
+                    {"id": "call_b", "tool_name": "write_memory_tool", "approved": False},
+                ],
+                "reason": "用户不想记录 B",
+            },
+        )
+
+        result = await check_approval_node(state)
+        assert isinstance(result, Command)
+        assert result.goto == "tools"
+
+        msgs = result.update["messages"]
+        exec_ai = next(m for m in msgs if isinstance(m, AIMessage))
+        rejected = [m for m in msgs if isinstance(m, ToolMessage)]
+        assert len(rejected) == 1
+        assert rejected[0].tool_call_id == "call_b"
+
+        # Simulate the post-ToolNode state the next call_llm serializes: the
+        # replacement AIMessage + the orphaned [REJECTED] ToolMessage + the
+        # approved call's result.  The rejection feedback must survive
+        # serialization so the LLM knows call_b was rejected.
+        serialized = _messages_to_dicts([
+            HumanMessage(content="remember A and B"),
+            exec_ai,
+            *rejected,
+            ToolMessage(content="written A", tool_call_id="call_a"),
+        ])
+        text = " ".join(str(d.get("content", "")) for d in serialized)
+        assert "REJECTED" in text
+        assert "用户不想记录 B" in text
+        # The approved tool still executes — its result stays in the payload.
+        assert {"role": "tool", "content": "written A", "tool_call_id": "call_a"} in serialized
+
+    @pytest.mark.asyncio
+    async def test_partial_approval_rejection_reaches_llm_through_graph(
+        self, monkeypatch
+    ) -> None:
+        """End-to-end: after a partial batch approval, the next tool-selection
+        LLM call receives the rejected call's feedback.
+
+        Regression: the partial path's ``[REJECTED]`` ToolMessage was dropped
+        as an orphan by ``_messages_to_dicts``, so the model that chose the
+        tool calls never learned which writes were declined — it could silently
+        retry the rejected write on the next ReAct step.
+        """
+        from langchain_core.tools import tool
+
+        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
+
+        @tool
+        async def write_memory_tool(content: str) -> str:
+            """Write a memory — name matches APPROVAL_REQUIRED_TOOLS."""
+            return f"Written: {content}"
+
+        @tool
+        async def search_memories_tool(query: str) -> str:
+            """Search memories — a safe (read-only) tool."""
+            return f"Found 1 result for {query}"
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
+                {"id": "call_a", "name": "write_memory_tool", "args": {"content": "A"}},
+                {"id": "call_b", "name": "write_memory_tool", "args": {"content": "B"}},
+                {"id": "call_c", "name": "search_memories_tool", "args": {"query": "x"}},
+            ]),
+            content_stream("done — no more tools"),
+        )
+        mock_provider.chat_stream = text_stream("Final answer.")
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from backend.agent.graph import build_agent_graph
+
+        graph = build_agent_graph(
+            [write_memory_tool, search_memories_tool], checkpointer=None
+        )
+
+        # First run pauses at check_approval with the batch payload.
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="remember A and B")]},
+            {"configurable": {"thread_id": "partial-approval-e2e"}},
+        )
+        assert "__interrupt__" in result
+        assert result["__interrupt__"][0].value["type"] == "batch"
+
+        # Resume approving only call_a — call_b is rejected.
+        result2 = await graph.ainvoke(
+            Command(resume={
+                "calls": [
+                    {"id": "call_a", "approved": True},
+                    {"id": "call_b", "approved": False},
+                ],
+                "reason": "用户不想记录 B",
+            }),
+            {"configurable": {"thread_id": "partial-approval-e2e"}},
+        )
+        assert result2.get("final_response") == "Final answer."
+
+        # The second tool-selection call must have seen the rejection note.
+        second_call = mock_provider.chat_raw_stream.call_args_list[1]
+        sent = second_call.kwargs["messages"]
+        sent_text = " ".join(str(m.get("content", "")) for m in sent)
+        assert "REJECTED" in sent_text
+        assert "用户不想记录 B" in sent_text
+        assert "write_memory_tool" in sent_text
 
     @pytest.mark.asyncio
     async def test_batch_all_rejected_injects_rejection_per_call(self, monkeypatch) -> None:

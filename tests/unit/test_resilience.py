@@ -191,12 +191,13 @@ class TestCircuitBreakerUnit:
         cb.record_failure()
         assert cb.is_open
         time.sleep(0.02)
-        cb.before_call()  # cooldown elapsed → the single recovery probe is admitted
+        probe_token = cb.before_call()  # cooldown elapsed → the single recovery probe is admitted
+        assert probe_token is not None
         # HALF-OPEN: the probe is in flight, so calls still fail fast…
         assert cb.is_open
         with pytest.raises(CircuitOpenError):
             cb.before_call()  # only one probe — every other caller fails fast
-        cb.record_success()  # probe succeeded → CLOSED
+        cb.record_success(probe_token)  # probe succeeded → CLOSED
         assert not cb.is_open
 
     def test_probe_failure_reopens_immediately(self) -> None:
@@ -230,6 +231,75 @@ class TestCircuitBreakerUnit:
         assert not cb.is_open
         cb.before_call()  # a fresh probe is admitted, not a CircuitOpenError
         assert cb.is_open
+
+    def test_stale_inflight_success_does_not_close_open_breaker(self) -> None:
+        """Regression: a call admitted *before* the breaker tripped and still
+        in flight when the breaker opens must not close it when it finally
+        succeeds.  Otherwise the breaker oscillates OPEN→CLOSED→OPEN — the
+        stale success re-closes it, a fresh burst of failures re-opens it —
+        while hammering a provider that is still down."""
+        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=60)
+        cb.before_call()  # call A admitted while CLOSED (token None)
+        cb.record_failure()  # another call trips the breaker → OPEN
+        assert cb.is_open
+        # Call A — in flight since before the trip — eventually succeeds.
+        cb.record_success()
+        assert cb.is_open  # must NOT re-close the open breaker
+        with pytest.raises(CircuitOpenError):
+            cb.before_call()  # still failing fast
+
+    def test_wrong_probe_token_does_not_close_half_open(self) -> None:
+        """A success carrying a token that does not match the admitted probe —
+        e.g. a stale caller racing with a stale token — must not close the
+        breaker; only the current probe's token may."""
+        import time
+
+        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
+        cb.record_failure()
+        time.sleep(0.02)
+        probe_token = cb.before_call()  # the admitted probe
+        assert probe_token is not None
+        cb.record_success(probe_token + 999)  # stale caller's wrong token
+        assert cb.is_open  # only the real probe's token may close it
+        cb.record_success(probe_token)
+        assert not cb.is_open
+
+    def test_only_admitted_probe_success_closes_half_open(self) -> None:
+        """The single half-open recovery probe — identified by the token
+        ``before_call`` returns — is the only call that can close the breaker;
+        a stale success from a call admitted before the trip (no token) must
+        leave it HALF-OPEN."""
+        import time
+
+        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
+        cb.before_call()  # call A admitted while CLOSED (token None)
+        cb.record_failure()  # trip → OPEN
+        time.sleep(0.02)  # cooldown elapses
+        probe_token = cb.before_call()  # probe B admitted (token set)
+        assert probe_token is not None
+        assert cb.is_open  # HALF-OPEN: probe B in flight
+        cb.record_success()  # stale call A succeeds with no token
+        assert cb.is_open  # must stay HALF-OPEN — probe B still the decider
+        cb.record_success(probe_token)  # the admitted probe succeeds → CLOSED
+        assert not cb.is_open
+
+    def test_stale_probe_success_with_old_token_does_not_close(self) -> None:
+        """A probe from an earlier half-open cycle that went stale must not
+        close the breaker when it eventually resolves — only the *current*
+        probe's token may close it."""
+        import time
+
+        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
+        cb.record_failure()
+        time.sleep(0.02)
+        old_token = cb.before_call()  # probe 1 admitted
+        time.sleep(0.02)  # probe 1 never resolves → stale
+        new_token = cb.before_call()  # fresh probe 2 admitted
+        assert new_token != old_token
+        cb.record_success(old_token)  # stale probe 1 eventually succeeds
+        assert cb.is_open  # must stay HALF-OPEN — probe 2 still in flight
+        cb.record_success(new_token)  # probe 2 succeeds → CLOSED
+        assert not cb.is_open
 
 
 # ── Retry behavior through the providers ─────────────────────────────

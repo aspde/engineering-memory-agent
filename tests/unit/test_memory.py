@@ -630,6 +630,52 @@ class TestWriteMemoryFanOut:
         # The merge writes B's id onto the merged memory's meta (fan-out).
         assert captured["metadata"]["supplements"] == [b["id"]]
 
+    @pytest.mark.asyncio
+    async def test_conflict_band_candidate_no_longer_flagged_unchecked(self) -> None:
+        """A supplement candidate sitting in the conflict-detection band is no
+        longer tagged with the dead ``supplements_unchecked`` meta marker.
+
+        Regression: that field was written but never read anywhere (backend +
+        tests) — a 2nd/3rd near-relative was flagged-and-ignored instead of
+        vetted or honestly documented.  Only the *closest* match runs
+        ``_detect_conflict``; band candidates ride along as supplements and the
+        gap is documented in code, not silently flagged.
+        """
+        from backend.service.memory import write_memory
+
+        a = {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "summary": "A"}
+        b = {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "summary": "B"}
+        similar = [(0.70, a), (0.80, b)]  # closest below band; b in [0.75, 0.92)
+
+        async def _fake_find_similar(embedding, session_factory):
+            return similar
+
+        captured = {}
+
+        async def _fake_supplement(existing, extracted, embedding, source_type, metadata, content_hash):
+            captured["existing_id"] = str(existing["id"])
+            captured["metadata"] = metadata
+            return {"id": "new-id", "action": "inserted", "summary": "New summary."}
+
+        with (
+            patch("backend.service.memory._find_by_content_hash", AsyncMock(return_value=None)),
+            patch(
+                "backend.service.memory.extract_memory",
+                AsyncMock(return_value={"summary": "New summary.", "entities": [], "relations": []}),
+            ),
+            patch("backend.service.memory.get_embedding_provider", return_value=AsyncMock()),
+            patch("backend.service.memory._find_similar", _fake_find_similar),
+            patch("backend.service.memory._supplement_memory", _fake_supplement),
+        ):
+            result = await write_memory("new content", source_type="conversation")
+
+        assert result["action"] == "inserted"
+        assert captured["existing_id"] == a["id"]
+        # The band candidate still rides along as a supplement…
+        assert captured["metadata"]["supplements"] == [b["id"]]
+        # …but the dead marker is gone from the written meta.
+        assert "supplements_unchecked" not in captured["metadata"]
+
 
 class TestSupplementMemoryFanOut:
     @pytest.mark.asyncio
