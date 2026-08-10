@@ -11,7 +11,16 @@ from backend.service.decay import compute_decay_factor
 
 class TestComputeDecay:
     def test_fresh_memory_returns_one(self) -> None:
+        # No recalled_at AND no created_at → no elapsed time → factor 1.0.
         assert compute_decay_factor(None, 0) == 1.0
+
+    def test_never_recalled_but_old_decays(self) -> None:
+        # recalled_at is NULL (never searched) but created_at is old — the
+        # memory must decay by age, otherwise stale-but-unused entries would
+        # keep full rank forever ("never recalled" ≠ "never forgets").
+        old = datetime.now(timezone.utc) - timedelta(hours=240)
+        factor = compute_decay_factor(None, 0, created_at=old)
+        assert factor < 0.1
 
     def test_recent_recall_near_one(self) -> None:
         just_now = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -106,8 +115,14 @@ class TestSearchMemoriesLiveDecay:
         assert 0.0 < results[0]["decay_factor"] <= 1.0
 
     @pytest.mark.asyncio
-    async def test_never_recalled_memory_keeps_full_weight(self) -> None:
-        """recalled_at IS NULL → decay_factor = 1.0 (no time has passed)."""
+    async def test_never_recalled_fresh_memory_keeps_full_weight(self) -> None:
+        """recalled_at IS NULL but created_at is fresh → decay_factor ≈ 1.0.
+
+        A just-inserted memory that hasn't been searched yet has nothing to
+        decay: the time base falls back to ``created_at`` (≈ now), so the
+        factor stays near full retention.  (An *old* never-recalled memory
+        decays by age — covered by ``test_never_recalled_old_memory_decays``.)
+        """
         from sqlalchemy import text
 
         from backend.db import get_session_factory
@@ -130,7 +145,41 @@ class TestSearchMemoriesLiveDecay:
         results = await search_memories(self._QUERY, top_k=1, threshold=0.5)
 
         assert results and results[0]["summary"] == "null-recall"
-        assert results[0]["decay_factor"] == 1.0
+        assert results[0]["decay_factor"] > 0.99
+
+    @pytest.mark.asyncio
+    async def test_never_recalled_old_memory_decays(self) -> None:
+        """recalled_at IS NULL and created_at is old → decay_factor < 1.0.
+
+        The "natural sink" property: a memory written long ago that was never
+        retrieved must not out-rank a fresh one just because it was never
+        searched.  Time base falls back to ``created_at`` so age still decays
+        it.
+        """
+        from sqlalchemy import text
+
+        from backend.db import get_session_factory
+        from backend.db.schema import init_db
+        from backend.service.decay import search_memories
+
+        await init_db()
+        async with get_session_factory()() as session:
+            await session.execute(text("DELETE FROM memories WHERE content_hash LIKE 'h-%'"))
+            await session.execute(
+                text(
+                    "INSERT INTO memories (source_type, summary, embedding, "
+                    "recalled_at, recall_count, content_hash, created_at) "
+                    "VALUES ('test', 'old-null-recall', CAST(:vec AS vector), "
+                    "NULL, 0, 'h-old-null', now() - interval '10 days')"
+                ),
+                {"vec": self._VEC},
+            )
+            await session.commit()
+
+        results = await search_memories(self._QUERY, top_k=1, threshold=0.5)
+
+        assert results and results[0]["summary"] == "old-null-recall"
+        assert results[0]["decay_factor"] < 0.1
 
 
 class TestUpdateDecayBatchLive:

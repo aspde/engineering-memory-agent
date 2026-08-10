@@ -31,6 +31,18 @@ _ALLOWED_FILTER_COLS = {"document_id", "chunk_index"}
 # Shared by every read path so the threshold stays tunable in one place.
 _RERANK_FLOOR = 0.15
 
+# Memory-path cross-encoder rerank is *bounded*: only this many top decay-
+# ranked candidates are re-scored.  The memory candidate list is already
+# similarity-gated (search_memories threshold=0.3), so the cross-encoder's
+# job is to break ties inside the competition zone — the top few candidates
+# that share surface terms with the query — not to filter "irrelevant" ones.
+# Bounding beats scoring the whole list on the hard-negative eval: pass@5
+# 59.3%→81.5% with only 3 pairs scored (vs 77.8% and 20 pairs for full rerank),
+# and it keeps every candidate in the ranked list (no floor-dropping, which
+# had falsely evicted a relevant memory).  See tests/eval/reports/
+# hard_negative_report.md for the A/B numbers.
+_MEMORY_BOUNDED_RERANK_N = 3
+
 # Recall-stage floor for the vector recall in ``retrieve`` / ``retrieve_hybrid``:
 # a low, conservative cutoff that drops obviously-irrelevant garbage queries
 # before ranking/reranking.  Deliberately below ``_RERANK_FLOOR`` (0.15) — the
@@ -743,9 +755,19 @@ async def query_memories(
 
     if use_llm_rerank or use_cross_encoder:
         reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
-        ranked = await reranker(
-            query, [c["summary"] for c in candidates], top_k=top_k
-        )
+        # Bounded cross-encoder: score only the top _MEMORY_BOUNDED_RERANK_N
+        # decay-ranked candidates (the competition zone).  LLM rerank keeps
+        # the full candidate list — it is an explicit opt-in where scoring all
+        # is the point.
+        if use_cross_encoder:
+            zone = candidates[:_MEMORY_BOUNDED_RERANK_N]
+            ranked = await reranker(
+                query, [c["summary"] for c in zone], top_k=len(zone)
+            )
+        else:
+            ranked = await reranker(
+                query, [c["summary"] for c in candidates], top_k=top_k
+            )
         t_rerank = time.perf_counter()
 
         if use_llm_rerank and not ranked:
@@ -766,6 +788,32 @@ async def query_memories(
             )
             t_rerank = t_search
             surviving = _decay_ranking()
+        elif use_cross_encoder:
+            # Bounded cross-encoder rerank: candidates arrive from
+            # search_memories already ordered by decay-weighted similarity,
+            # so the competition zone is the top few.  Re-score only those
+            # ``_MEMORY_BOUNDED_RERANK_N`` (the ones that actually share
+            # surface terms with the query) and append the rest in their
+            # original order.  No _RERANK_FLOOR here: these candidates passed
+            # search_memories' threshold=0.3 similarity gate already — the
+            # cross-encoder re-ranks the zone, it does not filter it (a floor
+            # had falsely evicted a relevant memory, the hard-negative q022
+            # case).  ``ranked`` holds (zone_idx, score) pairs — zone indices
+            # are relative to the bounded candidate slice, which is a prefix
+            # of candidates, so zone index == candidate index.
+            surviving = [
+                (idx, score) for idx, score in ranked
+            ]
+            # The rest keep their decay-weighted order.
+            surviving.extend(
+                (idx, float(candidates[idx]["weighted_score"]))
+                for idx in range(_MEMORY_BOUNDED_RERANK_N, len(candidates))
+            )
+            # Truncate to top_k: the zone's cross-encoder scores sort first,
+            # then the untouched tail in decay order — the top_k slice is the
+            # final ranking.  (The default/LLM paths also cap at top_k via the
+            # reranker or _decay_ranking's slice; this branch must match.)
+            del surviving[top_k:]
         else:
             # Drop results where the reranker score is below the minimum threshold —
             # this prevents irrelevant results from appearing when no real match exists.

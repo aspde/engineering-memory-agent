@@ -726,20 +726,80 @@ class TestQueryMemoriesDecayBatch:
         assert results[0]["decay_factor"] == pytest.approx(0.8)
 
     @pytest.mark.asyncio
-    async def test_floor_filters_before_decay(self, monkeypatch) -> None:
-        """Scores below the rerank floor are dropped before the decay batch,
-        so they never consume an update.  The floor only applies on the
-        explicit cross-encoder path."""
+    async def test_bounded_ce_does_not_floor_drop(self, monkeypatch) -> None:
+        """Memory-path cross-encoder rerank is bounded and never floor-drops.
+
+        Candidates arrived through search_memories' threshold=0.3 gate, so the
+        cross-encoder re-ranks the competition zone instead of filtering it.
+        A low zone score must NOT evict the candidate (the old _RERANK_FLOOR
+        had falsely dropped a relevant memory — the hard-negative q022 case).
+        """
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
 
         cands = [self._candidate("m1"), self._candidate("m2")]
-        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.1)])  # m2 below floor
+        # Both are inside the zone (2 candidates, N=3).  m2 scores far below
+        # _RERANK_FLOOR but must survive — bounded rerank ranks, it filters not.
+        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.02)])
 
         results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
-        assert [r["id"] for r in results] == ["m1"]
-        decay_mod.update_decay_batch.assert_awaited_once_with(["m1"])
+        assert [r["id"] for r in results] == ["m1", "m2"]
+
+    @pytest.mark.asyncio
+    async def test_bounded_ce_only_reranks_top_n(self, monkeypatch) -> None:
+        """Only the top _MEMORY_BOUNDED_RERANK_N candidates are cross-encoder
+        scored; the rest keep their decay-weighted order untouched."""
+        from unittest.mock import AsyncMock
+
+        from backend.service import retrieval as mod
+
+        cands = [
+            self._candidate("m1", 0.9),
+            self._candidate("m2", 0.8),
+            self._candidate("m3", 0.7),
+            self._candidate("m4", 0.6),  # outside the zone — not CE-scored
+            self._candidate("m5", 0.5),  # outside the zone — not CE-scored
+        ]
+        # Zone = m1, m2, m3 (indices 0,1,2).  CE re-ranks them, e.g. m3 wins.
+        self._patch(
+            monkeypatch,
+            cands,
+            [],
+            decay_map={f"m{i}": 0.9 for i in range(1, 6)},
+        )
+        rerank_mock = AsyncMock(
+            return_value=[(2, 0.95), (0, 0.9), (1, 0.85)]
+        )
+        monkeypatch.setattr(
+            "backend.service.rerank.rerank_cross_encoder", rerank_mock
+        )
+
+        results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
+
+        # CE sees ONLY the zone summaries (m1, m2, m3), not the full list.
+        call_args = rerank_mock.await_args.args
+        assert call_args[1] == ["summary m1", "summary m2", "summary m3"]
+        # Zone re-ranked by CE score; tail (m4, m5) in decay order.
+        assert [r["id"] for r in results] == ["m3", "m1", "m2", "m4", "m5"]
+
+    @pytest.mark.asyncio
+    async def test_bounded_ce_truncates_to_top_k(self, monkeypatch) -> None:
+        """bounded-CE result is capped at top_k like the other paths."""
+        from backend.service import retrieval as mod
+
+        cands = [
+            self._candidate(f"m{i}", (5 - i) * 0.1) for i in range(1, 6)
+        ]  # m1..m5, decay-descending
+        self._patch(
+            monkeypatch,
+            cands,
+            [(0, 0.9), (1, 0.8), (2, 0.7)],
+        )
+
+        results = await mod.query_memories("q", top_k=3, use_cross_encoder=True)
+
+        assert len(results) == 3
+        assert [r["id"] for r in results] == ["m1", "m2", "m3"]
 
     @pytest.mark.asyncio
     async def test_llm_rerank_total_failure_falls_back_to_decay_weighted(self, monkeypatch) -> None:

@@ -6,7 +6,10 @@ last recall.  More frequent recalls slow the decay; long gaps accelerate it.
 Formula (simplified Ebbinghaus):
     R = e^(-t / S)
 where:
-    t = hours since last recall
+    t = hours since the time base
+        = now() - recalled_at if the memory was ever recalled
+          else now() - created_at (never-recalled memories decay by age,
+          so stale-but-unused entries sink instead of keeping 1.0 forever)
     S = relative strength = 1 + (recall_count + 1) * 2
     recall_count = the stored count BEFORE this recall; the ``+ 1`` yields
                    the count AFTER the recall — all three call sites
@@ -33,6 +36,7 @@ def compute_decay_factor(
     recall_count: int,
     *,
     now: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> float:
     """Compute the current decay factor for a memory.
 
@@ -47,18 +51,27 @@ def compute_decay_factor(
     so the mirror is compared against the SQL formula at the *same* instant
     instead of a skewed local clock.
 
+    Time base: ``recalled_at`` when the memory was ever recalled, else
+    ``created_at``.  Falling back to ``created_at`` is deliberate — a memory
+    written long ago that was never retrieved must decay like any other idle
+    memory (otherwise "never recalled" would mean "never forgets", and stale
+    entries would keep full rank forever).  When both are ``None`` (brand-new
+    row with no time info in this call), there is no elapsed time and the
+    factor is 1.0.
+
     Clock assumption: the application clock is assumed to be consistent with
     the database clock.  As a defensive measure, elapsed time is clamped to
     zero when it would come out negative (app clock lagging the DB), so a
     skewed wall clock can never push the factor above 1.0 or overflow
     ``math.exp``.  The decay formula itself is unchanged.
     """
-    if recalled_at is None:
-        return 1.0  # Just inserted, no time has passed yet
+    base = recalled_at if recalled_at is not None else created_at
+    if base is None:
+        return 1.0  # No time reference — nothing to decay against yet
 
     if now is None:
         now = datetime.now(timezone.utc)
-    hours_elapsed = (now - recalled_at).total_seconds() / 3600.0
+    hours_elapsed = (now - base).total_seconds() / 3600.0
     # Defensive: the application clock is assumed to be consistent with the
     # database clock (see search_memories).  If the app clock lags the DB's,
     # a just-written ``recalled_at`` looks like the future and elapsed goes
@@ -90,8 +103,10 @@ async def update_decay_batch(memory_ids: list[Any]) -> dict[str, float]:
     Returns ``{str(memory_id): new_decay_factor}``.  Ids whose row is missing
     are absent from the result — callers fall back to the factor they already
     hold.  A never-recalled row (``recalled_at IS NULL``) is still counted:
-    ``COALESCE`` makes its elapsed time 0, so the first recall is recorded
-    with factor 1.0 (matching the old per-memory ``update_decay``).
+    ``COALESCE`` falls back to ``created_at`` as the time base, so a memory
+    written long ago that was never searched keeps its age-based decay on
+    first recall (matching the live factor ``search_memories`` computes for
+    it) rather than being "reset to fresh" at 1.0.
     """
     if not memory_ids:
         return {}
@@ -105,7 +120,7 @@ async def update_decay_batch(memory_ids: list[Any]) -> dict[str, float]:
                 SET recall_count = recall_count + 1,
                     recalled_at = NOW(),
                     decay_factor = round(
-                        exp(-EXTRACT(EPOCH FROM (NOW() - COALESCE(recalled_at, NOW())))
+                        exp(-EXTRACT(EPOCH FROM (NOW() - COALESCE(recalled_at, created_at)))
                             / 3600.0
                             / (1.0 + (recall_count + 1) * 2.0)
                         )::numeric, 4
@@ -185,10 +200,13 @@ async def search_memories(
     now = datetime.now(timezone.utc)
     for r in rows:
         recalled_at = r.pop("recalled_at")
+        created_at = r.pop("created_at")
         # Post-recall convention: the count is about to be bumped by this
         # search's downstream update_decay_batch, so add 1 before mirroring.
+        # Time base falls back to created_at for never-recalled memories, so
+        # an old-but-never-searched memory decays instead of keeping 1.0.
         r["decay_factor"] = compute_decay_factor(
-            recalled_at, r["recall_count"] + 1, now=now
+            recalled_at, r["recall_count"] + 1, now=now, created_at=created_at
         )
         r["weighted_score"] = r.pop("similarity") * r["decay_factor"]
 
