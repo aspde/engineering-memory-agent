@@ -24,6 +24,42 @@ logger = logging.getLogger(__name__)
 _MAX_DIFF_BYTES = 16_384
 
 
+def _check_repo_allowed(repo_path: Path) -> None:
+    """Reject ingesting a repository outside the configured allow-list.
+
+    ``ingest_git_repo_tool`` is approval-gated, but the HITL gate is not the
+    only defense — a prompt-injected tool call (or a mis-guided agent) must
+    not be able to read an arbitrary local git repository.  Empty allow-list
+    (the default) fails closed: nothing is readable until ``REPO_ALLOW_ROOT``
+    is set.  ``repo_path`` is resolved (symlinks, ``..``) before the check so
+    ``/allowed/../etc/repo`` cannot sneak past a root boundary.
+    """
+    from backend.shared.config import config
+
+    allow_roots = config.repo_allow_roots
+    if not allow_roots:
+        raise ValueError(
+            "Git ingestion is disabled: no REPO_ALLOW_ROOT configured. "
+            "Set REPO_ALLOW_ROOT to the directory(ies) whose git "
+            "repositories may be ingested."
+        )
+
+    resolved = repo_path.resolve()
+    for root in allow_roots:
+        root_path = Path(root).expanduser().resolve()
+        try:
+            resolved.relative_to(root_path)
+        except ValueError:
+            continue
+        return  # inside an allowed root
+
+    raise ValueError(
+        f"Repository {resolved} is outside the allowed ingestion roots "
+        f"({', '.join(allow_roots)}). Add its parent to REPO_ALLOW_ROOT "
+        "to allow ingestion."
+    )
+
+
 async def ingest_repo(
     repo_path: str | Path,
     *,
@@ -39,8 +75,15 @@ async def ingest_repo(
 
     Returns:
         List of ``write_memory()`` result dicts.
+
+    Raises:
+        ValueError: if *repo_path* is outside ``config.repo_allow_roots``
+            (the ingestion sandbox), or if no allow-list is configured.
+        FileNotFoundError: if *repo_path* is not a git repository.
     """
-    repo_path = Path(repo_path).expanduser().resolve()
+    repo_path = Path(repo_path).expanduser()
+    _check_repo_allowed(repo_path)
+    repo_path = repo_path.resolve()
     if not (repo_path / ".git").exists():
         raise FileNotFoundError(f"Not a git repository: {repo_path}")
 

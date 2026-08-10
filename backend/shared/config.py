@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextvars
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -260,6 +261,20 @@ class AppConfig:
     memory_enabled: bool = field(
         default_factory=lambda: os.getenv("MEMORY_ENABLED", "true").lower() == "true"
     )
+    # Git repository ingestion allow-list — only repositories under one of
+    # these roots may be read by ``ingest_git_repo_tool`` (comma-separated
+    # ``REPO_ALLOW_ROOT``).  Empty (the default) fails closed: every ingest is
+    # rejected with a clear message until at least one root is configured.
+    # This is the sandbox that keeps a prompt-injected tool call — or a
+    # mis-guided agent — from reading an arbitrary local git repository.  The
+    # tool is approval-gated, but the HITL gate must not be the only defense.
+    repo_allow_roots: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            p.strip()
+            for p in os.getenv("REPO_ALLOW_ROOT", "").split(",")
+            if p.strip()
+        )
+    )
     # When enabled, generate_final_node automatically extracts substantive
     # user turns into memories (unless the agent already wrote this turn).
     # Enabled by default — auto memory is the intended steady-state; set
@@ -438,6 +453,7 @@ def validate_config() -> list[str]:
     # ``wait_exponential_jitter`` caps every wait at ``backoff_max``
     # (``max(0, min(initial * exp, max))``), so base > max is harmless — it
     # just means every retry already waits the full ``backoff_max``.
+
     if config.resilience.max_attempts < 1:
         problems.append(f"LLM_RETRY_MAX_ATTEMPTS={config.resilience.max_attempts} must be >= 1")
     if config.resilience.backoff_base < 0:
@@ -623,5 +639,16 @@ def validate_config() -> list[str]:
         problems.append(
             "LLM_API_KEY is empty — set it in .env (or run tests with APP_ENV=test)"
         )
+
+    # Git-ingestion sandbox — a configured allow-root that does not exist on
+    # this host means every ingest would be rejected (or, worse, silently
+    # resolve against a mount that isn't there).  Warn early instead of
+    # failing the first tool call.
+    if config.repo_allow_roots:
+        for root in config.repo_allow_roots:
+            if not Path(root).expanduser().is_dir():
+                problems.append(
+                    f"REPO_ALLOW_ROOT entry {root!r} is not an existing directory"
+                )
 
     return problems

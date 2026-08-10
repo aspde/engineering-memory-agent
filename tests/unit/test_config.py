@@ -46,6 +46,23 @@ class TestValidateConfig:
         problems = config_mod.validate_config()
         assert any("PATROL_MAX_TOKENS" in p for p in problems)
 
+    def test_repo_allow_root_must_exist(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(
+            config_mod.config, "repo_allow_roots", ("/nonexistent/root",)
+        )
+
+        problems = config_mod.validate_config()
+        assert any("REPO_ALLOW_ROOT" in p for p in problems)
+
+    def test_repo_allow_root_valid_dir_passes(self, monkeypatch, tmp_path) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(config_mod.config, "repo_allow_roots", (str(tmp_path),))
+
+        assert config_mod.validate_config() == []
+
     def test_llm_api_key_required_outside_test(self, monkeypatch) -> None:
         _valid_patrol(monkeypatch)
         monkeypatch.setattr(config_mod.config, "app_env", "development")
