@@ -115,6 +115,7 @@ def record_call(
     status: str = "success",
     error: str | None = None,
     response_text: str = "",
+    attempts: int | None = None,
 ) -> None:
     """Record one LLM call observation into the buffer + structured log.
 
@@ -122,6 +123,12 @@ def record_call(
     token usage is missing (``total_tokens=0``) so the call count and latency
     are still observable.  When ``config.usage_enabled`` is false this is a
     no-op (the in-memory ``/api/agent/usage`` counters are unaffected).
+
+    *attempts* is how many times the provider was actually hit before this
+    outcome — 1 for a clean first try, >1 when tenacity retried transient
+    failures before the success (or the final failure).  None (the default)
+    leaves the ``attempts`` column NULL: non-retryable call paths and rows
+    written before the column existed must not get a fabricated value.
     """
     try:
         (
@@ -183,6 +190,7 @@ def record_call(
             "response_chars": len(str(response_text)),
             "prompt_sample": prompt_sample,
             "response_sample": response_sample,
+            "attempts": attempts,
         }
 
         with _pending_lock:
@@ -197,7 +205,7 @@ def record_call(
         logger.info(
             "llm_call trace=%s thread=%s scenario=%s provider=%s model=%s "
             "in=%d out=%d total=%d cache_read=%d cache_creation=%d "
-            "latency_ms=%d status=%s",
+            "latency_ms=%d status=%s attempts=%s",
             row["trace_id"],
             row["thread_id"],
             scenario,
@@ -210,6 +218,7 @@ def record_call(
             cache_creation_tokens,
             latency_ms,
             status,
+            attempts,
         )
     except Exception:
         logger.exception("Failed to record LLM usage observation (swallowed)")
@@ -300,13 +309,13 @@ async def flush_usage_buffer() -> int:
             input_tokens, output_tokens, total_tokens, latency_ms,
             cache_read_tokens, cache_creation_tokens,
             status, error, prompt_chars, response_chars,
-            prompt_sample, response_sample
+            prompt_sample, response_sample, attempts
         ) VALUES (
             :trace_id, :thread_id, :scenario, :provider, :model,
             :input_tokens, :output_tokens, :total_tokens, :latency_ms,
             :cache_read_tokens, :cache_creation_tokens,
             :status, :error, :prompt_chars, :response_chars,
-            :prompt_sample, :response_sample
+            :prompt_sample, :response_sample, :attempts
         )"""
     )
     try:

@@ -14,6 +14,15 @@ from backend.shared.metrics import (
     record_usage,
     reset_token_usage,
 )
+from backend.service.usage import pending_rows, reset_usage_buffer
+
+
+@pytest.fixture(autouse=True)
+def _clean_usage_buffer() -> None:
+    """Isolate the usage recording buffer between tests (mirrors test_usage.py)."""
+    reset_usage_buffer()
+    yield
+    reset_usage_buffer()
 
 
 class FakeLLMProvider(LLMProvider):
@@ -1217,6 +1226,125 @@ class TestSdkRetryDisabled:
         AnthropicProvider(api_key="k", model="claude-test")
         assert captured["async"]["max_retries"] == 0
         assert captured["sync"]["max_retries"] == 0
+
+
+class TestAttemptAccounting:
+    """Transient provider failures swallowed by tenacity must be visible in
+    ``llm_usage`` accounting: the ``attempts`` column counts how many times the
+    provider was actually hit before this row's outcome — a success after two
+    retried 429s records attempts=3, never a silent 1."""
+
+    class _RateLimit(Exception):
+        status_code = 429
+
+    @pytest.fixture(autouse=True)
+    def _isolate_breakers(self) -> None:
+        """Fresh breaker registry per test so the retried-failure counters in
+        this class never leak into (or out of) other breaker tests."""
+        from backend.shared import resilience
+
+        resilience.reset_circuit_breakers()
+        yield
+        resilience.reset_circuit_breakers()
+
+    @staticmethod
+    def _make_openai_provider(monkeypatch: pytest.MonkeyPatch):
+        """Zero-out tenacity's backoff so the retry tests run instantly."""
+        from backend.service.llm_service import OpenAICompatibleProvider
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config.resilience, "backoff_base", 0.0)
+        monkeypatch.setattr(config.resilience, "backoff_max", 0.0)
+        return OpenAICompatibleProvider(
+            api_key="k", base_url="https://example.com/v1", model="test-model"
+        )
+
+    @pytest.mark.asyncio
+    async def test_success_after_retry_records_attempts(self, monkeypatch) -> None:
+        provider = self._make_openai_provider(monkeypatch)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="hi back"))]
+        resp.usage = SimpleNamespace(prompt_tokens=3, completion_tokens=2)
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = [
+            self._RateLimit("slow down"), resp
+        ]
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        out = await provider.chat(
+            [{"role": "user", "content": "hi"}], scenario="agent_chat"
+        )
+        assert out == "hi back"
+        # one 429 swallowed by tenacity, then the real success
+        assert mock_client.chat.completions.create.await_count == 2
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "success"
+        assert rows[0]["attempts"] == 2
+
+    @pytest.mark.asyncio
+    async def test_clean_success_records_attempts_one(self, monkeypatch) -> None:
+        provider = self._make_openai_provider(monkeypatch)
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content="hi back"))]
+        resp.usage = None
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.return_value = resp
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        await provider.chat([{"role": "user", "content": "hi"}], scenario="agent_chat")
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["attempts"] == 1
+
+    @pytest.mark.asyncio
+    async def test_final_failure_records_total_attempts(self, monkeypatch) -> None:
+        """A call that exhausts tenacity's retries records how many times the
+        provider was actually hit before giving up (max_attempts=3 → 3)."""
+        provider = self._make_openai_provider(monkeypatch)
+        mock_client = AsyncMock()
+        mock_client.chat.completions.create.side_effect = self._RateLimit(
+            "always 429"
+        )
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        with pytest.raises(Exception):
+            await provider.chat(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        assert mock_client.chat.completions.create.await_count == 3
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "error"
+        assert rows[0]["attempts"] == 3
+
+    @pytest.mark.asyncio
+    async def test_stream_connect_retry_records_attempts(self, monkeypatch) -> None:
+        """The streaming path counts connection-establishment retries: a 429
+        at connect time is retried before the stream exists, and the eventual
+        success row must reflect both attempts."""
+        provider = self._make_openai_provider(monkeypatch)
+        stream = _FakeAsyncStream(
+            [_openai_chunk("hello", usage=None)],
+            usage=SimpleNamespace(total_tokens=42),
+        )
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[self._RateLimit("slow down"), stream]
+        )
+        provider._async_client = mock_client  # type: ignore[assignment]
+
+        events = [
+            event
+            async for event in provider.chat_raw_stream(
+                [{"role": "user", "content": "hi"}], scenario="agent_chat"
+            )
+        ]
+        assert events == [{"type": "content", "text": "hello"}]
+        rows = pending_rows()
+        assert len(rows) == 1
+        assert rows[0]["status"] == "success"
+        assert rows[0]["attempts"] == 2
 
 
 class TestGetJudgeProvider:

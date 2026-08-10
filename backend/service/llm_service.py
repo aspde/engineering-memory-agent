@@ -84,8 +84,11 @@ class OpenAICompatibleProvider(LLMProvider):
         ctx = begin_call(messages)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
+        attempts = 0  # provider hits before this outcome (tenacity retries)
 
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return await self._async_client.chat.completions.create(
                 model=self._model,
                 messages=messages,  # type: ignore[arg-type]
@@ -96,14 +99,16 @@ class OpenAICompatibleProvider(LLMProvider):
             response = await call_with_resilience(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
         text = response.choices[0].message.content or ""
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return text
 
@@ -125,14 +130,19 @@ class OpenAICompatibleProvider(LLMProvider):
         if tools:
             create_kwargs["tools"] = tools
 
+        attempts = 0  # provider hits before this outcome (tenacity retries)
+
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
 
         try:
             response = await call_with_resilience(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
@@ -162,6 +172,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self._record(
             ctx, scenario=scenario, usage=usage,
             response_text=str(msg.content or ""),
+            attempts=attempts,
         )
         return result
 
@@ -170,8 +181,11 @@ class OpenAICompatibleProvider(LLMProvider):
         ctx = begin_call(messages)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
+        attempts = 0  # provider hits before this outcome (tenacity retries)
 
         def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return self._sync_client.chat.completions.create(
                 model=self._model,
                 messages=messages,  # type: ignore[arg-type]
@@ -182,14 +196,16 @@ class OpenAICompatibleProvider(LLMProvider):
             response = call_with_resilience_sync(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
         text = response.choices[0].message.content or ""
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return text
 
@@ -222,8 +238,11 @@ class OpenAICompatibleProvider(LLMProvider):
         ctx = begin_call(messages)
         kwargs.setdefault("temperature", self._temperature)
         kwargs.setdefault("max_tokens", self._max_tokens)
+        attempts = 0  # provider hits before each recorded outcome
 
         async def _op(use_json_format: bool = True) -> Any:
+            nonlocal attempts
+            attempts += 1
             create_kwargs: dict[str, object] = {
                 "model": self._model,
                 "messages": messages,
@@ -238,7 +257,8 @@ class OpenAICompatibleProvider(LLMProvider):
                 response = await _op(use_json_format=True)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
 
@@ -249,7 +269,10 @@ class OpenAICompatibleProvider(LLMProvider):
                 f"chat_json: {phase} returned an empty choices list "
                 f"(model={self._model})"
             )
-            self._record(ctx, scenario=scenario, status="error", error=error)
+            self._record(
+                ctx, scenario=scenario, status="error", error=error,
+                attempts=attempts,
+            )
             raise RuntimeError(error)
 
         if not response.choices:
@@ -263,7 +286,8 @@ class OpenAICompatibleProvider(LLMProvider):
             first_usage = getattr(response, "usage", None)
             record_usage(scenario, first_usage)
             self._record(
-                ctx, scenario=scenario, usage=first_usage, response_text=text
+                ctx, scenario=scenario, usage=first_usage, response_text=text,
+                attempts=attempts,
             )
             logger.warning(
                 "chat_json returned empty content (model=%s) — retrying "
@@ -275,7 +299,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     response = await _op(use_json_format=False)
             except Exception as exc:
                 self._record(
-                    ctx, scenario=scenario, status="error", error=str(exc)
+                    ctx, scenario=scenario, status="error", error=str(exc),
+                    attempts=attempts,
                 )
                 raise
             if not response.choices:
@@ -285,7 +310,8 @@ class OpenAICompatibleProvider(LLMProvider):
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return text
 
@@ -326,7 +352,11 @@ class OpenAICompatibleProvider(LLMProvider):
         if tools:
             create_kwargs["tools"] = tools
 
+        attempts = 0  # connection-establishment hits before this outcome
+
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
 
         content_parts: list[str] = []
@@ -377,6 +407,7 @@ class OpenAICompatibleProvider(LLMProvider):
                 self._record(
                     ctx, scenario=scenario, usage=usage,
                     response_text="".join(content_parts),
+                    attempts=attempts,
                 )
 
                 if tool_calls_map:
@@ -391,7 +422,8 @@ class OpenAICompatibleProvider(LLMProvider):
                     yield {"type": "tool_calls", "tool_calls": tool_calls}
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
 
@@ -491,8 +523,11 @@ class AnthropicProvider(LLMProvider):
         ctx = begin_call(messages)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
+        attempts = 0  # provider hits before this outcome (tenacity retries)
 
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return await self._async_client.messages.create(
                 model=self._model,
                 system=self._maybe_cache_system(system),
@@ -504,14 +539,16 @@ class AnthropicProvider(LLMProvider):
             response = await call_with_resilience(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
         text = self._extract_text(response.content)
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return text
 
@@ -536,14 +573,19 @@ class AnthropicProvider(LLMProvider):
                 self._to_anthropic_tools(tools)
             )
 
+        attempts = 0  # provider hits before this outcome (tenacity retries)
+
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
 
         try:
             response = await call_with_resilience(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
@@ -573,7 +615,8 @@ class AnthropicProvider(LLMProvider):
         if tool_calls:
             result["tool_calls"] = tool_calls
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return result
 
@@ -582,8 +625,11 @@ class AnthropicProvider(LLMProvider):
         ctx = begin_call(messages)
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
+        attempts = 0  # provider hits before this outcome (tenacity retries)
 
         def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             return self._sync_client.messages.create(
                 model=self._model,
                 system=self._maybe_cache_system(system),
@@ -595,14 +641,16 @@ class AnthropicProvider(LLMProvider):
             response = call_with_resilience_sync(self._breaker_name, _op)
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
         record_usage(scenario, usage)
         text = self._extract_text(response.content)
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=text
+            ctx, scenario=scenario, usage=usage, response_text=text,
+            attempts=attempts,
         )
         return text
 
@@ -635,8 +683,11 @@ class AnthropicProvider(LLMProvider):
         system, user_messages = self._split_messages(messages)
         kwargs.setdefault("max_tokens", self._max_tokens)
         schema = json_schema or {"type": "object"}
+        attempts = 0  # provider hits before this outcome
 
         async def _op() -> Any:
+            nonlocal attempts
+            attempts += 1
             emit_tool: list[dict[str, object]] = [
                 {
                     "name": "emit_json",
@@ -664,7 +715,8 @@ class AnthropicProvider(LLMProvider):
                 response = await _op()
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=attempts,
             )
             raise
         usage = getattr(response, "usage", None)
@@ -675,11 +727,13 @@ class AnthropicProvider(LLMProvider):
                     block.input.get("result", block.input), ensure_ascii=False
                 )
                 self._record(
-                    ctx, scenario=scenario, usage=usage, response_text=text
+                    ctx, scenario=scenario, usage=usage, response_text=text,
+                    attempts=attempts,
                 )
                 return text
         self._record(
-            ctx, scenario=scenario, usage=usage, response_text=""
+            ctx, scenario=scenario, usage=usage, response_text="",
+            attempts=attempts,
         )
         return ""
 
@@ -760,6 +814,7 @@ class AnthropicProvider(LLMProvider):
             self._record(
                 ctx, scenario=scenario, usage=usage,
                 response_text="".join(content_parts),
+                attempts=1,  # no transport retry — the stream is established once
             )
 
             if tool_buf:
@@ -775,7 +830,8 @@ class AnthropicProvider(LLMProvider):
                 yield {"type": "tool_calls", "tool_calls": tool_calls}
         except Exception as exc:
             self._record(
-                ctx, scenario=scenario, status="error", error=str(exc)
+                ctx, scenario=scenario, status="error", error=str(exc),
+                attempts=1,  # no transport retry — the stream is established once
             )
             raise
 

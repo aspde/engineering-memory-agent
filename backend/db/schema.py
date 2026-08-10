@@ -406,6 +406,20 @@ def build_schema_statements(dimension: int) -> list[str]:
         EXCEPTION WHEN duplicate_column THEN NULL;
         END $$;
         """,
+        # Transport-retry accounting (see ``resilience.py``): how many times
+        # the provider call was attempted before this row's outcome — 1 = a
+        # clean first try, 3 = two tenacity retries were swallowed before
+        # success (or the final failure).  NULL for rows written before this
+        # column existed; ``record_call`` defaults to None when a caller
+        # doesn't report attempts.  Added via ALTER so databases created
+        # before the column existed stay valid.
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE llm_usage ADD COLUMN attempts INT;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END $$;
+        """,
         # ── Pending-conflict queue: patrol (inspection) conflicts ─────────
         # Patrol contradictions are two *already-stored* memories (A, B), unlike
         # ingestion conflicts (existing in store + new not yet written).  The

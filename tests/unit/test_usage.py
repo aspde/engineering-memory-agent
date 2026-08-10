@@ -210,6 +210,28 @@ class TestRecordCall:
         assert row["total_tokens"] == 0
         assert row["status"] == "success"
 
+    def test_record_call_attempts_defaults_to_none(self) -> None:
+        """Callers that don't report attempts keep the column NULL — historical
+        rows (and non-retryable call paths) must not get a fabricated value."""
+        ctx = _ctx("t", "th")
+        record_call(ctx, model="m", provider="p", scenario="s", usage=None)
+        assert pending_rows()[0]["attempts"] is None
+
+    def test_record_call_stores_attempts(self) -> None:
+        """record_call must persist how many times the provider was hit before
+        this outcome (3 = two tenacity retries swallowed before success)."""
+        ctx = _ctx("t", "th")
+        record_call(
+            ctx,
+            model="m",
+            provider="p",
+            scenario="agent_chat",
+            usage=None,
+            attempts=3,
+        )
+        row = pending_rows()[0]
+        assert row["attempts"] == 3
+
     def test_records_error_status(self) -> None:
         ctx = _ctx("t", "th")
         record_call(
@@ -537,6 +559,25 @@ class TestFlushAndQuery:
     @pytest.mark.asyncio
     async def test_flush_returns_zero_when_buffer_empty(self) -> None:
         assert await flush_usage_buffer() == 0
+
+    @pytest.mark.asyncio
+    async def test_flush_persists_attempts(self) -> None:
+        """The ``attempts`` column survives the buffer → llm_usage roundtrip."""
+        from sqlalchemy import text
+
+        from backend.db import get_session_factory
+
+        record_call(
+            _ctx("t", "th"),
+            model="m", provider="p", scenario="s",
+            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            attempts=3,
+        )
+        await flush_usage_buffer()
+
+        async with get_session_factory()() as session:
+            result = await session.execute(text("SELECT attempts FROM llm_usage"))
+            assert [tuple(r) for r in result] == [(3,)]
 
     @pytest.mark.asyncio
     async def test_summary_reports_cache_tokens(self) -> None:
