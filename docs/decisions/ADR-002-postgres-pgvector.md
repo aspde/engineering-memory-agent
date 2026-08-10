@@ -62,13 +62,13 @@ PostgreSQL
 
 | 表 | 向量列 | 维度 | 索引 | 用途 |
 |----|--------|------|------|------|
-| `chunks` | `embedding` | 1024 | IVFFlat, cosine | 文档片段向量检索 |
-| `memories` | `embedding` | 1024 | IVFFlat, cosine | 记忆语义搜索 |
-| `entities` | `embedding` | 1024 | IVFFlat, cosine | Phase 1 实体归一化匹配 |
+| `chunks` | `embedding` | 1024 | HNSW, cosine | 文档片段向量检索 |
+| `memories` | `embedding` | 1024 | HNSW, cosine | 记忆语义搜索 |
+| `entities` | `embedding` | 1024 | HNSW, cosine | Phase 1 实体归一化匹配 |
 
 ### 索引策略
 
-全部使用 **IVFFlat** 索引 + **cosine distance** (`<=>` 操作符)：
+全部使用 **HNSW** 索引 + **cosine distance** (`<=>` 操作符)：
 
 ```sql
 -- 余弦相似度检索
@@ -79,12 +79,7 @@ ORDER BY embedding <=> :vec ::vector
 LIMIT :limit;
 ```
 
-选择 IVFFlat 而非 HNSW 的理由：
-- IVFFlat 构建快，内存占用低，写入性能好——EMA 的写入是间歇性的（每次摄入一批 chunks、每次写入一条 memory），不是持续高吞吐
-- HNSW 在查询性能上领先，但构建时间更长、内存占用更高。EMA 的数据量（数千条记忆 + 数万条 chunks）尚未触及 IVFFlat 的瓶颈
-- HNSW 适合高频查询场景（QPS > 100），EMA 当前是低频查询（用户手动提问）——IVFFlat 的查询延迟（< 10ms）完全在可接受范围内
-
-后续数据量增长到十万级时，可无缝迁移到 HNSW——只需重建索引，不需要改 SQL。
+**演进说明**：早期实施用 IVFFlat（lists=100），小语料上暴露了聚类依赖问题——数据量 < 千条时 lists 把探针散布到大量空聚类，召回率下降（见 seed-010 的教训）。已迁移到 HNSW（pgvector ≥ 0.5）：HNSW 无聚类质心依赖，小库也稳，且建索引用默认参数。迁移由 `init_db()` 启动时幂等执行：检测到旧 ivfflat 索引则一次性替换为 HNSW，之后为 no-op。`search_memories` 用两阶段召回——先按 HNSW 索引顺序取 `top_k × 8`（至少 50）候选窗口，再在 Python 侧按 `similarity × decay_factor` 重排——让索引扫描保持 `ORDER BY embedding <=> :vec` 的形式以命中 HNSW。
 
 ### 检索模式
 
@@ -92,10 +87,10 @@ LIMIT :limit;
 
 | 管道 | 入口 | 流程 |
 |------|------|------|
-| Chunk 检索 | `retrieve(query)` | embed → vector_search(IVFFlat) → rerank(cross-encoder) → 返回 |
-| Memory 检索 | `query_memories(query)` | embed → search_memories(decay_weighted) → rerank(cross-encoder) → update_decay → 返回 |
+| Chunk 检索 | `retrieve(query)` | embed → vector_search(HNSW) → （可选 rerank） → 返回 |
+| Memory 检索 | `query_memories(query)` | embed → search_memories(decay_weighted) → （可选 rerank） → update_decay_batch → 返回 |
 
-两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）和同一个 rerank 策略。
+两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../interview/eval-report.md)。衰减更新为 `update_decay_batch`（单条 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数）。
 
 ### 写入时的向量操作
 
@@ -119,14 +114,13 @@ LIMIT 1;
 
 | 限制 | 影响 | 缓解 |
 |------|------|------|
-| IVFFlat 在 10 万+ 向量时召回率下降 | 搜索结果可能漏掉相关记忆 | 扩大 `top_k`（检索 4×top_k 候选再 rerank 到 top_k）+ 后续数据增长时迁移 HNSW |
+| HNSW 在极端高维大数据量下的内存占用 | 百万级向量时索引内存开销上升 | EMA 数据量（数千记忆 + 数万 chunks）远未触及；`search_memories` 两阶段召回（先 HNSW 取 `top_k×8` 候选再 Python 重排）兼顾质量与内存 |
 | 向量 + 结构化字段在同一行的存储压力 | memories 表行宽较大（summary + entities JSONB + relations JSONB + embedding + meta） | 当前行宽仍在 PG 合理范围内（单行 < 10KB）。未来若膨胀，entities/relations 移到独立表（Phase 1 已做） |
-| 无 GPU 加速 | BGE-M3 嵌入计算在 CPU 上运行 | BGE-M3 1024 维的单条嵌入耗时 < 50ms，批量 32 条 < 500ms，Phase 2 batch_mode 将批量嵌入合并后进一步降低开销 |
-| 向量维度假定为 1024 | 切换到不同维度的 embedding 模型需要 ALTER TABLE + 重建索引 | 1024 是 BGE-M3 的维度，已硬编码于 schema 中。若切换到 OpenAI (1536/3072) 或其他模型，需要迁移 |
+| 无 GPU 加速 | BGE-M3 嵌入计算在 CPU 上运行 | BGE-M3 1024 维的单条嵌入耗时 150-230ms（CPU，locust 实测），批量嵌入合并降低开销 |
+| 向量维度假定为 1024 | 切换到不同维度的 embedding 模型需要 ALTER TABLE + 重建索引 | 1024 是 BGE-M3 的维度，由配置映射（见 `backend/shared/config.py`）。切换模型时 `init_db()` 检测维度不一致会自动迁移（清空向量列 + 重建 HNSW 索引，需重嵌） |
 
 ### 不会做的事
 
-- **不用 pgvector 的 HNSW 索引**（当前数据量下 IVFFlat 足够，后续按需迁移）
 - **不引入 pgvector 以外的向量存储**（保持单数据库约束）
 - **不做向量量化压缩**（1024 维 × float32 = 4KB/向量，数据量级不需要）
 - **不扩展维度到超过 BGE-M3 的 1024**（当前模型够用）
@@ -137,6 +131,6 @@ LIMIT 1;
 - ✅ 结构化查询 + 向量搜索在同一个 SQL 事务中完成，无一致性负担
 - ✅ LangGraph checkpoints 复用同一 PG 实例，对话持久化零额外部署
 - ✅ 运维成本低——备份一个 PG 实例 = 备份全部数据
-- ⚠️ 向量索引调优需要 PG 知识（IVFFlat lists 参数、HNSW m/ef_construction 参数等），不在标准 DBA 技能范围内
+- ⚠️ 向量索引调优需要 PG 知识（HNSW m/ef_construction 参数等），不在标准 DBA 技能范围内
 - ⚠️ 超大规模向量检索能力有限（百万级以上需要评估 HNSW 迁移或引入专用向量数据库）
 - ⚠️ 与 PG 版本绑定——pgvector 的 PG16 支持最完整，跨 PG 大版本升级需要注意 pgvector 兼容性

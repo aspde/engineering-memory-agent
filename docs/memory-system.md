@@ -27,16 +27,16 @@ Read Path:
 
 `write_chunks` 是幂等的：每个 chunk 计算 SHA-256（`content_hash`），按 `(document_id, content_hash)` 唯一索引去重——重复摄取同一文档会跳过已存在的 chunk（不重新嵌入、不产生重复行），`ON CONFLICT DO NOTHING` 兜底并发竞争。文档内容变更时，仅新增/变更的 chunk 会被写入。
 
-**检索**：`retrieve(query, top_k, use_llm_rerank=False)` 执行完整管道：
-- `embed_query()` → `vector_search()` → `rerank_cross_encoder()`（默认）或 `rerank_llm()`（可选）→ 返回 `RetrievalResult` 列表
+**检索**：`retrieve(query, top_k, use_llm_rerank=False, use_cross_encoder=False)` 执行完整管道：
+- `embed_query()` → `vector_search()` → 默认按相似度直接排序返回 `RetrievalResult` 列表；`rerank_cross_encoder()` 与 `rerank_llm()` 均为显式 opt-in（默认关闭）
 
 `vector_search()` 支持可选的 `filters` 参数（如 `{"document_id": "repo.py"}`）限定搜索范围。
 
-两种 reranker 可通过参数切换：
+两种 reranker 均可通过参数显式开启（默认关闭，opt-in）：
 | Reranker | 引擎 | 成本 | 适用 |
 |----------|------|------|------|
-| `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | 默认 |
-| `rerank_llm()` | 现有 LLMProvider | API 调用费用 | 需精细语义判断时 |
+| `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | opt-in；小语料下实测掉 recall 且慢 ~90 倍（eval-report），默认关闭 |
+| `rerank_llm()` | 现有 LLMProvider | API 调用费用 | opt-in；需精细语义判断时 |
 
 **hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`docs/interview/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
 
@@ -86,14 +86,16 @@ extract_entities(content) ─┘
 ```
 R = e^(-t / S)
 t = 距上次召回的小时数（now() - recalled_at，实时）
-S = 1 + recall_count × 2
+S = 1 + (recall_count + 1) × 2
 ```
+
+> recall_count 是召回前的存储值，`+1` 得到召回后的计数（post-recall 约定，`compute_decay_factor` / `update_decay_batch` / `search_memories` 三处调用点统一）。
 
 - 新记忆 `decay_factor = 1.0`
 - 频繁召回的记忆衰减慢
 - 长期未召回的记忆自然沉底
 
-`search_memories(query_vector)` 在 SQL 里用 `recalled_at`/`recall_count` 实时算 `decay_factor`，乘以相似度加权排序——排名用的是「当前时刻」的衰减，而非上次召回时的快照值（快照会在两次召回之间冻结记忆的排名）。存储列 `decay_factor` 仍保留（由 `update_decay_batch` 写入，供展示/兼容），排序与返回都用实时值。`query_memories(query)` 封装完整管道：embed → 衰减加权搜索 → rerank（默认 cross-encoder，可选 llm）→ `update_decay_batch()`（单条原子 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；`recalled_at IS NULL` 的从未召回记忆也会记首次召回，因子为 1.0）→ 返回。
+`search_memories(query_vector)` 在 SQL 里用 `recalled_at`/`recall_count` 实时算 `decay_factor`，乘以相似度加权排序——排名用的是「当前时刻」的衰减，而非上次召回时的快照值（快照会在两次召回之间冻结记忆的排名）。存储列 `decay_factor` 仍保留（由 `update_decay_batch` 写入，供展示/兼容），排序与返回都用实时值。`query_memories(query)` 封装完整管道：embed → 衰减加权搜索 →（默认无 rerank，cross-encoder/LLM 为 opt-in）→ `update_decay_batch()`（单条原子 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；`recalled_at IS NULL` 的从未召回记忆也会记首次召回，因子为 1.0）→ 返回。
 
 ### 5. Chunk 策略
 
@@ -169,7 +171,7 @@ backend/
     rerank.py         ← rerank_cross_encoder(), rerank_llm()
     retrieval.py      ← write_chunks(), vector_search(), retrieve(), query_memories(), assemble()
     memory.py         ← write_memory() + 四级相似度判断 + merge/conflict/supplement
-    decay.py          ← compute_decay_factor(), update_decay(), search_memories()
+    decay.py          ← compute_decay_factor(), update_decay_batch(), search_memories()
     ingestion.py      ← ingest_repo() via pygit2
 ```
 

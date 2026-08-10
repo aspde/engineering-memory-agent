@@ -91,7 +91,7 @@ Agent 行为层面我补了第五维评测：**任务级端到端**——8 个�
 EMA 一句话：研发知识自动沉淀为长期记忆，解决"人走知识没"
 三亮点：
   1. 四级相似度去重(0.92合并/0.75冲突/0.60关联/<0.60新增)
-  2. 艾宾浩斯衰减(R=e^(-t/S), S=1+recall×2, 相似度×decay排序)
+  2. 艾宾浩斯衰减(R=e^(-t/S), S=1+(recall+1)×2, 相似度×decay排序)
   3. LangGraph 手动 StateGraph + 双 HITL 卡点(审批/仲裁) + PostgresSaver
 成果：4 数据源 / 评估集30条 dense 1.00 MRR 0.98 / sparse O(N)→jieba tokens+GIN(tokens&&) -69% / rerank可跳过(0.15 floor误伤q015) 17.5s→0.19s / task_eval 8任务 completed 0.5 tool_recall 0.94 grounded 1.0(过度调用是短板) / locust 10并发QPS 4.8 P95 110ms 160并发QPS 63 0失败 / 后端+agent 1.6万行 1281测试 / 端到端主导+工程纪律(ADR/CI/评估集替代无review)
 评估迭代：①score阈值不可行(hit/miss重叠 0.54 vs 0.69) ②tsvector simple切不了中文(0行)→jieba ③语料改真实→dense 1.00(瓶颈真假取决于评估语料质量) ④真瓶颈=sparse O(N)→jieba tokens落库+GIN ⑤rerank可跳过(0.15 floor误伤,17.5s→0.19s,scale-dependent) ⑥task_eval抓过度调用(unexpected 0.375)+HITL拒绝路径bug(Command与静态边同时生效)

@@ -298,9 +298,10 @@ python -m tests.eval.run_eval --retriever memory
 | Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | "8 任务实测：工具选择意图准（0.94）但过度调用（unexpected 0.375）拉低严格完成率，是轨迹级真实短板" |
 | Agent 答案接地 | 同上（judge 对工具上下文判定） | groundedness 1.000 / citation 0.875 / 0 执行错误 | "答案全部接地、无捏造、零错误；过度调用而非幻觉是主要问题" |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms（CPU） | "embed 150-230ms/条，CPU 推理" |
-| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever hybrid_norerank` | 1.000 | "hybrid+jieba 无 rerank Recall@5 1.00（当前语料下向量 baseline 亦 1.00），评估集 30 query" |
-| 检索 MRR | 同上 | 0.983 | "MRR 0.98" |
-| 检索 NDCG@5 | 同上 | 0.988 | "NDCG@5 0.99" |
+| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 1.000（生产 memory 路径，语义通道开）；关闭语义通道 0.900 | "生产默认路径（query_memories, threshold 0.3）实测 recall@5=1.00，其中 3/30 靠语义通道救回（关闭后 0.90）——如实披露，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)" |
+| 检索 MRR | 同上 | 0.944（语义通道开）/ 0.844（关） | "生产 memory 路径 MRR 0.94，非此前的 chunk:vector 0.983（非生产路径）" |
+| 检索 NDCG@5 | 同上 | 0.959 | "memory 路径 NDCG@5 0.96" |
+| 检索判别力（hard-negative） | `python -m tests.eval.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | "27 条陷阱集实测：纯向量找得到但容易被表面词带偏（综合通过 59.3%）。已落地 bounded cross-encoder top-3 重排（`query_memories(use_cross_encoder=True)`，默认关）提至 81.5%，见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)" |
 | 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | "QPS 随并发线性涨至 160 仍 0 失败，瓶颈在 BGE CPU embed" |
 | 检索 P95（压测） | 同上 | 10 并发 110ms / 80 并发 690ms / 160 并发 1.0s | "缓存热路径 P95 110ms@10 并发；冷查询单次 1.75s（含 embed）" |
 
@@ -365,7 +366,7 @@ def get_token_usage() -> dict[str, int]:
 
 > 「LLM 调用我做了统一埋点——provider 层是唯一咽喉点，每次调用写一行观测到 `llm_usage` 表，按场景统计（记忆提取、冲突检测、rerank、Agent 对话分开算），并通过 `/api/usage/*` 暴露按天/按场景/按模型的汇总和成本估算。trace_id 贯穿一次 agent 运行，能回放单轮对话的调用链。
 >
-> 成本控制策略：90% 写入只走向量（零 LLM 成本），只在 0.75-0.92 边界调 LLM；rerank 默认本地 cross-encoder（零 API 成本）；max_steps=5 防止 Agent 失控烧 token。」
+> 成本控制策略：90% 写入只走向量（零 LLM 成本），只在 0.75-0.92 边界调 LLM；rerank 默认关闭（eval 显示小语料下 rerank 有害），启用时优先本地 cross-encoder（零 API 成本）；max_steps=5 防止 Agent 失控烧 token。」
 
 ---
 
@@ -414,9 +415,9 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 | 问题 | 补了评估后（实际数字） |
 |------|----------------------|
-| 「怎么知道检索准不准？」 | 「30 条标注集，5 类 × 6 条 + 难度分级；当前语料 hybrid 无 rerank Recall@5=1.00、MRR 0.98」 |
-| 「换 reranker 效果如何？」 | 「A/B 实测：cross-encoder 反而有害——hybrid:ce 0.967 vs 无 rerank 1.000，0.15 floor 误伤 q015；收益 scale-dependent」 |
-| 「记忆衰减加权有用吗？」 | 「衰减是检索排序的一部分，未单独 A/B——讲设计：常用记忆浮上来、过时沉底、不删除」 |
+| 「怎么知道检索准不准？」 | 「30 条标注集，5 类 × 6 条 + 难度分级；生产 memory 路径 Recall@5=1.00、MRR 0.94（语义通道救回 3/30，关闭后 0.90/0.84）——**但这只证明找得到。真实判别力看 27 条 hard-negative 陷阱集：纯向量目标召回 100%、陷阱入侵 96.3%、综合通过仅 59.3%，11 条陷阱压过目标**。已用这个集驱动改进：bounded cross-encoder top-3 重排把综合通过提至 81.5%（默认关、显式启用）」 |
+| 「换 reranker 效果如何？」 | 「A/B 实测：cross-encoder 反而有害——hybrid:ce 0.967 vs 无 rerank 1.000，0.15 floor 误伤 q015；收益 scale-dependent，默认关闭是数据支撑的决策」 |
+| 「记忆衰减加权有用吗？」 | 「衰减是检索排序的一部分，未单独 A/B——讲设计：常用记忆浮上来、过时沉底、不删除；**从未召回的记忆按 created_at 衰减**（修复过：旧代码对从未召回的记忆恒返 1.0，等于永不沉底，已改为 COALESCE(recalled_at, created_at)）」 |
 
 ### 6.2 成本类问题
 
@@ -470,7 +471,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 1. **实测对话 P95 + token 成本**（2h）—— 唯一还没实测的生产数字（检索已有 QPS/P95）
 2. **填实所有占位符**（1h）—— 避免临场卡壳
 
-检索与生成评估数字已有（Recall@5 1.00 / MRR 0.98 / LLM 行为评测四套件 / locust QPS 63@160 并发），不用再补标注集。
+检索与生成评估数字已有（生产 memory 路径 Recall@5 1.00 / MRR 0.94，语义通道贡献已量化；hard-negative 判别力 27 条实测——纯向量综合通过 59.3%，bounded-CE 提至 81.5%；LLM 行为评测四套件 / locust QPS 63@160 并发），不用再补标注集；检索判别力改进已落地（bounded cross-encoder top-3 重排）。
 
 ---
 

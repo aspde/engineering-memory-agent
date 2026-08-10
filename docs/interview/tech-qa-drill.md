@@ -62,12 +62,12 @@
 **答题要点**：
 1. 我的 RAG 不用 LangChain Retriever/Chain，是**一组独立 async 函数**
 2. 写路径：`chunk_text() / chunk_code()` → `embed()` → `write_chunks()` 入 chunks 表
-3. 读路径：`embed_query()` → `vector_search()` → `rerank_cross_encoder()`（默认）或 `rerank_llm()`（可选）→ `assemble()` → LLM
+3. 读路径：`embed_query()` → `vector_search()` →（默认无 rerank，直接相似度排序；`rerank_cross_encoder()` / `rerank_llm()` 均为 opt-in）→ `assemble()` → LLM
 4. **区别**：每个环节单独可测、单独可替换，不通过框架链粘合。调试时能精确定位是 embed 还是 rerank 的问题
 
 **追问预案**：
 - Q：为什么不用 LangChain 的 Retriever？→ A：Retriever 是黑盒，定制 rerank 和过滤要继承重写，代价高。我的 `retrieve()` 函数 20 行，所有逻辑可见
-- Q：双 reranker 怎么切换？→ A：参数 `use_llm_rerank=False` 默认走 cross-encoder（BGE-Reranker-v2-m3 本地，零 API 成本），需要精细语义判断时传 True 走 LLM
+- Q：双 reranker 怎么切换？→ A：默认都不开（opt-in）——eval 实测小语料下 cross-encoder rerank 掉 recall 且慢 ~90 倍（`eval-report.md`），所以关闭。需要时传 `use_cross_encoder=True` 走本地 cross-encoder（BGE-Reranker-v2-m3，零 API 成本），或 `use_llm_rerank=True` 走 LLM
 
 ### ⭐ Q2.2 chunk 策略怎么设计的？代码和文本不一样吗？
 
@@ -152,11 +152,11 @@ LIMIT :limit
 要点：
 - `embedding IS NOT NULL` 防止空向量
 - `deleted_at IS NULL` 软删除过滤
-- threshold 过滤低相似度（默认 0.0，可调）
+- threshold 过滤低相似度（decay 层 `search_memories` 默认 0.0；生产入口 `query_memories` 默认 0.3 作垃圾过滤门槛，作用于原始相似度、衰减加权之前）
 - 排序键是"相似度 × 衰减因子"
 
 **追问预案**：
-- Q：为什么 threshold 默认 0.0 不过滤？→ A：让所有记忆都在候选池，由 decay 和 rerank 负责排序。如果用户精确查询，即使老记忆也能召回
+- Q：threshold 过滤会不会把老记忆剪掉？→ A：decay 层 `search_memories` 默认 `threshold=0.0`；但生产入口 `query_memories` 默认 `threshold=0.3` 作垃圾过滤（作用于原始相似度、衰减加权之前）——低于 0.3 的记忆不进候选池，衰减救不回。0.3 以上、只是排序靠后的记忆，精确查询时仍能召回
 - Q：`::vector` 是什么语法？→ A：pgvector 的类型转换，把字符串参数转成 vector 类型
 
 ### Q3.3 实体归一化怎么做的？
@@ -262,7 +262,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 
 **答题要点**：
 1. **粗筛省 LLM**：90% 写入只走向量搜索（便宜），只在 0.75-0.92 边界区间才调 LLM 做冲突检测
-2. **双 reranker**：默认 cross-encoder 本地（零 API 成本），需要时才走 LLM rerank
+2. **双 reranker**：默认关闭（opt-in）——小语料下 cross-encoder rerank 实测掉 recall 且慢 ~90 倍；启用时优先本地 cross-encoder（零 API 成本），需要精细语义判断才走 LLM rerank
 3. **Provider 切换**：DeepSeek 便宜，Claude 贵但质量高，按场景配
 4. **max_steps 限制**：防止 Agent 无限调 tool 烧 token
 5. **传输韧性**：LLM/Embedding 调用统一走 tenacity 指数退避重试 + 熔断器（[resilience.py](../../backend/shared/resilience.py)），429/5xx 自动重试、连续失败熔断快速失败；重复投递靠 content-hash 幂等去重，不重复入库
@@ -352,7 +352,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 |------|---------|
 | BGE-M3 维度？ | 1024 |
 | pgvector 索引？ | hnsw + cosine_ops |
-| 衰减公式？ | R=e^(-t/S), S=1+recall×2 |
+| 衰减公式？ | R=e^(-t/S), S=1+(recall+1)×2 |
 | 四级阈值？ | 0.92合并 / 0.75冲突 / 0.60关联 / <0.60新增 |
 | Agent 几个节点？ | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |
 | 几个 HITL 卡点？ | 2 个：写前审批 + 冲突仲裁 |
