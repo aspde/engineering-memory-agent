@@ -83,6 +83,12 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Type-check frontend
+        # vitest runs through esbuild, which strips types without checking
+        # them — a type error can otherwise merge into master unflagged.
+        working-directory: frontend
+        run: npx tsc --noEmit
+
       - name: Run frontend tests
         working-directory: frontend
         run: npm test
