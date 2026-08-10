@@ -25,6 +25,65 @@ class TestTextChunk:
             prev_end = chunks[0][-10:]
             assert prev_end in chunks[1]
 
+    def test_chinese_sentences_not_cut_mid_sentence(self) -> None:
+        """A long Chinese paragraph without newlines must split at sentence
+        boundaries (。！？), not fall through to the fixed-width hard split.
+
+        Regression guard for the bug where _DEFAULT_SEPARATORS only matched
+        ASCII sentence punctuation ([.!?] followed by whitespace), so a
+        Chinese paragraph — sentences end with 。 and no trailing space —
+        never split on the sentence separator and was cut mid-sentence.
+        """
+        text = (
+            "这个模块负责记忆去重。"
+            "它先计算内容哈希做精确去重。"
+            "再按相似度分四档处理。"
+            "超过阈值的调用LLM判断。"
+            "最后落库并更新衰减因子。"
+        )
+        chunks = chunk_text(text, max_size=30, overlap=0)
+        # Every chunk except the last ends at a sentence boundary; the full
+        # text reconstructs exactly (nothing dropped by a mid-word cut).
+        assert len(chunks) >= 3
+        assert all(c.endswith("。") for c in chunks[:-1])
+        assert "".join(chunks) == text
+
+    def test_chinese_and_latin_sentence_boundaries(self) -> None:
+        """Mixed CJK + Latin prose splits at both 。/！ and ASCII . ! ?.
+
+        The CJK marks must be split on: a ！-terminated sentence survives as
+        its own chunk, and the full text reconstructs (no mid-word cut).
+        """
+        text = "这是中文句。Then an English sentence follows. 再来一句中文！"
+        chunks = chunk_text(text, max_size=40, overlap=0)
+        # ！-terminated sentence survives intact as its own trailing chunk.
+        assert chunks[-1].rstrip() == "再来一句中文！"
+        # Full text reconstructs — nothing lost to a mid-word hard cut.
+        assert "".join(chunks).strip() == text
+
+    def test_long_latin_sentence_falls_back_to_word_split(self) -> None:
+        """A single Latin sentence longer than max_size still splits at word
+        boundaries (space), never mid-word — the CJK fix must not regress
+        this."""
+        text = "This is a sentence that is much longer than the chunk budget allows for a single piece."
+        chunks = chunk_text(text, max_size=16, overlap=0)
+        assert all(len(c) <= 16 for c in chunks)
+        assert "".join(chunks) == text
+
+    def test_chinese_sentences_with_overlap_keep_boundaries(self) -> None:
+        """Overlap must not push a Chinese chunk past a sentence boundary."""
+        text = "这是第一句。这是第二句。" + "这是第三句。这是第四句。"
+        chunks = chunk_text(text, max_size=30, overlap=10)
+        assert all(c.endswith("。") for c in chunks[:-1])
+        assert "".join(chunks) == text
+
+    def test_ascii_sentence_boundary_still_requires_whitespace(self) -> None:
+        """The Latin sentence separator ([.!?] followed by whitespace) must
+        not regress: "Hello.World" (no space) is not split mid-word."""
+        text = "Hello.World"
+        chunks = chunk_text(text, max_size=6, overlap=0)
+        assert "".join(chunks) == text  # hard-split preserves chars, no split on '.'
+
 
 class TestCodeChunk:
     def test_empty(self) -> None:

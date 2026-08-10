@@ -12,7 +12,28 @@ import re
 # Default separators ordered from coarsest to finest.
 # The algorithm tries to split at the coarsest boundary first,
 # falling back to finer ones only when a chunk would exceed max_size.
-_DEFAULT_SEPARATORS = [r"\n\n", r"\n", r"(?<=[.!?])\s+", r"\s+"]
+#
+# Sentence boundary covers BOTH Latin and CJK punctuation:
+#   (?<=[.!?])\s+   — Latin: period/question/exclamation followed by whitespace
+#   (?<=[。！？])     — CJK: full stop / exclamation / question mark (zero-width
+#                     lookbehind — a Chinese sentence ends with the mark and
+#                     usually no trailing space, so no \s+ is required).  This
+#                     is the separator that keeps a long Chinese paragraph
+#                     (a commit message / discussion / doc in the target
+#                     corpus) from falling through to the fixed-width
+#                     _hard_split and being cut mid-sentence.
+#
+# IMPORTANT: the last entry must stay the word/whitespace fallback ``\s+`` —
+# the overlap re-split path uses ``_DEFAULT_SEPARATORS[-1:]`` as the finest
+# separator, and that must remain the generic whitespace splitter.
+_DEFAULT_SEPARATORS = [
+    r"\n\n",
+    r"\n",
+    r"(?<=[.!?])\s+",
+    r"(?<=[。！？])",
+    r"(?<=[;；])\s*",
+    r"\s+",
+]
 
 
 def chunk_text(text: str, max_size: int = 512, overlap: int = 64) -> list[str]:
