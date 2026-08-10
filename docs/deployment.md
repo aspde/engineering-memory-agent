@@ -153,7 +153,7 @@ docker compose logs -f backend
 
 - `.env` 通过 `env_file` 注入；compose 内 `DATABASE_URL` 覆盖指向 `postgres` 服务名（`.env` 里的 localhost 不适用容器网络）。
 - Embedding 模型经 `./docker/models` 挂载进容器，运行期完全离线（`HF_HUB_OFFLINE=1`），见上文"Embedding 模型挂载"。
-- **Linux 容器顺带解决了 Windows 平台的 checkpointer 限制**：`AsyncPostgresSaver`（psycopg 异步）在 Linux 原生可用，对话 checkpoint 落 PostgreSQL；Windows 下降级为 `InMemorySaver` 仅是开发期兼容（见 `backend/main.py`）。
+- **Linux 容器顺带解决了 Windows 平台的 checkpointer 限制**：`AsyncPostgresSaver`（psycopg 异步）在 Linux 原生可用，对话 checkpoint 落 PostgreSQL；Windows 下降级为 `InMemorySaver` 仅是开发期兼容（见 `backend/main.py`）。注意 psycopg 的纯 Python 实现依赖系统 `libpq` 运行库，`python:*-slim` 基础镜像没有它——Dockerfile 已 `apt-get install libpq5`，缺失时 `AsyncPostgresSaver` 会静默降级为 `InMemorySaver`（checkpoint 不持久）。
 
 ### 方式 B：裸进程（开发 / 调试）
 

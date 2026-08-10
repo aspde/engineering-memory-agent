@@ -60,6 +60,13 @@ RUN pip install --no-cache-dir --timeout 120 --retries 5 \
     && pip install --no-cache-dir --timeout 120 --retries 5 \
     -r requirements.txt
 
+# psycopg's pure-Python implementation loads libpq at runtime; the
+# python:*-slim image has no system libpq, so AsyncPostgresSaver would
+# silently fall back to InMemorySaver (checkpoints lost on restart) unless
+# the runtime library is installed.  libpq5 alone suffices — no headers.
+RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Embedding model: mounted at runtime, not baked ───────────────────
 # The model lives on the host under docker/models and is mounted to
 # /home/ema/.cache/huggingface by docker-compose (runtime HOME is
