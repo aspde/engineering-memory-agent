@@ -1,10 +1,10 @@
 # EMA Retrieval Evaluation Report
 
-- Generated: 2026-08-10 12:30:26 UTC
+- Generated: 2026-08-10 12:30:26 UTC（本报告语义通道显式开启）
 - Queries: 30
 - Configs: 1
 - Errors: 0
-- Semantic relevance: enabled (substring OR embedding-similarity)
+- Semantic relevance: enabled (substring OR embedding-similarity) — **非默认**，见下方说明
 
 ## Overall
 
@@ -14,7 +14,9 @@
 
 > **这是生产默认路径的报告**（`retrieval.query_memories`，threshold=0.3，无 rerank）——此前 committed 报告只有 `chunk:vector`（0.983 MRR），memory 路径缺失。本报告补上这个缺口。
 >
-> **语义通道贡献量化**：`semantic_rescued=3` 表示 30 条 query 中有 3 条（q018/q024/q026）仅靠语义相关性通道（embedding 相似度 ≥0.80）判为相关，纯子串指纹未命中。关闭语义通道重跑（`--no-semantic-relevance`）后数字为 **recall@5=0.900 / mrr=0.844**——语义通道对 recall 的贡献约 10%（3/30），对 MRR 的贡献约 0.10。这是"用被评测的 embedding 模型给自己打分"的诚实披露：语义通道用的就是 BGE-M3 本身（见 dataset.py），这部分命中是模型"认出自已"而非独立判据。
+> **默认口径（2026-08-10 起）**：语义相关性通道已改为 opt-in，`run_eval` 默认关闭——默认评估是**确定性纯子串匹配**（无"被评测模型给自己打分"的自证）。默认（`--retriever memory` 不带任何语义参数）实测 **recall@5=0.900 / mrr=0.844**。本报告的 1.000/0.944 是显式 `--semantic-relevance` 开启后的数字。
+>
+> **语义通道贡献量化**：`semantic_rescued=3` 表示 30 条 query 中有 3 条（q018/q024/q026）仅靠语义相关性通道（embedding 相似度 ≥0.80）判为相关，纯子串指纹未命中。语义通道对 recall 的贡献约 10%（3/30），对 MRR 的贡献约 0.10。这是"用被评测的 embedding 模型给自己打分"的诚实披露：语义通道用的就是 BGE-M3 本身（见 dataset.py），这部分命中是模型"认出自已"而非独立判据——所以它现在是显式 opt-in，默认评估不依赖它。
 
 ## Recall@5 by category
 

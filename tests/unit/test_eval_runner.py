@@ -243,11 +243,12 @@ class TestRunEval:
         assert q1["semantic_relevance"] is True
 
     @pytest.mark.asyncio
-    async def test_semantic_relevance_on_by_default(
+    async def test_semantic_relevance_off_by_default(
         self, monkeypatch, fake_items
     ) -> None:
-        """The semantic channel is on by default: a fingerprint miss that the
-        embedding channel rescues still counts as a hit without any flag."""
+        """The semantic channel is OFF by default: without an explicit flag,
+        relevance is pure substring matching and the embedding channel is
+        never consulted (the self-scored channel is opt-in)."""
         from types import SimpleNamespace
         from unittest.mock import AsyncMock
 
@@ -262,8 +263,6 @@ class TestRunEval:
         adapter = _make_fake_adapter("content", results_per_query)
         _patch_adapter(monkeypatch, adapter)
 
-        # Supply a seed summary for the semantic pass to target (the fake
-        # labeled set's seed_ids are not in the real seed file).
         monkeypatch.setattr(
             runner_mod,
             "load_seed_memories",
@@ -275,9 +274,50 @@ class TestRunEval:
             AsyncMock(return_value=[True]),
         )
 
-        # No explicit flag — default behaviour must invoke the semantic channel.
-        cfg = EvalConfig(name="default-on", retriever="chunk", top_k=5)
+        # No explicit flag — default behaviour must NOT invoke the channel.
+        cfg = EvalConfig(name="default-off", retriever="chunk", top_k=5)
         result = await run_eval(cfg, fake_items)
+
+        # q1 missed (fingerprint absent) and the channel was not consulted:
+        # recall is 2/3, matching the deterministic substring baseline.
+        assert result.metric("recall@5") == pytest.approx(2 / 3)
+        q1 = next(q for q in result.per_query if q["id"] == "q1")
+        assert q1["semantic_relevance"] is False
+        runner_mod.semantic_relevance_mask.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_semantic_relevance_explicitly_enabled(
+        self, monkeypatch, fake_items
+    ) -> None:
+        """Opting in via semantic_relevance=True invokes the embedding channel
+        and adds the rescues it finds."""
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        import tests.eval.runner as runner_mod
+
+        # q1's retrieved item paraphrases the target — no substring match.
+        results_per_query = {
+            "alpha query": [{"content": "a paraphrase that omits the keyword"}],
+            "beta query": [{"content": "beta"}],
+            "gamma query": [{"content": "gamma"}],
+        }
+        adapter = _make_fake_adapter("content", results_per_query)
+        _patch_adapter(monkeypatch, adapter)
+
+        monkeypatch.setattr(
+            runner_mod,
+            "load_seed_memories",
+            lambda: [SimpleNamespace(id="s1", summary="alpha summary")],
+        )
+        monkeypatch.setattr(
+            runner_mod,
+            "semantic_relevance_mask",
+            AsyncMock(return_value=[True]),
+        )
+
+        cfg = EvalConfig(name="semantic", retriever="chunk", top_k=5)
+        result = await run_eval(cfg, fake_items, semantic_relevance=True)
 
         assert result.metric("recall@5") == 1.0
         q1 = next(q for q in result.per_query if q["id"] == "q1")
@@ -357,7 +397,7 @@ class TestRunEval:
         )
 
         cfg = EvalConfig(name="split", retriever="chunk", top_k=5)
-        result = await run_eval(cfg, fake_items)
+        result = await run_eval(cfg, fake_items, semantic_relevance=True)
 
         q1 = next(q for q in result.per_query if q["id"] == "q1")
         assert q1["substring_hits"] == 0

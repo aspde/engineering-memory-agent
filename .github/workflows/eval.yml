@@ -10,8 +10,8 @@ on:
         type: choice
         options: [memory, chunk, vector, hybrid, hybrid_norerank, rewrite]
   schedule:
-    # Weekly semantic eval — the semantic channel is on by default in
-    # run_eval, so this is the recurring discriminant-quality gate.
+    # Weekly deterministic eval — the semantic channel is OFF by default in
+    # run_eval, so this is the recurring lexical-quality gate.
     - cron: '47 6 * * 1'
 
 # Full retrieval evaluation — needs the real BGE-M3 embedding model, the
@@ -84,15 +84,17 @@ jobs:
           # below the thresholds.  Manually dispatched non-memory retrievers
           # (experiments/baselines) are not gated.
           #
-          # Calibrated 2026-08-08 on the seeded 30-query memory corpus
-          # (recall@5=1.000, mrr≈0.94 across two runs).  recall@5 0.95 keeps
-          # the core recall gate strict — 30 queries means at most one miss
-          # passes.  mrr 0.87 leaves headroom for single-run noise (~±0.005
-          # observed) and a rank-2/3 query or two, while still tripping on a
-          # real ranking regression (2+ targets dropping out of the top).
+          # Calibrated 2026-08-10 on the seeded 30-query memory corpus with
+          # the semantic channel OFF (the default): recall@5=0.900 / mrr=0.844
+          # (measured with --no-semantic-relevance; the semantic channel
+          # rescues 3/30 to 1.000/0.944 but is a self-scored opt-in, so the
+          # gate rests on the deterministic lexical baseline).  recall@5 0.85
+          # allows at most ~4 misses (30 × 0.15) with room for single-run
+          # noise; mrr 0.80 leaves headroom while tripping on a real ranking
+          # regression.
           GATE_ARGS=""
           if [ "$RETRIEVER" = "memory" ]; then
-            GATE_ARGS="--min-recall@5 0.95 --min-mrr 0.87"
+            GATE_ARGS="--min-recall@5 0.85 --min-mrr 0.80"
           fi
           python -m tests.eval.run_eval --retriever "$RETRIEVER" \
             --report-md docs/interview/eval-report.md \

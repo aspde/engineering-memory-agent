@@ -241,7 +241,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 | [ground_truth.py](../../tests/eval/ground_truth.py) | 30 条标注集，5 类（技术决策/故障复盘/架构设计/代码实现/历史背景）× 6 条，含 difficulty 分级 |
 | [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 30 条种子记忆（EMA 自身工程史），每条 summary 含独特指纹 |
 | [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配（`is_relevant`/`relevance_mask`）+ 语义相关性通道（`semantic_relevance_mask`，embedding cosine≥0.80）+ retriever 适配（chunk/memory）+ 4 项一致性校验 |
-| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错；语义通道默认开启，per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
+| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错；语义通道默认关闭（opt-in），per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
 | [report.py](../../tests/eval/report.py) | Markdown + JSON 报告，含 A/B delta 表 |
 | [run_eval.py](../../tests/eval/run_eval.py) | CLI：`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
 | [seed.py](../../tests/eval/seed.py) | CLI：`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
@@ -254,7 +254,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 3. **位置 ID 映射**：runner 把 retrieved 结果映射成 `[0,1,...,n-1]`，relevant 集为命中指纹的 index 集合，复用纯函数 metrics，零 I/O 耦合。
 4. **difficulty 分级**：easy（词重合）/medium（改写）/hard（概念问法），暴露向量质量短板。
 5. **A/B 对比内置**：`--compare` 跑 cross-encoder vs LLM rerank，输出 delta 表，量化"换 reranker 效果如何"。
-6. **语义通道默认开启**：relevance = 子串匹配 OR 目标 seed 摘要的 embedding cosine≥0.80，`--no-semantic-relevance` 回到纯词面基线。报告 overall 表暴露 `semantic_rescued`（词面 0 命中、靠语义救回的查询数），per-query 标 `✓/—/✗`，直接量化"语义检索质量"，避免 30 条查询全 recall=1.000 无法判别。每周由 `.github/workflows/eval.yml` cron 自动跑。
+6. **语义通道默认关闭（opt-in）**：relevance 默认 = 纯子串匹配（确定性基线，无"被评测模型自评"的自证）；`--semantic-relevance` 显式开启后 = 子串 OR 目标 seed 摘要的 embedding cosine≥0.80。报告 overall 表暴露 `semantic_rescued`（词面 0 命中、靠语义救回的查询数），per-query 标 `✓/—/✗`，直接量化"语义检索质量"。每周由 `.github/workflows/eval.yml` cron 自动跑（默认纯子串，门禁基于 0.900/0.844 校准）。
 
 **跑出真实数字的流程**：
 ```bash
@@ -298,8 +298,8 @@ python -m tests.eval.run_eval --retriever memory
 | Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | "8 任务实测：工具选择意图准（0.94）但过度调用（unexpected 0.375）拉低严格完成率，是轨迹级真实短板" |
 | Agent 答案接地 | 同上（judge 对工具上下文判定） | groundedness 1.000 / citation 0.875 / 0 执行错误 | "答案全部接地、无捏造、零错误；过度调用而非幻觉是主要问题" |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms（CPU） | "embed 150-230ms/条，CPU 推理" |
-| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 1.000（生产 memory 路径，语义通道开）；关闭语义通道 0.900 | "生产默认路径（query_memories, threshold 0.3）实测 recall@5=1.00，其中 3/30 靠语义通道救回（关闭后 0.90）——如实披露，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)" |
-| 检索 MRR | 同上 | 0.944（语义通道开）/ 0.844（关） | "生产 memory 路径 MRR 0.94，非此前的 chunk:vector 0.983（非生产路径）" |
+| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 0.900（默认确定性基线）；语义通道 opt-in 1.000 | "生产默认路径（query_memories, threshold 0.3）默认纯子串实测 recall@5=0.90；3/30 靠语义通道救回（opt-in 时 1.00）——语义通道自证故默认关，如实披露，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)" |
+| 检索 MRR | 同上 | 0.844（默认）/ 0.944（语义 opt-in） | "生产 memory 路径默认 MRR 0.84，非此前的 chunk:vector 0.983（非生产路径）" |
 | 检索 NDCG@5 | 同上 | 0.959 | "memory 路径 NDCG@5 0.96" |
 | 检索判别力（hard-negative） | `python -m tests.eval.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | "27 条陷阱集实测：纯向量找得到但容易被表面词带偏（综合通过 59.3%）。已落地 bounded cross-encoder top-3 重排（`query_memories(use_cross_encoder=True)`，默认关）提至 81.5%，见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)" |
 | 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | "QPS 随并发线性涨至 160 仍 0 失败，瓶颈在 BGE CPU embed" |
@@ -415,7 +415,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 | 问题 | 补了评估后（实际数字） |
 |------|----------------------|
-| 「怎么知道检索准不准？」 | 「30 条标注集，5 类 × 6 条 + 难度分级；生产 memory 路径 Recall@5=1.00、MRR 0.94（语义通道救回 3/30，关闭后 0.90/0.84）——**但这只证明找得到。真实判别力看 27 条 hard-negative 陷阱集：纯向量目标召回 100%、陷阱入侵 96.3%、综合通过仅 59.3%，11 条陷阱压过目标**。已用这个集驱动改进：bounded cross-encoder top-3 重排把综合通过提至 81.5%（默认关、显式启用）」 |
+| 「怎么知道检索准不准？」 | 「30 条标注集，5 类 × 6 条 + 难度分级；生产 memory 路径**默认确定性基线** Recall@5=0.90、MRR 0.84（纯子串匹配，无自证）；语义通道为显式 opt-in（救回 3/30 → 1.00/0.94，因用被评测模型自评故非默认）——**但这只证明找得到。真实判别力看 27 条 hard-negative 陷阱集：纯向量目标召回 100%、陷阱入侵 96.3%、综合通过仅 59.3%，11 条陷阱压过目标**。已用这个集驱动改进：bounded cross-encoder top-3 重排把综合通过提至 81.5%（默认关、显式启用）」 |
 | 「换 reranker 效果如何？」 | 「A/B 实测：cross-encoder 反而有害——hybrid:ce 0.967 vs 无 rerank 1.000，0.15 floor 误伤 q015；收益 scale-dependent，默认关闭是数据支撑的决策」 |
 | 「记忆衰减加权有用吗？」 | 「衰减是检索排序的一部分，未单独 A/B——讲设计：常用记忆浮上来、过时沉底、不删除；**从未召回的记忆按 created_at 衰减**（修复过：旧代码对从未召回的记忆恒返 1.0，等于永不沉底，已改为 COALESCE(recalled_at, created_at)）」 |
 
@@ -471,7 +471,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 1. **实测对话 P95 + token 成本**（2h）—— 唯一还没实测的生产数字（检索已有 QPS/P95）
 2. **填实所有占位符**（1h）—— 避免临场卡壳
 
-检索与生成评估数字已有（生产 memory 路径 Recall@5 1.00 / MRR 0.94，语义通道贡献已量化；hard-negative 判别力 27 条实测——纯向量综合通过 59.3%，bounded-CE 提至 81.5%；LLM 行为评测四套件 / locust QPS 63@160 并发），不用再补标注集；检索判别力改进已落地（bounded cross-encoder top-3 重排）。
+检索与生成评估数字已有（生产 memory 路径默认确定性基线 Recall@5 0.90 / MRR 0.84，语义通道 opt-in 贡献已量化；hard-negative 判别力 27 条实测——纯向量综合通过 59.3%，bounded-CE 提至 81.5%；LLM 行为评测四套件 / locust QPS 63@160 并发），不用再补标注集；检索判别力改进已落地（bounded cross-encoder top-3 重排），语义通道自证已通过"默认关闭 + opt-in"修复。
 
 ---
 

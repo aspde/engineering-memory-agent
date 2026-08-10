@@ -104,16 +104,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--semantic-relevance",
         dest="semantic_relevance",
         action="store_true",
-        default=True,
+        default=False,
         help="Relevance = substring match OR embedding similarity vs target "
-        "seed summaries (default). Pass --no-semantic-relevance for the pure "
-        "lexical baseline. Requires the embedding provider.",
+        "seed summaries (opt-in). Off by default so the baseline is the "
+        "deterministic lexical score — the embedding channel is scored by the "
+        "same BGE-M3 provider under evaluation, so it is only meaningful when "
+        "explicitly enabled and read alongside the substring baseline.",
     )
     p.add_argument(
         "--no-semantic-relevance",
         dest="semantic_relevance",
         action="store_false",
-        help="Disable the semantic channel; score on substring fingerprints only.",
+        help="Disable the semantic channel (default); score on substring "
+        "fingerprints only.",
     )
     p.add_argument(
         "--name",

@@ -46,7 +46,7 @@
 
 | 维度 | 风险等级 | 关键短板 | 应对策略 |
 |------|---------|---------|---------|
-| AI 工程化 | 🟡 中 | 评估体系（Recall@K/MRR + LLM-as-judge + task 级端到端 + hard-negative 判别力）与成本监控（llm_usage 表）已交付，数字已按诚实口径披露并驱动改进 | 讲实测数字 + 诚实分层：主评估集 30 条 recall@5 1.00 / MRR 0.94（语义通道救回 3/30，关闭后 0.90/0.84）；**hard-negative 判别力：纯向量 27 条仅 59.3% 通过 / MRR 0.79 / 11 条陷阱压过目标，已用此集落地 bounded cross-encoder top-3 重排提至 81.5%**（见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)）；task completed 0.5 tool_recall 0.94（DeepSeek 过度调工具是真实发现）/ 17.5s→0.19s 瓶颈归因 |
+| AI 工程化 | 🟡 中 | 评估体系（Recall@K/MRR + LLM-as-judge + task 级端到端 + hard-negative 判别力）与成本监控（llm_usage 表）已交付，数字已按诚实口径披露并驱动改进 | 讲实测数字 + 诚实分层：主评估集 30 条**默认确定性基线** recall@5 0.90 / MRR 0.84（纯子串匹配，无自证）；语义通道为显式 opt-in（救回 3/30 → 1.00/0.94，用被评测模型自评故非默认）；**hard-negative 判别力：纯向量 27 条仅 59.3% 通过 / MRR 0.79 / 11 条陷阱压过目标，已用此集落地 bounded cross-encoder top-3 重排提至 81.5%**（见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)）；task completed 0.5 tool_recall 0.94（DeepSeek 过度调工具是真实发现）/ 17.5s→0.19s 瓶颈归因 |
 | 项目可信度 | 🔴 高 | 无团队协作背书 + 无真实用户 | 填实量化数据；传 GitHub；主打"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1281 测试）；讲迭代方法而非线性开发；被问团队时诚实承认 + 讲替代流程 |
 | 生产成熟度 | 🟡 中 | 巡检内嵌主进程（有意取舍，有 ADR） | 讲 ADR 决策依据；Prometheus 运行指标 + Dockerfile + CI 已落地（见 architecture.md Observability） |
 | 规模性能 | 🟡 中 | 单机 pgvector / BGE-M3 CPU 推理 | 讲拐点思维 + 实测压测数字：10 并发 QPS 4.8 P95 110ms / 160 并发 QPS 63 0 失败（见 gap-remediation.md §5.3） |

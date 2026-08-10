@@ -232,8 +232,13 @@ async def semantic_relevance_mask(
             ``summary``).
         threshold: Cosine floor for "semantically same".
 
-    The embedding provider is the same one under evaluation; this is
-    acceptable because the gate is conservative and purely additive.
+    The embedding provider is the same one under evaluation — a known
+    limitation of this channel (the model is effectively scoring its own
+    neighbourhood).  The channel is therefore opt-in (``--semantic-relevance``)
+    and never the default: the deterministic substring baseline is the
+    reference, and ``semantic_only_hits`` are reported separately so the
+    contribution of this self-scored channel is never hidden inside the
+    headline metrics.
     """
     if not results or not seed_summaries:
         return [False] * len(results)

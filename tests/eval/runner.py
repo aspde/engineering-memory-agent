@@ -123,7 +123,7 @@ async def run_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
-    semantic_relevance: bool = True,
+    semantic_relevance: bool = False,
 ) -> EvalResult:
     """Execute one config over the labeled set.
 
@@ -133,15 +133,16 @@ async def run_eval(
         reraise: if True, propagate the first retrieval error instead of
             recording it. Useful in unit tests; False in production runs so
             one bad query doesn't kill the whole eval.
-        semantic_relevance: if True (default), relevance is a substring
-            match OR an embedding-similarity match against the query's
-            target seed summaries (see ``dataset.semantic_relevance_mask``).
-            Measures the semantic dimension of retrieval; needs the
-            embedding provider.  Pass ``False`` to fall back to the pure,
-            deterministic fingerprint matching as a lexical baseline.
+        semantic_relevance: if True, relevance is a substring match OR an
+            embedding-similarity match against the query's target seed
+            summaries (see ``dataset.semantic_relevance_mask``).  Defaults to
+            False — the pure, deterministic fingerprint matching is the
+            baseline.  The semantic channel is opt-in because it is scored by
+            the same embedding provider under evaluation; enable it to measure
+            the semantic dimension and read it alongside the lexical baseline.
             Per-query rows record both channels (``substring_hits`` /
-            ``semantic_only_hits``) so the semantic contribution is
-            observable either way.
+            ``semantic_only_hits``) so the semantic contribution is observable
+            either way.
 
     Returns:
         ``EvalResult`` with per-query rows + aggregates.
@@ -269,7 +270,7 @@ async def compare_eval(
     items: Sequence[GroundTruthItem] | None = None,
     *,
     reraise: bool = False,
-    semantic_relevance: bool = True,
+    semantic_relevance: bool = False,
 ) -> list[EvalResult]:
     """Run multiple configs over the same labeled set, in order.
 
@@ -277,8 +278,9 @@ async def compare_eval(
     this to produce A/B delta tables. ``reraise`` is forwarded to each
     :func:`run_eval` call (useful in tests; defaults to False for production
     A/B runs where one bad query shouldn't kill the whole comparison).
-    ``semantic_relevance`` is likewise forwarded (defaults to True — the
-    semantic channel is on unless explicitly disabled).
+    ``semantic_relevance`` is likewise forwarded (defaults to False — the
+    deterministic substring baseline; the self-scored embedding channel is
+    opt-in).
     """
     items = list(items) if items is not None else load_ground_truth()
     results: list[EvalResult] = []
