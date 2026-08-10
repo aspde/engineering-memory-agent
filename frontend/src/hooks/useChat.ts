@@ -151,25 +151,35 @@ export function useChat() {
               });
               break;
 
-            case 'error':
+            case 'error': {
+              // Flush any partial tokens so already-generated text stays on
+              // the assistant bubble, then surface the failure as a SEPARATE
+              // error message — never merged into the reply body.
               flushTokens();
               stopTokenTimer();
               dispatch({
-                type: 'UPDATE_LAST_MESSAGE',
-                appendContent: `\n\n错误: ${event.message}`,
+                type: 'ADD_MESSAGE',
+                message: { role: 'system', kind: 'error', content: `错误: ${event.message}` },
               });
-              break;
+              return;
+            }
 
             case 'done':
               break;
           }
         }
       } catch (err) {
+        // Network / transport failure: keep any partial tokens on the
+        // assistant bubble, then add a SEPARATE error message.
         flushTokens();
         stopTokenTimer();
         dispatch({
-          type: 'UPDATE_LAST_MESSAGE',
-          appendContent: `\n\n错误: ${err instanceof Error ? err.message : String(err)}`,
+          type: 'ADD_MESSAGE',
+          message: {
+            role: 'system',
+            kind: 'error',
+            content: `错误: ${err instanceof Error ? err.message : String(err)}`,
+          },
         });
       } finally {
         // Always flush any remaining buffered tokens and clean up.
@@ -259,25 +269,35 @@ export function useChat() {
               });
               break;
 
-            case 'error':
+            case 'error': {
+              // Flush any partial tokens so already-generated text stays on
+              // the assistant bubble, then surface the failure as a SEPARATE
+              // error message — never merged into the reply body.
               flushTokens();
               stopTokenTimer();
               dispatch({
-                type: 'UPDATE_LAST_MESSAGE',
-                appendContent: `\n\n错误: ${event.message}`,
+                type: 'ADD_MESSAGE',
+                message: { role: 'system', kind: 'error', content: `错误: ${event.message}` },
               });
-              break;
+              return;
+            }
 
             case 'done':
               break;
           }
         }
       } catch (err) {
+        // Network / transport failure: keep any partial tokens on the
+        // assistant bubble, then add a SEPARATE error message.
         flushTokens();
         stopTokenTimer();
         dispatch({
-          type: 'UPDATE_LAST_MESSAGE',
-          appendContent: `\n\n错误: ${err instanceof Error ? err.message : String(err)}`,
+          type: 'ADD_MESSAGE',
+          message: {
+            role: 'system',
+            kind: 'error',
+            content: `错误: ${err instanceof Error ? err.message : String(err)}`,
+          },
         });
       } finally {
         // Always flush any remaining buffered tokens and clean up.

@@ -43,6 +43,15 @@ describe('appReducer', () => {
     expect(next.messages[0]).toEqual({ role: 'assistant', content: 'hello' });
   });
 
+  it('ADD_MESSAGE preserves the error kind marker on a system error message', () => {
+    const next = appReducer(initialState, {
+      type: 'ADD_MESSAGE',
+      message: { role: 'system', kind: 'error', content: '错误: boom' },
+    });
+    expect(next.messages).toHaveLength(1);
+    expect(next.messages[0]).toEqual({ role: 'system', kind: 'error', content: '错误: boom' });
+  });
+
   it('UPDATE_LAST_MESSAGE appends content and updates _meta on the last message', () => {
     const state: AppState = {
       ...initialState,

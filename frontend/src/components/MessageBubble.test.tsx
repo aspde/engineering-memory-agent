@@ -49,6 +49,32 @@ describe('MessageBubble', () => {
     expect(container.querySelector('.bg-amber-50')).not.toBeNull();
   });
 
+  it('renders error messages with distinct red error styling, not a normal bubble', () => {
+    const { container } = render(
+      <MessageBubble message={makeMessage({ role: 'system', kind: 'error', content: '错误: boom' })} />,
+    );
+    expect(screen.getByText('错误: boom')).toBeInTheDocument();
+    // Red error bubble with a border — clearly distinct from the grey assistant bubble.
+    expect(container.querySelector('.bg-red-50')).not.toBeNull();
+    expect(container.querySelector('.border-red-300')).not.toBeNull();
+    expect(container.querySelector('.italic')).not.toBeNull();
+    expect(container.querySelector('.bg-gray-100')).toBeNull();
+    expect(container.querySelector('.bg-amber-50')).toBeNull();
+  });
+
+  it('does not apply error styling to regular system notices', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ role: 'system', content: '注意' })} />);
+    expect(container.querySelector('.bg-red-50')).toBeNull();
+    expect(container.querySelector('.border-red-300')).toBeNull();
+  });
+
+  it('does not apply error styling to regular assistant messages', () => {
+    const { container } = render(<MessageBubble message={makeMessage({ content: '正常回复' })} />);
+    expect(container.querySelector('.bg-red-50')).toBeNull();
+    expect(container.querySelector('.border-red-300')).toBeNull();
+    expect(container.querySelector('.bg-gray-100')).not.toBeNull();
+  });
+
   it('shows a typing indicator for an empty streaming assistant message', () => {
     const { container } = render(<MessageBubble message={makeMessage({ content: '' })} isStreaming />);
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(3);

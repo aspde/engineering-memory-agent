@@ -50,10 +50,18 @@ export interface MessageFromBackend {
   sources?: Source[];
 }
 
-/** Frontend-enriched message with optional metadata from streaming. */
+/**
+ * Frontend-enriched message with optional metadata from streaming.
+ */
 export interface Message {
   role: 'user' | 'assistant' | 'system';
   content: string;
+  /**
+   * Message subtype for special rendering. `'error'` marks a failed-run
+   * notice (SSE error event or network failure) so the UI can render it
+   * as a distinct error bubble instead of looking like an agent reply.
+   */
+  kind?: 'error';
   _meta?: {
     toolCalls: ToolCall[];
     sources: Source[];

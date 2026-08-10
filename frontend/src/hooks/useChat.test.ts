@@ -219,7 +219,7 @@ describe('useChat', () => {
       );
     });
 
-    it('flushes tokens and appends the error text on an error event', async () => {
+    it('flushes buffered tokens onto the assistant bubble, then adds a SEPARATE error message on an error event', async () => {
       (chatStream as unknown as Mock).mockReturnValue(
         mockSSE([
           { type: 'token', content: 'Hi' },
@@ -232,10 +232,17 @@ describe('useChat', () => {
         await result.current.sendMessage('hello');
       });
 
+      // Partial tokens still land on the assistant placeholder…
       expect(dispatch).toHaveBeenCalledWith({ type: 'UPDATE_LAST_MESSAGE', appendContent: 'Hi' });
-      expect(dispatch).toHaveBeenCalledWith({
+      // …but the error is NOT merged into the assistant body.
+      expect(dispatch).not.toHaveBeenCalledWith({
         type: 'UPDATE_LAST_MESSAGE',
         appendContent: '\n\n错误: boom',
+      });
+      // Instead a dedicated error message is appended.
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'ADD_MESSAGE',
+        message: { role: 'system', kind: 'error', content: '错误: boom' },
       });
     });
 
@@ -257,7 +264,7 @@ describe('useChat', () => {
       });
     });
 
-    it('appends an error message when chatStream throws', async () => {
+    it('adds a SEPARATE error message (not appended to the assistant body) when chatStream throws', async () => {
       (chatStream as unknown as Mock).mockReturnValue(
         (async function* (): AsyncGenerator<SSEEvent> {
           throw new Error('network down');
@@ -269,9 +276,13 @@ describe('useChat', () => {
         await result.current.sendMessage('hello');
       });
 
-      expect(dispatch).toHaveBeenCalledWith({
+      expect(dispatch).not.toHaveBeenCalledWith({
         type: 'UPDATE_LAST_MESSAGE',
         appendContent: '\n\n错误: network down',
+      });
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'ADD_MESSAGE',
+        message: { role: 'system', kind: 'error', content: '错误: network down' },
       });
     });
 
@@ -440,7 +451,7 @@ describe('useChat', () => {
       );
     });
 
-    it('appends an error message when the resume stream errors', async () => {
+    it('adds a SEPARATE error message when the resume stream throws', async () => {
       (chatStream as unknown as Mock).mockReturnValue(
         (async function* (): AsyncGenerator<SSEEvent> {
           throw new Error('boom');
@@ -452,13 +463,17 @@ describe('useChat', () => {
         await result.current.resume({ approved: true });
       });
 
-      expect(dispatch).toHaveBeenCalledWith({
+      expect(dispatch).not.toHaveBeenCalledWith({
         type: 'UPDATE_LAST_MESSAGE',
         appendContent: '\n\n错误: boom',
       });
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'ADD_MESSAGE',
+        message: { role: 'system', kind: 'error', content: '错误: boom' },
+      });
     });
 
-    it('appends an error message when an error event is emitted', async () => {
+    it('flushes buffered tokens, then adds a SEPARATE error message on an error event', async () => {
       (chatStream as unknown as Mock).mockReturnValue(
         mockSSE([{ type: 'token', content: 'Hi' }, { type: 'error', message: 'boom' }]),
       );
@@ -472,9 +487,13 @@ describe('useChat', () => {
         type: 'UPDATE_LAST_MESSAGE',
         appendContent: 'Hi',
       });
-      expect(dispatch).toHaveBeenCalledWith({
+      expect(dispatch).not.toHaveBeenCalledWith({
         type: 'UPDATE_LAST_MESSAGE',
         appendContent: '\n\n错误: boom',
+      });
+      expect(dispatch).toHaveBeenCalledWith({
+        type: 'ADD_MESSAGE',
+        message: { role: 'system', kind: 'error', content: '错误: boom' },
       });
     });
   });
