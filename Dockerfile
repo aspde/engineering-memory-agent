@@ -24,6 +24,12 @@ ARG NODE_VERSION=22
 FROM node:${NODE_VERSION}-alpine AS frontend-build
 WORKDIR /app/frontend
 
+# VITE_* vars are consumed by Vite at build time.  The frontend build must
+# receive VITE_EMA_API_KEY here as a build-arg (docker-compose passes it via
+# build.args) — the root .env is deliberately .dockerignored and is only
+# injected into the *runtime* container, which Vite never sees.
+ARG VITE_EMA_API_KEY=""
+
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci
 

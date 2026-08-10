@@ -18,7 +18,14 @@ services:
       retries: 12
 
   backend:
-    build: .
+    build:
+      context: .
+      # Vite consumes VITE_EMA_API_KEY at build time (Stage 1), not from the
+      # runtime .env — pass it through as a build-arg so the baked SPA carries
+      # the same key as the API guard.  Compose resolves ${VITE_EMA_API_KEY}
+      # from the root .env.  Empty when unset (no auth header, backward compat).
+      args:
+        VITE_EMA_API_KEY: ${VITE_EMA_API_KEY:-}
     container_name: ema-backend
     env_file: .env
     environment:

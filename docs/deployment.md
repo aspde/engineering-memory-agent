@@ -62,6 +62,8 @@ services:
 - `EMBEDDING_*` — Embedding 模型配置（含可选故障转移 `EMBEDDING_FALLBACK_*`——设置 `EMBEDDING_FALLBACK_PROVIDER` 后，主 provider 失败（重试耗尽/熔断/本地模型损坏）会在该次调用上改走备用 provider，留空则关闭；备用模型维度必须与主模型一致）
 - `EMA_API_KEY` — API 接入认证 key。设置后所有 `/api` 请求须携带 `Authorization: Bearer <EMA_API_KEY>`（见下文 Authentication）；不设置时服务仍可启动，但任何 `/api` 请求都会收到 401
 - `VITE_EMA_API_KEY` — 前端注入的同一 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）；未配置时前端请求不携带认证头（向后兼容）。应与 `EMA_API_KEY` 保持一致
+
+  > **容器构建注意**：Vite 在 **build 阶段**（`docker build` Stage 1）读取该变量，而根 `.env` 被 `.dockerignore` 排除、`env_file` 只注入容器**运行时**，Vite 看不到。docker-compose 已通过 `build.args.VITE_EMA_API_KEY` 从根 `.env` 传入，直接 `docker compose build` 即可；修改 key 后须重新构建镜像，否则浏览器端仍携带旧 key 会收到 401。构建参数会留在镜像元数据（`docker history`）中，因该 key 本就是分发给前端的公开值，可接受；真正的服务端密钥（`EMA_API_KEY`）不要走 build-arg。
 - `DATABASE_URL` — PostgreSQL 连接
 - `MAX_AGENT_STEPS` — Agent 最大工具调用次数
 - `MAX_AGENT_CONCURRENCY` — 同时运行的交互式 Agent 会话上限（默认 4；超过的 chat 请求返回 503，防止并发 ReAct 循环一起打满 provider 限流）
