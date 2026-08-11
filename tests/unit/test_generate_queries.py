@@ -1,4 +1,4 @@
-"""Tests for the eval query-generation script (tests/eval/generate_queries.py).
+"""Tests for the eval query-generation script (tests/eval/experiments/generate_queries.py).
 
 The LLM is never hit: the generation pipeline is driven with an injected
 fake generator, so the tests cover the parsing, validation, and output-file
@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from tests.eval.generate_queries import (
+from tests.eval.experiments.generate_queries import (
     _build_prompt,
     _merge_candidates,
     _processed_seed_ids,

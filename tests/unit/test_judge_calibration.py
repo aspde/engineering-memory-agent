@@ -17,14 +17,14 @@ from __future__ import annotations
 
 import pytest
 
-import tests.eval.judge_calibration as cal_mod
-from tests.eval.judge_calibration import (
+import tests.eval.experiments.judge_calibration as cal_mod
+from tests.eval.experiments.judge_calibration import (
     aggregate,
     compare_sample,
     coverage_prf,
     run_calibration,
 )
-from tests.eval.judge_calibration_samples import (
+from tests.eval.experiments.judge_calibration_samples import (
     CALIBRATION_SAMPLES,
     CalibrationSample,
     validate_calibration_samples,

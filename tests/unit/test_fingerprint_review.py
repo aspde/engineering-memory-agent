@@ -1,4 +1,4 @@
-"""Tests for the fingerprint review helper (tests/eval/fingerprint_review.py).
+"""Tests for the fingerprint review helper (tests/eval/experiments/fingerprint_review.py).
 
 Pure CPU — no LLM, no DB, no models.  Covers tokenisation, phrase
 extraction (every candidate must be a real substring), uniqueness / summary
@@ -13,14 +13,13 @@ import json
 import pytest
 
 from tests.eval.dataset import SeedMemory
-from tests.eval.fingerprint_review import (
-    _py_str,
+from tests.eval.experiments.fingerprint_review import (
     _phrase_candidates,
     _tokens,
     build_review_rows,
     extract_fingerprint_candidates,
     finalize_review,
-    render_python_code,
+    render_jsonl_lines,
     select_suggested,
 )
 
@@ -250,18 +249,7 @@ class TestFinalizeReview:
         assert any("duplicate approved row" in w for w in warnings)
 
 
-class TestPyStr:
-    def test_escapes_quotes_and_backslashes(self) -> None:
-        assert _py_str('say "hi" \\ path') == r'"say \"hi\" \\ path"'
-
-    def test_escapes_newlines_and_control_chars(self) -> None:
-        assert _py_str("a\nb\tc\x01") == r'"a\nb\tc\u0001"'
-
-    def test_keeps_cjk_verbatim(self) -> None:
-        assert _py_str("为什么用 pgvector") == '"为什么用 pgvector"'
-
-
-class TestRenderPythonCode:
+class TestRenderJsonlLines:
     def _additions(self) -> list[dict]:
         return [
             {
@@ -283,18 +271,16 @@ class TestRenderPythonCode:
             },
         ]
 
-    def test_renders_valid_syntax_and_preserves_values(self) -> None:
-        from tests.eval.ground_truth import GroundTruthItem
-
+    def test_renders_one_json_object_per_line_and_preserves_values(self) -> None:
         additions = self._additions()
-        snippet = render_python_code(additions)
+        lines = [
+            json.loads(ln)
+            for ln in render_jsonl_lines(additions).splitlines()
+            if ln.strip()
+        ]
 
-        # The snippet is the body of a list literal — compile it wrapped.
-        ns: dict = {"GroundTruthItem": GroundTruthItem}
-        exec("items = [\n" + snippet + "]", ns)  # noqa: S102 — test-only eval
-        items = ns["items"]
-        assert len(items) == 2
-        by_id = {it["id"]: it for it in items}
+        assert len(lines) == 2
+        by_id = {it["id"]: it for it in lines}
         assert by_id["qg-seed-001-easy"]["query"] == "为什么用 pgvector 不用 Elasticsearch"
         assert by_id["qg-seed-001-easy"]["relevant_fingerprints"] == [
             "pgvector 扩展而非 Elasticsearch"
@@ -305,9 +291,7 @@ class TestRenderPythonCode:
         # Second addition has no notes → the key is simply absent.
         assert "notes" not in by_id["qg-seed-007-hard"]
 
-    def test_escapes_special_characters_roundtrip(self) -> None:
-        from tests.eval.ground_truth import GroundTruthItem
-
+    def test_special_characters_roundtrip_through_json(self) -> None:
         weird = '她说"pgvector 扩展"最稳定，路径是 C:\\proj\\ema，换行\n第二行'
         additions = [
             {
@@ -320,31 +304,33 @@ class TestRenderPythonCode:
                 "notes": '含引号 " 和反斜杠 \\ 与制表符\t',
             }
         ]
-        ns: dict = {"GroundTruthItem": GroundTruthItem}
-        exec("items = [\n" + render_python_code(additions) + "]", ns)  # noqa: S102
-        it = ns["items"][0]
+        lines = render_jsonl_lines(additions).splitlines()
+        assert len(lines) == 1
+        it = json.loads(lines[0])
         assert it["query"] == weird
         assert it["notes"] == '含引号 " 和反斜杠 \\ 与制表符\t'
 
-    def test_groups_by_category_in_first_appearance_order(self) -> None:
+    def test_rows_are_self_contained_ground_truth_items(self) -> None:
+        """Each line is a complete ground-truth row (loader shape) — no
+        surrounding syntax, so the block appends to ground_truth.jsonl."""
         adds = self._additions()
-        snippet = render_python_code(adds)
-        assert "# ── 技术决策 (1) ──" in snippet
-        assert "# ── 故障复盘 (1) ──" in snippet
-        assert snippet.index("技术决策 (1)") < snippet.index("故障复盘 (1)")
-        # Every entry appears as a GroundTruthItem call.
-        assert snippet.count("GroundTruthItem(") == 2
+        rows = [json.loads(ln) for ln in render_jsonl_lines(adds).splitlines() if ln.strip()]
+        assert len(rows) == 2
+        for r in rows:
+            for key in ("id", "query", "seed_ids", "relevant_fingerprints",
+                        "category", "difficulty"):
+                assert key in r, f"row missing {key}"
 
-    def test_notes_line_omitted_when_absent(self) -> None:
-        snippet = render_python_code(self._additions())
-        assert "notes=" in snippet
-        # The second addition has no notes → only one notes= line.
-        assert snippet.count("notes=") == 1
+    def test_notes_key_omitted_when_absent(self) -> None:
+        lines = render_jsonl_lines(self._additions()).splitlines()
+        assert "notes" in json.loads(lines[0])
+        # The second addition has no notes → the key is simply absent.
+        assert "notes" not in json.loads(lines[1])
 
 
 class TestEndToEnd:
     def test_review_then_apply_over_temp_files(self, tmp_path) -> None:
-        from tests.eval.fingerprint_review import _read_jsonl, _write_jsonl
+        from tests.eval.experiments.fingerprint_review import _read_jsonl, _write_jsonl
 
         candidates = [_candidate(seed_ids=["seed-001"])]
         cand_path = tmp_path / "candidates.jsonl"

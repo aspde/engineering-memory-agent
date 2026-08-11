@@ -59,13 +59,13 @@ services:
 | grafana | grafana/grafana:11.1.0 | EMA 运行健康看板（`http://localhost:3000`） |
 | caddy | caddy:2.8-alpine | TLS 终止 + 反代（默认 `http://localhost:8080`，公网配域名后自动 HTTPS） |
 
-> **pgvector 版本要求**：向量索引使用 HNSW（`USING hnsw`），需要 **pgvector ≥ 0.5**。上述 `pgvector/pgvector:pg16` 镜像满足要求；若使用发行版自带扩展或自建镜像，请先确认 `SELECT extversion FROM pg_extension WHERE extname = 'vector'` 不低于 0.5，否则建索引会失败（旧库的 ivfflat 索引会在启动时被替换为 HNSW）。
+> **pgvector 版本要求**：向量索引使用 HNSW（`USING hnsw`），需要 **pgvector ≥ 0.5**。上述 `pgvector/pgvector:pg16` 镜像满足要求；若使用发行版自带扩展或自建镜像，请先确认 `SELECT extversion FROM pg_extension WHERE extname = 'vector'` 不低于 0.5，否则建索引会失败。历史 ivfflat 库开发期重建即可（`init_db` 不做运行时索引替换）。
 
 ## Schema Migration (Alembic)
 
 Schema 演进用 **Alembic 版本化**（`alembic_version` 表 + `migrations/versions/` 下成对的 upgrade/downgrade 迁移）：
 
-- **统一入口**：`backend/db/schema.py` 的 `init_db()`（FastAPI 启动 lifespan / 测试 / eval 脚本都走它）先跑 `alembic upgrade head`（新库全量建表，旧库跳过已存在表并 stamp 版本），再执行**运行时 embedding 维度对齐**（resize——依赖配置，不进迁移）。`APP_ENV=test` 下 pytest 每次会话 `DROP SCHEMA public CASCADE` 后经 `init_db()` 重建，行为不变。
+- **统一入口**：`backend/db/schema.py` 的 `init_db()`（FastAPI 启动 lifespan / 测试 / eval 脚本都走它）先跑 `alembic upgrade head`（新库全量建表，旧库跳过已存在表并 stamp 版本），再**校验** embedding 列维度与配置一致——不一致启动失败，需 `python -m scripts.recreate_db` 重建（维度依赖配置、不进迁移，但绝不自动清空）。`APP_ENV=test` 下 pytest 每次会话 `DROP SCHEMA public CASCADE` 后经 `init_db()` 重建，行为不变。
 - **新增列 / 表 / 索引**：写一个新迁移而不是改 `init_db`：
   ```bash
   alembic revision -m "add something"
@@ -73,10 +73,10 @@ Schema 演进用 **Alembic 版本化**（`alembic_version` 表 + `migrations/ver
   # 不用 autogenerate——`op.execute("ALTER TABLE ... ADD COLUMN ...")`）
   alembic upgrade head   # 本地验证
   ```
-  CI（`.github/workflows/ci.yml`）跑 `test_migrations.py`，它会用临时库验证 `upgrade head` / `downgrade base` / 幂等，并断言迁移建的表与 `build_schema_statements`（运行时 resize 的来源）不漂移。
+  CI（`.github/workflows/ci.yml`）跑 `test_migrations.py`，它会用临时库验证 `upgrade head` / `downgrade base` / 幂等，以及 `init_db` 对维度不匹配的拒绝。
 - **配置**：`alembic.ini` 不含数据库 URL——`migrations/env.py` 从 app 自己的 `DATABASE_URL` 读（单一来源），并用同步 psycopg 驱动跑迁移（async URL 自动转 `postgresql+psycopg://`）。
 - **回滚**：`alembic downgrade -1`（回退一个迁移）或 `alembic downgrade base`（清空所有业务表）。
-- **首次引入的兼容性**（2026-08-11 已实测）：旧库（由历史 `init_db` 建成）首次 `upgrade head` 时 `CREATE TABLE IF NOT EXISTS` 跳过已有表、仅 stamp 到 head；全新库全量建 9 张业务表。embedding 列在迁移中用占位维度 1024，实际维度由 `init_db` 的 resize 对齐到配置模型。
+- **首次引入的兼容性**（2026-08-11 已实测）：旧库（由历史 `init_db` 建成）首次 `upgrade head` 时 `CREATE TABLE IF NOT EXISTS` 跳过已有表、仅 stamp 到 head；全新库全量建 9 张业务表。embedding 列用占位维度 1024；若配置模型维度不同，`init_db` 启动校验失败，需 `python -m scripts.recreate_db` 重建后重摄取。
 
 ## Backup & Restore
 
@@ -138,7 +138,7 @@ docker compose exec -T backup psql -h postgres -U ema -d ema_restore \
 - 访问：Grafana `http://localhost:3000`（登录 **admin** / `GF_ADMIN_PASSWORD`，默认 `admin`，首次登录请修改）；Prometheus `http://localhost:9090`（query 界面可手查 `ema_*`）。
 - 配置位置：抓取配置 `docker/prometheus.yml`；Grafana datasource / dashboard 载入 `docker/grafana/provisioning/`，看板 JSON `docker/grafana/dashboards/ema.json`（改后 `docker compose restart grafana` 生效）。
 - 数据持久化：`prometheus_data` / `grafana_data` 为 named volume，重启不丢；Grafana 的 datasource 通过固定 uid `prometheus` 与看板绑定。
-- **告警边界**：当前告警为进程内 LLM 错误率/熔断（`ALERTS_*`，日志 + 飞书 opt-in，见 Configuration）；Prometheus/Grafana 目前负责**观测与可视化**，尚未配置 Prometheus alert rules / Alertmanager——基础设施级告警（服务不可达、错误率突增）是下一步，不是现状。
+- **告警边界**：当前无进程内 LLM 健康告警——`backend/service/alerts.py` 的进程内告警循环已移除。其四个 check 中，结构化失败增长迁移为 Prometheus 的 `ema_structured_failures_total`（按 scenario 计数，见 `backend/shared/runtime_metrics.py`）；错误率、重试抖动、熔断器状态三个信号本就在 `runtime_metrics.py` 的同一咽喉点以时序暴露（LLM 调用 success/error 计数与延迟直方图、熔断器 open/closed gauge 与拒绝计数），并配结构化 WARNING 日志。原循环默认仅写日志、飞书推送 opt-in（默认关），与观测栈信号重叠且无独有覆盖，故删除以避免并行代码路径漂移。Prometheus/Grafana 目前负责**观测与可视化**，尚未配置 Prometheus alert rules / Alertmanager——基础设施级告警（服务不可达、错误率突增）是下一步，不是现状。
 
 ## HTTPS (TLS) 与反向代理
 
@@ -190,7 +190,6 @@ EMA 日志统一走 **stdout**（容器 `docker compose logs`），格式由 `LO
 - `AGENT_TIMEOUT` — Agent 单回合总超时（秒）
 - `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` / `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
 - `USAGE_*` — LLM 用量追踪（`USAGE_ENABLED` / `USAGE_FLUSH_INTERVAL_SECONDS` / `USAGE_BUFFER_MAX` / `USAGE_SAMPLE_RATE`——采样率决定多少成功调用把 prompt/response 文本存入 `llm_usage` 供事后质量分析，error 调用一律采样；`/api/usage/samples` 查询。`USAGE_SAMPLE_RETENTION_DAYS`——采样文本保留天数，到期由 flusher 清空文本列、元数据保留，默认 30）
-- `ALERT_*` — LLM 健康告警（`ALERTS_ENABLED` / `ALERT_ERROR_RATE_THRESHOLD` / `ALERT_CHECK_INTERVAL_SECONDS` / `ALERT_FEISHU_ENABLED`——错误率/结构化失败/熔断超阈值写日志；飞书推送需显式开启）
 - `METRICS_ENABLED` — 运行健康指标（Prometheus，默认 true）。开启后 `GET /metrics` 暴露进程内时间序列：HTTP 请求数与延迟分位数、LLM 调用数/延迟/token、熔断器状态与打开/拒绝计数、Agent 并发槽位占用与 503 拒绝、ReAct 循环步数分布。与 `USAGE_ENABLED` 独立——这是进程本地健康观测，`llm_usage` 是持久化成本行。关闭则 `/metrics` 返回 404
 - `RATE_LIMIT_*` — API 限流（per-key 令牌桶，默认开启）：`RATE_LIMIT_ENABLED` / `RATE_LIMIT_CHAT_REQUESTS`（默认 30）/ `RATE_LIMIT_CHAT_WINDOW_SECONDS`（60，覆盖 `/api/agent/chat*` 与 `/api/scenarios*` 的 LLM 密集档）/ `RATE_LIMIT_GENERAL_REQUESTS`（120）/ `RATE_LIMIT_GENERAL_WINDOW_SECONDS`（60，其余 `/api` 路由）。按 `Authorization: Bearer` 的 token 分桶（无 token 归共享 `anonymous` 桶），超限返回 `429 + Retry-After`。实现见 `backend/api/ratelimit.py`；`APP_ENV=test` 豁免（与 auth 一致），`/health`、`/metrics`、静态资源不受限
 - `LOG_LEVEL` — 日志级别（DEBUG / INFO / WARNING / ERROR）
@@ -220,7 +219,7 @@ curl -H "Authorization: Bearer <your-key>" http://localhost:8000/api/memory/stat
 - **启动配置校验**：启动时运行 `validate_config()`，检查巡检时间范围（`PATROL_DAILY_HOUR` 等 0-23 / 0-6）、重试与熔断参数边界、`LLM_API_KEY` 非空（`APP_ENV=test` 豁免）。配置非法直接拒绝启动，而非等首个请求才报错或静默产生无效调度。
 - **健康检查**：`GET /health` 返回 `{"status", "database", "llm", "embedding"}`——除数据库连通性外，廉价上报 LLM/Embedding provider 的配置状态与熔断器开关（`circuit: closed/open/n/a`，不做真实 LLM 调用，避免探活烧 token）；数据库不可达时返回 503 `{"status": "degraded", "database": "unreachable"}`，供负载均衡 / 容器探活使用。
 - **巡检兜底**：启动时把上次进程残留的 `running` 巡检日志标记为 `failed`（`mark_stale_patrols_failed`）；单次巡检受 `PATROL_TIMEOUT`（默认 600s）约束，同类型巡检互斥（已在运行时直接跳过）。此外，若某类巡检已有计划历史、但最近一个计划槽（daily/hour 或 weekly/day+hour）内没有运行记录——即进程在计划时刻停机——启动时补跑一次（`trigger=cron_catchup`），避免重启静默丢一轮巡检；全新部署（无历史）不触发补跑。
-- **巡检可靠性**：巡检是全库扫描，扫描步数与输出空间独立于交互式配置——`daily` 用 15 步、`weekly`/`contradiction_scan` 用 20 步（交互式 `MAX_AGENT_STEPS` 默认 5 会把巡检在扫描中途强停）；最终报告合成输出上限为 `PATROL_MAX_TOKENS`（默认 8000，独立于交互式 `LLM_MAX_TOKENS`），且 daily/weekly prompt 限制各类条目数，保证完整 JSON 能单次输出。校验失败（缺键或非 JSON）时做一次有界的修复重试：短片段（<300 字符，如"Let me scan more…"）不算报告、直接失败，只有实质报告才经一次强指令 LLM 调用重写为合规 JSON，重写仍不合规则保持 `failed` 并保留原始输出。
+- **巡检可靠性**：巡检是全库扫描，扫描步数与输出空间独立于交互式配置——`daily` 用 15 步、`weekly` 用 20 步（交互式 `MAX_AGENT_STEPS` 默认 5 会把巡检在扫描中途强停）；最终报告合成输出上限为 `PATROL_MAX_TOKENS`（默认 8000，独立于交互式 `LLM_MAX_TOKENS`），且 daily/weekly prompt 限制各类条目数，保证完整 JSON 能单次输出。输出不符合 JSON 契约（缺键或非 JSON）时巡检记 `failed` 并保留原始输出供排查，不重写重试。
 
 ## Runtime Architecture
 

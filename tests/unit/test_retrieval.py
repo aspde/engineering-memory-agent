@@ -611,28 +611,28 @@ class TestRetrieve:
         assert vs.await_args.kwargs["threshold"] == mod._RECALL_THRESHOLD
 
 
-class TestQueryMemoriesDecayBatch:
-    """query_memories updates decay in ONE batch; a write failure can't sink the search."""
+class TestQueryMemoriesRecall:
+    """query_memories records recalls in ONE batch; a write failure can't sink the search."""
 
     @staticmethod
-    def _candidate(mid: str, decay: float = 0.8):
+    def _candidate(mid: str, score: float = 0.8):
         return {
             "id": mid,
             "source_type": "conversation",
             "summary": f"summary {mid}",
             "entities": [],
             "relations": [],
-            "decay_factor": decay,
-            # mirror of search_memories' decay-weighted similarity
-            "weighted_score": decay,
+            # mirror of search_memories' raw-similarity output
+            "similarity": score,
             "recall_count": 1,
             "meta": {},
             "created_at": None,
+            "recalled_at": None,
         }
 
-    def _patch(self, monkeypatch, candidates, ranked, decay_map=None, decay_raises=False):
+    def _patch(self, monkeypatch, candidates, ranked, recall_raises=False):
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1]])
@@ -642,53 +642,49 @@ class TestQueryMemoriesDecayBatch:
             "backend.service.rerank.rerank_cross_encoder",
             AsyncMock(return_value=ranked),
         )
-        if decay_raises:
+        if recall_raises:
             monkeypatch.setattr(
-                decay_mod,
-                "update_decay_batch",
+                recall_mod,
+                "record_recalls",
                 AsyncMock(side_effect=RuntimeError("db down")),
             )
         else:
             monkeypatch.setattr(
-                decay_mod,
-                "update_decay_batch",
-                AsyncMock(return_value=decay_map or {}),
+                recall_mod,
+                "record_recalls",
+                AsyncMock(return_value=None),
             )
         return mod
 
     @pytest.mark.asyncio
-    async def test_batch_update_in_single_call(self, monkeypatch) -> None:
-        """All surviving memory ids go through ONE update_decay_batch call,
-        not N sequential update_decay commits (the N+1 fix).  Exercises the
-        explicit cross-encoder path: the reranker ranks, floor passes both,
-        then decay bumps them in one batch."""
+    async def test_recalls_bumped_in_single_call(self, monkeypatch) -> None:
+        """All surviving memory ids go through ONE record_recalls call, not N
+        sequential commits (the N+1 fix).  Exercises the explicit cross-encoder
+        path: the reranker ranks, floor passes both, then recalls are recorded
+        in one batch."""
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         cands = [self._candidate("m1"), self._candidate("m2", 0.5)]
         self._patch(
             monkeypatch,
             cands,
             [(0, 0.9), (1, 0.8)],
-            decay_map={"m1": 0.99, "m2": 0.77},
         )
 
         results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
         assert [r["id"] for r in results] == ["m1", "m2"]
-        decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
-        # New factors from the batch overwrite the candidates' stale ones.
-        assert results[0]["decay_factor"] == pytest.approx(0.99)
-        assert results[1]["decay_factor"] == pytest.approx(0.77)
+        recall_mod.record_recalls.assert_awaited_once_with(["m1", "m2"])
 
     @pytest.mark.asyncio
     async def test_default_path_skips_cross_encoder(self, monkeypatch) -> None:
         """Default memory search must not run the cross-encoder (mocked to
-        raise) — candidates rank by decay-weighted similarity and the batch
-        decay update still runs.  Regression guard for the eval finding that
-        the 568M reranker costs ~90x latency without recall gain."""
+        raise) — candidates rank by raw similarity and the batch recall write
+        still runs.  Regression guard for the eval finding that the 568M
+        reranker costs ~90x latency without recall gain."""
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
@@ -696,36 +692,29 @@ class TestQueryMemoriesDecayBatch:
             "backend.service.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("rerank must not run by default")),
         )
-        monkeypatch.setattr(
-            decay_mod,
-            "update_decay_batch",
-            AsyncMock(return_value={"m1": 0.95, "m2": 0.4}),
-        )
+        monkeypatch.setattr(recall_mod, "record_recalls", AsyncMock(return_value=None))
 
         results = await mod.query_memories("q", top_k=5)
 
         assert [r["id"] for r in results] == ["m1", "m2"]
-        # rerank_score carries the decay-weighted similarity, not a reranker score
+        # rerank_score carries the raw similarity, not a reranker score
         assert results[0]["rerank_score"] == pytest.approx(0.9)
         assert results[1]["rerank_score"] == pytest.approx(0.5)
-        decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
-        assert results[0]["decay_factor"] == pytest.approx(0.95)
-        assert results[1]["decay_factor"] == pytest.approx(0.4)
+        recall_mod.record_recalls.assert_awaited_once_with(["m1", "m2"])
 
     @pytest.mark.asyncio
-    async def test_decay_failure_returns_stale_factors(self, monkeypatch) -> None:
-        """A decay-write failure must not fail the search — stale factors
-        are returned and the error is logged, not propagated."""
+    async def test_recall_failure_does_not_sink_search(self, monkeypatch) -> None:
+        """A recall-write failure must not fail the search — results are
+        returned and the error is logged, not propagated."""
         from backend.service import retrieval as mod
 
         cands = [self._candidate("m1", 0.8)]
-        self._patch(monkeypatch, cands, [(0, 0.9)], decay_raises=True)
+        self._patch(monkeypatch, cands, [(0, 0.9)], recall_raises=True)
 
         results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
 
         assert len(results) == 1
         assert results[0]["id"] == "m1"
-        assert results[0]["decay_factor"] == pytest.approx(0.8)
 
     @pytest.mark.asyncio
     async def test_bounded_ce_does_not_floor_drop(self, monkeypatch) -> None:
@@ -750,7 +739,7 @@ class TestQueryMemoriesDecayBatch:
     @pytest.mark.asyncio
     async def test_bounded_ce_only_reranks_top_n(self, monkeypatch) -> None:
         """Only the top _MEMORY_BOUNDED_RERANK_N candidates are cross-encoder
-        scored; the rest keep their decay-weighted order untouched."""
+        scored; the rest keep their similarity order untouched."""
         from unittest.mock import AsyncMock
 
         from backend.service import retrieval as mod
@@ -767,7 +756,6 @@ class TestQueryMemoriesDecayBatch:
             monkeypatch,
             cands,
             [],
-            decay_map={f"m{i}": 0.9 for i in range(1, 6)},
         )
         rerank_mock = AsyncMock(
             return_value=[(2, 0.95), (0, 0.9), (1, 0.85)]
@@ -781,7 +769,7 @@ class TestQueryMemoriesDecayBatch:
         # CE sees ONLY the zone summaries (m1, m2, m3), not the full list.
         call_args = rerank_mock.await_args.args
         assert call_args[1] == ["summary m1", "summary m2", "summary m3"]
-        # Zone re-ranked by CE score; tail (m4, m5) in decay order.
+        # Zone re-ranked by CE score; tail (m4, m5) in similarity order.
         assert [r["id"] for r in results] == ["m3", "m1", "m2", "m4", "m5"]
 
     @pytest.mark.asyncio
@@ -791,7 +779,7 @@ class TestQueryMemoriesDecayBatch:
 
         cands = [
             self._candidate(f"m{i}", (5 - i) * 0.1) for i in range(1, 6)
-        ]  # m1..m5, decay-descending
+        ]  # m1..m5, similarity-descending
         self._patch(
             monkeypatch,
             cands,
@@ -804,12 +792,12 @@ class TestQueryMemoriesDecayBatch:
         assert [r["id"] for r in results] == ["m1", "m2", "m3"]
 
     @pytest.mark.asyncio
-    async def test_llm_rerank_total_failure_falls_back_to_decay_weighted(self, monkeypatch) -> None:
+    async def test_llm_rerank_total_failure_falls_back_to_similarity_ranking(self, monkeypatch) -> None:
         """An LLM rerank channel failure must not empty memory search —
-        candidates fall back to the decay-weighted ranking, and the decay
-        batch still bumps them."""
+        candidates fall back to the similarity ranking, and the recall batch
+        still records them."""
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
@@ -820,19 +808,19 @@ class TestQueryMemoriesDecayBatch:
 
         results = await mod.query_memories("q", top_k=5, use_llm_rerank=True)
 
-        # Fallback returns the decay-weighted ranking, not an empty result.
+        # Fallback returns the similarity ranking, not an empty result.
         assert [r["id"] for r in results] == ["m1", "m2"]
         assert results[0]["rerank_score"] == pytest.approx(0.9)
         assert results[1]["rerank_score"] == pytest.approx(0.5)
-        decay_mod.update_decay_batch.assert_awaited_once_with(["m1", "m2"])
+        recall_mod.record_recalls.assert_awaited_once_with(["m1", "m2"])
 
     @pytest.mark.asyncio
     async def test_llm_rerank_honest_low_scores_stay_empty_for_memories(self, monkeypatch) -> None:
         """Same honesty on the memory path: an all-below-floor LLM verdict is
-        kept as an empty result, not silently replaced by the recall ranking
-        — and no decay bump happens for an empty result."""
+        kept as an empty result, not silently replaced by the similarity
+        ranking — and no recall is recorded for an empty result."""
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.5)])
@@ -844,36 +832,9 @@ class TestQueryMemoriesDecayBatch:
         results = await mod.query_memories("q", top_k=5, use_llm_rerank=True)
 
         assert results == []
-        # No memory is decay-bumped by an empty result (the batch is called
-        # with no ids — update_decay_batch returns early on an empty list).
-        decay_mod.update_decay_batch.assert_awaited_once_with([])
-
-    @pytest.mark.asyncio
-    async def test_use_decay_false_skips_decay_write(self, monkeypatch) -> None:
-        """The decay A/B control: ``use_decay=False`` must not write decay
-        state (``update_decay_batch`` never runs) and ranks by raw similarity
-        — not the decay-weighted score."""
-        from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
-
-        cands = [
-            {"id": "m1", "summary": "s1", "similarity": 0.9},
-            {"id": "m2", "summary": "s2", "similarity": 0.5},
-        ]
-        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
-        monkeypatch.setattr(
-            decay_mod,
-            "update_decay_batch",
-            AsyncMock(side_effect=AssertionError("decay write must not run")),
-        )
-
-        results = await mod.query_memories("q", top_k=5, use_decay=False)
-
-        assert [r["id"] for r in results] == ["m1", "m2"]
-        # rerank_score carries the raw similarity, not a decay-weighted score.
-        assert results[0]["rerank_score"] == pytest.approx(0.9)
-        assert results[1]["rerank_score"] == pytest.approx(0.5)
-        decay_mod.update_decay_batch.assert_not_awaited()
+        # No memory is recalled by an empty result (the batch is called with
+        # no ids — record_recalls returns early on an empty list).
+        recall_mod.record_recalls.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
     async def test_repeat_query_hits_embed_query_cache(self, monkeypatch) -> None:
@@ -881,7 +842,7 @@ class TestQueryMemoriesDecayBatch:
         repeat query (SSE reconnect / re-ask / eval re-run) skips the provider
         after the first call."""
         from backend.service import retrieval as mod
-        from backend.service import decay as decay_mod
+        from backend.service import recall as recall_mod
 
         clear_embed_query_cache()
         provider = MagicMock()
@@ -889,9 +850,7 @@ class TestQueryMemoriesDecayBatch:
         monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
         cands = [self._candidate("m1", 0.8)]
         monkeypatch.setattr(mod, "search_memories", AsyncMock(return_value=cands))
-        monkeypatch.setattr(
-            decay_mod, "update_decay_batch", AsyncMock(return_value={"m1": 0.99})
-        )
+        monkeypatch.setattr(recall_mod, "record_recalls", AsyncMock(return_value=None))
 
         await mod.query_memories("同一问题", top_k=5)
         await mod.query_memories("同一问题", top_k=5)

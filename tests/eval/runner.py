@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from tests.eval.core import aggregate
 from tests.eval.dataset import (
     RetrieverAdapter,
     build_adapter,
@@ -62,9 +63,6 @@ class EvalConfig:
     use_cross_encoder: bool = False
     threshold: float | None = None
     categories: list[str] | None = None
-    # Memory-path decay: False ranks by raw similarity and skips the decay
-    # write — the decay A/B control.  Defaults True (production behavior).
-    use_decay: bool = True
 
     def adapter(self) -> RetrieverAdapter:
         return build_adapter(
@@ -72,7 +70,6 @@ class EvalConfig:
             use_llm_rerank=self.use_llm_rerank,
             use_cross_encoder=self.use_cross_encoder,
             threshold=self.threshold,
-            use_decay=self.use_decay,
         )
 
     @property
@@ -80,12 +77,9 @@ class EvalConfig:
         """Short human label, e.g. ``memory:norank@k5``.
 
         ``norank`` is the default read path (no cross-encoder); ``ce`` and
-        ``llm`` label the explicit opt-in rerankers.  A memory run without
-        decay weighting appends ``:nodecay`` so the A/B arms are distinct.
+        ``llm`` label the explicit opt-in rerankers.
         """
         base = f"{self.retriever}:{rerank_tag(self.use_llm_rerank, self.use_cross_encoder)}"
-        if not self.use_decay:
-            base = f"{base}:nodecay"
         return f"{base}@k{self.top_k}"
 
 
@@ -116,14 +110,12 @@ def _filter_items(
 
 
 def _aggregate(rows: list[dict[str, Any]]) -> dict[str, float]:
-    """Mean of each metric/aux key across rows. Empty input → all zeros."""
-    if not rows:
-        return {k: 0.0 for k in METRIC_KEYS + AUX_KEYS}
-    out: dict[str, float] = {}
-    for k in METRIC_KEYS + AUX_KEYS:
-        vals = [float(r.get(k, 0.0)) for r in rows]
-        out[k] = sum(vals) / len(vals)
-    return out
+    """Mean of each metric/aux key across rows (empty → zeros).
+
+    Delegates to the shared ``tests.eval.core.aggregate``; the key set is the
+    retrieval runner's metric + auxiliary columns.
+    """
+    return aggregate(rows, METRIC_KEYS + AUX_KEYS)
 
 
 async def run_eval(
@@ -309,7 +301,6 @@ def config_from_dict(d: dict[str, Any]) -> EvalConfig:
         use_cross_encoder=bool(d.get("use_cross_encoder", False)),
         threshold=d.get("threshold"),
         categories=list(d["categories"]) if d.get("categories") else None,
-        use_decay=bool(d.get("use_decay", True)),
     )
 
 

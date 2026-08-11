@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from backend.service.patrol_prompts import (
-    CI_FAILURE_PATROL_PROMPT,
     DAILY_PATROL_PROMPT,
-    JIRA_RESOLVED_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )
 
@@ -41,10 +39,10 @@ class TestWeeklyPatrolPrompt:
         assert "contradiction" in prompt.lower()
         assert "contradictions" in prompt
 
-    def test_weekly_prompt_includes_decay_health_instructions(self) -> None:
+    def test_weekly_prompt_includes_stale_memory_instructions(self) -> None:
         prompt = WEEKLY_PATROL_PROMPT
-        assert "decay" in prompt.lower()
-        assert "decay_alerts" in prompt
+        assert "stale_memories" in prompt
+        assert "recall_count" in prompt
 
     def test_weekly_prompt_includes_entity_coverage_instructions(self) -> None:
         prompt = WEEKLY_PATROL_PROMPT
@@ -58,24 +56,3 @@ class TestWeeklyPatrolPrompt:
     def test_weekly_prompt_specifies_top_20_entities(self) -> None:
         prompt = WEEKLY_PATROL_PROMPT
         assert "20" in prompt
-
-
-class TestCIEventPrompt:
-    """Verify the CI failure event prompt."""
-
-    def test_ci_failure_prompt_includes_search_instructions(self) -> None:
-        prompt = CI_FAILURE_PATROL_PROMPT
-        assert "search" in prompt.lower()
-
-    def test_ci_failure_prompt_has_should_alert_field(self) -> None:
-        prompt = CI_FAILURE_PATROL_PROMPT
-        assert "should_alert" in prompt
-
-
-class TestJiraResolvedPrompt:
-    """Verify the Jira resolved event prompt."""
-
-    def test_jira_resolved_prompt_includes_root_cause_check(self) -> None:
-        prompt = JIRA_RESOLVED_PATROL_PROMPT
-        assert "root_cause" in prompt
-        assert "is_repeat" in prompt

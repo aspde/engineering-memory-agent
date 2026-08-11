@@ -176,7 +176,6 @@ export interface MemoryGetResponse {
   summary: string;
   entities: Record<string, unknown>[];
   relations: Record<string, unknown>[];
-  decay_factor: number;
   recall_count: number;
   meta: Record<string, unknown>;
   created_at: string;
@@ -244,7 +243,7 @@ export interface MemoryStatsResponse {
   total_chunks: number;
   total_conversations: number;
   by_source_type: { source_type: string; count: number }[];
-  avg_decay_factor: number;
+  avg_recall_count: number;
   avg_entities_per_memory: number;
   avg_relations_per_memory: number;
   recent_count_7d: number;
@@ -309,7 +308,7 @@ export interface ConnectorLogsResponse {
 
 // ── Patrol types (Phase 3: proactive agent) ──────────────────────────
 
-export type PatrolType = 'daily' | 'weekly' | 'event_driven' | 'manual';
+export type PatrolType = 'daily' | 'weekly' | 'manual';
 export type PatrolTrigger = 'cron' | 'webhook' | 'manual';
 export type PatrolStatus = 'running' | 'completed' | 'failed';
 
@@ -353,7 +352,10 @@ export interface PatrolLogDetail {
   patrol_type: PatrolType;
   trigger: PatrolTrigger;
   status: PatrolStatus;
-  findings: Record<string, PatrolFinding[]> | null;
+  /** Findings grouped by category key.  A group's value is an array of
+   *  findings; an unstructured (failed/raw) log instead carries a single
+   *  ``raw_output`` string with the patrol's original report text. */
+  findings: Record<string, PatrolFinding[] | string> | null;
   dismissed_findings: string[];
   started_at: string;
   completed_at: string | null;

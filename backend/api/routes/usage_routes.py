@@ -1,9 +1,8 @@
 """Usage tracing query API — reads persisted LLM-usage rows from ``llm_usage``.
 
-Complements the in-memory counters behind ``GET /api/agent/usage`` (which
-reset on restart): these endpoints answer "how many calls / tokens / errors
-over the last N days, broken down by day / scenario / model", replay a single
-trace, and estimate USD cost from a built-in price table.
+These endpoints answer "how many calls / tokens / errors over the last N
+days, broken down by day / scenario / model", replay a single trace, and
+estimate USD cost from a built-in price table.
 
 All queries read raw rows with ``GROUP BY`` in SQL — there is no separate
 aggregate table (simple first).

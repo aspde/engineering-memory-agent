@@ -9,7 +9,7 @@ from typing import Any
 
 from backend.model.llm import LLMProvider
 from backend.shared.config import config
-from backend.shared.metrics import pop_scenario, record_usage
+from backend.shared.metrics import pop_scenario
 from backend.shared.resilience import (
     CircuitOpenError,
     call_with_resilience,
@@ -104,7 +104,6 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         text = response.choices[0].message.content or ""
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text,
@@ -146,7 +145,6 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         msg = response.choices[0].message
         result: dict[str, object] = {"content": msg.content or ""}
 
@@ -201,7 +199,6 @@ class OpenAICompatibleProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         text = response.choices[0].message.content or ""
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text,
@@ -284,7 +281,6 @@ class OpenAICompatibleProvider(LLMProvider):
             # before the fallback so the first request's cost isn't lost when
             # the fallback fires (regardless of the fallback's own outcome).
             first_usage = getattr(response, "usage", None)
-            record_usage(scenario, first_usage)
             self._record(
                 ctx, scenario=scenario, usage=first_usage, response_text=text,
                 attempts=attempts,
@@ -308,7 +304,6 @@ class OpenAICompatibleProvider(LLMProvider):
             text = response.choices[0].message.content or ""
 
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text,
             attempts=attempts,
@@ -402,8 +397,6 @@ class OpenAICompatibleProvider(LLMProvider):
                 usage = getattr(response, "usage", None)
                 if usage is None and last_chunk is not None:
                     usage = getattr(last_chunk, "usage", None)
-                if usage is not None:
-                    record_usage(scenario, usage)
                 self._record(
                     ctx, scenario=scenario, usage=usage,
                     response_text="".join(content_parts),
@@ -544,7 +537,6 @@ class AnthropicProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         text = self._extract_text(response.content)
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text,
@@ -589,7 +581,6 @@ class AnthropicProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         content_blocks: list[object] = response.content  # type: ignore[assignment]
         text = self._extract_text(content_blocks)
         result: dict[str, object] = {"content": text}
@@ -646,7 +637,6 @@ class AnthropicProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         text = self._extract_text(response.content)
         self._record(
             ctx, scenario=scenario, usage=usage, response_text=text,
@@ -720,7 +710,6 @@ class AnthropicProvider(LLMProvider):
             )
             raise
         usage = getattr(response, "usage", None)
-        record_usage(scenario, usage)
         for block in response.content:  # type: ignore[attr-defined]
             if getattr(block, "type", "") == "tool_use":
                 text = json.dumps(
@@ -808,9 +797,6 @@ class AnthropicProvider(LLMProvider):
                         usage = getattr(stream.current_message_snapshot, "usage", None)
                     except Exception:
                         usage = None
-                    if usage is not None:
-                        record_usage(scenario, usage)
-
             self._record(
                 ctx, scenario=scenario, usage=usage,
                 response_text="".join(content_parts),

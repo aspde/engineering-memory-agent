@@ -108,16 +108,12 @@ class TestModuleReExports:
 
     def test_patrol_constants_match_registry(self) -> None:
         from backend.service.patrol_prompts import (
-            CI_FAILURE_PATROL_PROMPT,
             DAILY_PATROL_PROMPT,
-            JIRA_RESOLVED_PATROL_PROMPT,
             WEEKLY_PATROL_PROMPT,
         )
 
         assert DAILY_PATROL_PROMPT == get_prompt("patrol.daily")[1]
         assert WEEKLY_PATROL_PROMPT == get_prompt("patrol.weekly")[1]
-        assert CI_FAILURE_PATROL_PROMPT == get_prompt("patrol.ci_failure")[1]
-        assert JIRA_RESOLVED_PATROL_PROMPT == get_prompt("patrol.jira_resolved")[1]
 
     def test_scenario_constants_match_registry(self) -> None:
         from backend.service.scenarios.code_review import CODE_REVIEW_SYSTEM_PROMPT

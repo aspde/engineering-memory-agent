@@ -3,7 +3,7 @@
 Mirrors ``tests.eval.llm_runner.run_e2e``: each task in the labeled set is
 executed through an (injectable) executor, per-task metrics come from the
 pure functions in ``task_metrics``, and everything rolls up into a
-:class:`TaskEvalResult`.
+:class:`TaskEvalResult` (an alias of the shared ``tests.eval.core.EvalResult``).
 
 Design notes (same policy as the LLM behavior eval):
 
@@ -25,16 +25,15 @@ Design notes (same policy as the LLM behavior eval):
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
+from tests.eval.core import EvalResult, finish, zero_judge_keys
 from tests.eval.llm_judge import judge_answer
 from tests.eval.llm_metrics import (
     answer_deterministic_metrics,
     answer_judge_metrics,
     citation_presence,
 )
-from tests.eval.llm_runner import ANSWER_JUDGE_METRIC_KEYS
 from tests.eval.task_executors import TaskOutcome, make_task_runner
 from tests.eval.task_ground_truth import (
     TASK_CATEGORIES,
@@ -47,33 +46,9 @@ from tests.eval.task_metrics import TASK_METRIC_KEYS, task_completion_metrics
 TaskExecutor = Callable[[str], Awaitable[Any]]
 
 
-@dataclass
-class TaskEvalResult:
-    """Aggregate result of the task suite over its labeled set."""
-
-    suite: str  # "task"
-    judge: str  # "llm" | "deterministic"
-    per_query: list[dict[str, Any]]
-    overall: dict[str, float]
-    by_category: dict[str, dict[str, float]]
-    metric_keys: tuple[str, ...]
-    n_items: int
-    errors: list[dict[str, str]] = field(default_factory=list)
-    judge_errors: list[dict[str, str]] = field(default_factory=list)
-
-    def metric(self, key: str) -> float:
-        """Read an overall metric (0.0 if absent)."""
-        return float(self.overall.get(key, 0.0))
-
-
-def _aggregate(rows: Sequence[dict[str, Any]], keys: Sequence[str]) -> dict[str, float]:
-    """Mean of each key across rows. Empty input → all zeros."""
-    if not rows:
-        return {k: 0.0 for k in keys}
-    return {
-        k: sum(float(r.get(k, 0.0)) for r in rows) / len(rows)
-        for k in keys
-    }
+# The generic result container is shared with the LLM behaviour suites via
+# ``tests.eval.core``; only the name is suite-specific.
+TaskEvalResult = EvalResult
 
 
 def _finish(
@@ -83,21 +58,8 @@ def _finish(
     keys: Sequence[str],
     judge: str,
 ) -> TaskEvalResult:
-    by_category: dict[str, dict[str, float]] = {
-        cat: _aggregate([r for r in rows if r.get("category") == cat], keys)
-        for cat in TASK_CATEGORIES
-    }
-    return TaskEvalResult(
-        suite="task",
-        judge=judge,
-        per_query=rows,
-        overall=_aggregate(rows, keys),
-        by_category=by_category,
-        metric_keys=tuple(keys),
-        n_items=len(rows),
-        errors=errors,
-        judge_errors=judge_errors,
-    )
+    """Roll up the task rows via the shared :func:`tests.eval.core.finish`."""
+    return finish("task", judge, rows, errors, judge_errors, keys, TASK_CATEGORIES)
 
 
 async def run_tasks(
@@ -192,7 +154,7 @@ async def run_tasks(
                     # under the judge metric keys (different semantic) — zero
                     # them so --min-fact-coverage / --min-groundedness fail
                     # loudly; the deterministic values stay under det_*.
-                    row.update({k: 0.0 for k in ANSWER_JUDGE_METRIC_KEYS})
+                    zero_judge_keys(row)
             else:
                 row.update(det)
         except Exception as exc:

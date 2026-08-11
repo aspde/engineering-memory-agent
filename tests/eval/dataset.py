@@ -313,13 +313,12 @@ def make_memory_retriever(
     use_llm_rerank: bool = False,
     use_cross_encoder: bool = False,
     threshold: float = 0.3,
-    use_decay: bool = True,
 ) -> RetrieverAdapter:
     """Adapter for ``retrieval.query_memories`` (memories table).
 
     Returns results as ``[{"id": str, "summary": str, "rerank_score": float, ...}]``
-    with ``match_field="summary"``.  ``use_decay=False`` ranks by raw
-    similarity and skips the decay write — the decay A/B control.
+    with ``match_field="summary"``.  Ranking is raw similarity; recalls are
+    recorded as metadata.
     """
     from backend.service.retrieval import query_memories
 
@@ -330,12 +329,9 @@ def make_memory_retriever(
             threshold=threshold,
             use_llm_rerank=use_llm_rerank,
             use_cross_encoder=use_cross_encoder,
-            use_decay=use_decay,
         )
 
     label = rerank_tag(use_llm_rerank, use_cross_encoder)
-    if not use_decay:
-        label = f"{label}:nodecay"
     return RetrieverAdapter(
         name=f"memory:{label}",
         fn=_fn,
@@ -432,7 +428,6 @@ def build_adapter(
     use_llm_rerank: bool = False,
     use_cross_encoder: bool = False,
     threshold: float | None = None,
-    use_decay: bool = True,
 ) -> RetrieverAdapter:
     """Construct a RetrieverAdapter by name.
 
@@ -443,8 +438,6 @@ def build_adapter(
             Both default False → the no-rerank read path.
         threshold: similarity floor. ``None`` uses each path's default
             (0.0 for chunks, 0.3 for memories).
-        use_decay: memory-path only — False ranks by raw similarity and
-            skips the decay write (the decay A/B control).
     """
     if retriever == "chunk":
         return make_chunk_retriever(
@@ -457,7 +450,6 @@ def build_adapter(
             use_llm_rerank=use_llm_rerank,
             use_cross_encoder=use_cross_encoder,
             threshold=threshold if threshold is not None else 0.3,
-            use_decay=use_decay,
         )
     if retriever == "vector":
         return make_vector_retriever(

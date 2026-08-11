@@ -44,9 +44,8 @@ def _reset_auto_memory_throttle() -> None:
     """Reset auto-memory throttle state so tests never throttle each other.
 
     Auto-memory captures are rate-limited in-process (see
-    ``backend.agent.nodes._auto_memory_throttled``); without a reset, writes
-    accumulating across tests would start tripping the process-wide
-    rolling-window cap and tests would fail spuriously.
+    ``backend.agent.nodes._auto_memory_throttled``); without a reset, a
+    write in one test would suppress the next within the minimum interval.
     """
     from tests.support.process_state import reset_auto_memory_throttle
 

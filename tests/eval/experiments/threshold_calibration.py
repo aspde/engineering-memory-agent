@@ -25,7 +25,7 @@ regenerates ``threshold_calibration_report.md`` under the current
 classification.
 
 Usage:
-    python -m tests.eval.threshold_calibration --report-md tests/eval/reports/threshold_calibration_report.md
+    python -m tests.eval.experiments.threshold_calibration --report-md tests/eval/reports/threshold_calibration_report.md
 """
 
 from __future__ import annotations
@@ -191,7 +191,7 @@ async def _main(report_md: str | None) -> int:
             "",
             "## 方法",
             "",
-            "三类摘要对（`tests/eval/threshold_calibration.py`）：",
+            "三类摘要对（`tests/eval/experiments/threshold_calibration.py`）：",
             "",
             f"- **duplicate**：{_N_PARAPHRASES} 条 seed 的 LLM 同义改写（应 merge）",
             "- **same-category**：同类 15 对/类（应 独立或补充，不 merge）",
@@ -243,7 +243,7 @@ async def _main(report_md: str | None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m tests.eval.threshold_calibration",
+        prog="python -m tests.eval.experiments.threshold_calibration",
         description="Calibrate the four-level similarity thresholds on seed data.",
     )
     p.add_argument("--report-md", default=None, help="Write a Markdown report.")

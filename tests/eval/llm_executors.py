@@ -157,13 +157,15 @@ def _format_memory_display(results: list[dict[str, Any]]) -> tuple[str, list[str
     lines: list[str] = []
     source_ids: list[str] = []
     for i, r in enumerate(results):
-        score = r.get("rerank_score", r.get("weighted_score", 0))
-        decay = r.get("decay_factor", 1.0)
+        score = r.get("rerank_score", r.get("similarity", 0))
         mid = str(r["id"])
         source_ids.append(mid)
+        recalls = int(r.get("recall_count", 0) or 0)
+        recalled_at = r.get("recalled_at")
+        last_recalled = recalled_at.isoformat()[:10] if recalled_at else "never"
         lines.append(
             f"[{i + 1}] (memory: {mid[:8]}, relevance: {float(score):.2f}, "
-            f"decay: {float(decay):.2f}) {r['summary']}"
+            f"recalls: {recalls}, last_recalled: {last_recalled}) {r['summary']}"
         )
     return "\n".join(lines), source_ids
 

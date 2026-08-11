@@ -24,6 +24,12 @@ ones:
 - **ReAct loop** — ``backend/api/routes/agent_routes.py`` observes the
   per-run step count, the same over-call signal the task eval measures
   offline, now observable on live traffic.
+- **Structured-output degradation** — enrichment extractions
+  (entity/relation extraction) that exhausted their retries and fell back
+  to ``[]`` are counted per scenario (``ema_structured_failures_total``).
+  The cost rows in ``llm_usage`` cannot show this: a degraded extraction
+  is still a ``success`` provider call, so only this series sees silent
+  memory-quality decay.
 
 All metric objects are thread-safe (prometheus_client).  Each record
 function is gated on ``config.metrics_enabled`` (default on) and never
@@ -90,6 +96,17 @@ LLM_TOKENS = Counter(
     "ema_llm_tokens_total",
     "LLM tokens by scenario and kind (input|output|total).",
     ["scenario", "kind"],
+    registry=_REGISTRY,
+)
+
+
+# ── Structured-output degradation ─────────────────────────────────────
+
+STRUCTURED_FAILURES = Counter(
+    "ema_structured_failures_total",
+    "Structured-output extraction calls that degraded to [] after "
+    "exhausting their retries, by scenario.",
+    ["scenario"],
     registry=_REGISTRY,
 )
 
@@ -183,6 +200,24 @@ def record_llm_call(
         ):
             if value:
                 LLM_TOKENS.labels(scenario=scenario, kind=kind).inc(int(value))
+    except Exception:
+        pass
+
+
+def inc_structured_failures(scenario: str) -> None:
+    """Count one structured-output extraction degradation for *scenario*.
+
+    Called from enrichment call sites (entity/relation extraction) when a
+    structured call exhausts its retries and falls back to ``[]``.  The
+    cost rows in ``llm_usage`` cannot show this: a degraded extraction is
+    still a ``success`` provider call (the provider returned JSON; schema
+    validation failed afterwards), so only this series sees silent
+    memory-quality decay.
+    """
+    if not _enabled():
+        return
+    try:
+        STRUCTURED_FAILURES.labels(scenario=str(scenario or "default")).inc()
     except Exception:
         pass
 

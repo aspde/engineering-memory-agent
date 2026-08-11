@@ -17,16 +17,10 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
 
+from tests.eval.core import fmt as _fmt, write_text
 from tests.eval.ground_truth import DIFFICULTIES
 from tests.eval.runner import METRIC_KEYS, EvalResult, result_to_dict
-
-
-def _fmt(v: float | None, digits: int = 3) -> str:
-    if v is None:
-        return "—"
-    return f"{v:.{digits}f}"
 
 
 def _delta(a: float, b: float) -> str:
@@ -221,20 +215,12 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
 
 def write_json(results: Sequence[EvalResult], path: str) -> str:
     """Write JSON report to ``path``. Returns the path."""
-    from pathlib import Path
-
-    p = Path(path)
-    p.write_text(to_json(results), encoding="utf-8")
-    return str(p)
+    return write_text(path, to_json(results))
 
 
 def write_markdown(results: Sequence[EvalResult], path: str) -> str:
     """Write Markdown report to ``path``. Returns the path."""
-    from pathlib import Path
-
-    p = Path(path)
-    p.write_text(to_markdown(results), encoding="utf-8")
-    return str(p)
+    return write_text(path, to_markdown(results))
 
 
 def summarize(result: EvalResult) -> str:

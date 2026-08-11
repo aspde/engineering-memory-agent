@@ -9,10 +9,10 @@ lands.
 
 Usage:
     # After running the eval (or reusing the last report):
-    python -m tests.eval.compare_baseline
+    python -m tests.eval.experiments.compare_baseline
 
     # Explicit report path, larger tolerance for LLM-judged runs:
-    python -m tests.eval.compare_baseline --report path/to/report.json --tolerance 0.05
+    python -m tests.eval.experiments.compare_baseline --report path/to/report.json --tolerance 0.05
 
 Exit code: 0 when no metric dropped beyond tolerance vs baseline; 1 when one
 or more did.
@@ -37,7 +37,9 @@ import json
 import sys
 from pathlib import Path
 
-BASELINE_PATH = Path(__file__).resolve().parents[2] / "tests" / "eval" / "reports" / "llm-eval-baseline.json"
+# ``parents[3]`` because this module lives one level deeper than the report
+# modules it compares against: experiments/ → tests/eval → tests → repo root.
+BASELINE_PATH = Path(__file__).resolve().parents[3] / "tests" / "eval" / "reports" / "llm-eval-baseline.json"
 
 
 def _load(path: Path) -> dict:

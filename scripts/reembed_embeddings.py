@@ -1,9 +1,8 @@
-"""Re-embed rows whose ``embedding`` column is NULL (after a dimension migration).
+"""Re-embed rows whose ``embedding`` column is NULL.
 
-When the configured embedding model changes dimension, ``init_db`` empties the
-pgvector columns (vectors of the old size can't fit the resized column) and
-resizes them.  This script re-embeds the affected rows from their stored text
-so retrieval works again:
+NULL embeddings happen when a write path stored text but the embedding call
+failed, or after a manual column resize.  This script fills them from their
+stored text so retrieval works again:
 
     python -m scripts.reembed_embeddings                 # chunks + memories
     python -m scripts.reembed_embeddings --table chunks  # one table only

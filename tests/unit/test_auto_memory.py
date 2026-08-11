@@ -18,14 +18,16 @@ from tests.support.process_state import wait_auto_memory_tasks
 
 
 @pytest.fixture(autouse=True)
-def _llm_gate_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Run most auto-memory tests through the keyword-heuristic gate.
-
-    AUTO_MEMORY_LLM_GATE now defaults on; these tests exercise the zero-cost
-    keyword mode (gate off) so they stay hermetic.  ``TestAutoMemoryLlmGate``
-    re-enables the gate and mocks the judge instead.
+def _llm_gate_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default the auto-memory LLM gate to "worthy" so most tests exercise
+    the capture pipeline itself.  ``TestAutoMemoryLlmGate`` overrides the
+    judge verdict per test.
     """
-    monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", False)
+    from backend.service import structured as structured_mod
+
+    mock_provider = AsyncMock()
+    mock_provider.chat_json.return_value = '{"worthy": true}'
+    monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
 
 
 def _make_state(messages: list) -> AgentState:
@@ -455,36 +457,8 @@ class TestAutoMemoryWiring:
         mock_write.assert_not_awaited()
 
 
-class TestAutoMemoryQualityGate:
-    """Declarative-knowledge gate in keyword-heuristic mode
-    (AUTO_MEMORY_LLM_GATE=false) — questions, requests, and filler skip
-    before any LLM call is made."""
-
-    @pytest.mark.asyncio
-    async def test_question_turn_is_not_extracted(self, monkeypatch) -> None:
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="PostgreSQL 怎么优化性能？")])
-        )
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_request_turn_is_not_extracted(self, monkeypatch) -> None:
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="帮我查一下 pgvector 的索引配置")])
-        )
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
+class TestAutoMemoryLengthGate:
+    """The zero-cost pre-filter — short messages never reach the LLM gate."""
 
     @pytest.mark.asyncio
     async def test_short_fragment_is_not_extracted(self, monkeypatch) -> None:
@@ -494,48 +468,6 @@ class TestAutoMemoryQualityGate:
         mock_extract, mock_write = _mock_services(monkeypatch)
 
         await mod._maybe_auto_memory(_make_state([HumanMessage(content="pgvector")]))
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_chatty_filler_is_not_extracted(self, monkeypatch) -> None:
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="好的，谢谢！")])
-        )
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_symbol_noise_is_not_extracted(self, monkeypatch) -> None:
-        """Emoji/symbol runs pass the raw-length gate but carry zero knowledge."""
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="🎉" * 12)])
-        )
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
-
-    @pytest.mark.asyncio
-    async def test_long_acknowledgement_is_not_extracted(self, monkeypatch) -> None:
-        """A longer polite acknowledgement exceeds the raw length gate but has
-        no informative content after stripping chatty words."""
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="好的，明白了，收到，谢谢！")])
-        )
         mock_extract.assert_not_awaited()
         mock_write.assert_not_awaited()
 
@@ -554,15 +486,13 @@ class TestAutoMemoryQualityGate:
 
 
 class TestAutoMemoryLlmGate:
-    """AUTO_MEMORY_LLM_GATE=true (the default) adds one LLM call to the
-    quality gate — a fast-path-passing turn is judged again before extraction."""
+    """The LLM quality gate — one cheap call judging durable knowledge.
 
-    def test_gate_on_by_default(self, monkeypatch) -> None:
-        """The LLM gate is the production default; false opts back to keywords."""
-        monkeypatch.delenv("AUTO_MEMORY_LLM_GATE", raising=False)
-        from backend.shared.config import AppConfig
-
-        assert AppConfig().auto_memory_llm_gate is True
+    A fast-path-passing turn is extracted only when the gate says worthy.
+    What the old keyword heuristics rejected (questions, requests, emoji
+    spam, chatty filler, acknowledgements) is now this gate's job, so each
+    of those shapes is asserted to be blocked by a ``worthy: false`` verdict.
+    """
 
     @pytest.mark.asyncio
     async def test_gate_worthy_true_still_extracts(self, monkeypatch) -> None:
@@ -570,7 +500,6 @@ class TestAutoMemoryLlmGate:
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.return_value = '{"worthy": true}'
@@ -588,7 +517,6 @@ class TestAutoMemoryLlmGate:
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.return_value = '{"worthy": false}'
@@ -608,7 +536,6 @@ class TestAutoMemoryLlmGate:
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.side_effect = RuntimeError("LLM down")
@@ -628,7 +555,6 @@ class TestAutoMemoryLlmGate:
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.return_value = '{"worthy": false}'
@@ -661,7 +587,6 @@ class TestAutoMemoryLlmGate:
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.return_value = '{"worthy": true}'
@@ -679,13 +604,12 @@ class TestAutoMemoryLlmGate:
     async def test_long_chatty_filler_rejected_by_gate(self, monkeypatch) -> None:
         """Long filler that passes the fast path is rejected by the LLM gate.
 
-        "今天天气不错…" carries no question marker, so the keyword heuristic
-        let it through to extraction — a false positive the gate fixes."""
+        "今天天气不错…" carries no question marker, so the old keyword gate
+        let it through to extraction — a false positive the LLM gate fixes."""
         import backend.agent.nodes as mod
         from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_llm_gate", True)
         mock_extract, mock_write = _mock_services(monkeypatch)
         mock_provider = AsyncMock()
         mock_provider.chat_json.return_value = '{"worthy": false}'
@@ -699,27 +623,87 @@ class TestAutoMemoryLlmGate:
         mock_extract.assert_not_awaited()
         mock_write.assert_not_awaited()
 
-
-class TestAutoMemoryThrottle:
-    """Frequency control — per-thread interval/cap, repeat skip, global window."""
-
     @pytest.mark.asyncio
-    async def test_repeat_content_in_same_thread_is_skipped(self, monkeypatch) -> None:
+    async def test_question_turn_judged_by_gate(self, monkeypatch) -> None:
+        """A question is rejected by the LLM gate, not a phrase heuristic.
+
+        Under the old keyword gate, question markers (怎么/？) were killed by
+        a hardcoded list; the LLM gate is now the sole quality arbiter."""
         import backend.agent.nodes as mod
+        from backend.service import structured as structured_mod
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
 
-        config_mod.current_thread_id.set("t-a")
-        state = _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
-        await mod._maybe_auto_memory(state)
-        mock_write.assert_awaited_once()
-
-        mock_extract.reset_mock()
-        mock_write.reset_mock()
-        await mod._maybe_auto_memory(state)
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="PostgreSQL 怎么优化性能？")])
+        )
         mock_extract.assert_not_awaited()
         mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_request_turn_judged_by_gate(self, monkeypatch) -> None:
+        """An action request is rejected by the LLM gate (was: request
+        prefixes in the keyword heuristic)."""
+        import backend.agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="帮我查一下 pgvector 的索引配置")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_emoji_spam_judged_by_gate(self, monkeypatch) -> None:
+        """Emoji/symbol runs pass the length gate but carry no knowledge —
+        the LLM gate rejects them (was: the symbol-noise heuristic)."""
+        import backend.agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="🎉" * 12)])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_acknowledgement_judged_by_gate(self, monkeypatch) -> None:
+        """A longer polite acknowledgement exceeds the length gate — the LLM
+        gate rejects it (was: the chatty/phrase-stripping heuristic)."""
+        import backend.agent.nodes as mod
+        from backend.service import structured as structured_mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+        mock_provider = AsyncMock()
+        mock_provider.chat_json.return_value = '{"worthy": false}'
+        monkeypatch.setattr(structured_mod, "get_llm_provider", lambda: mock_provider)
+
+        await mod._maybe_auto_memory(
+            _make_state([HumanMessage(content="好的，明白了，收到，谢谢！")])
+        )
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
+
+
+class TestAutoMemoryThrottle:
+    """Frequency control — the per-thread minimum interval."""
 
     @pytest.mark.asyncio
     async def test_min_interval_throttles_rapid_writes(self, monkeypatch) -> None:
@@ -758,48 +742,6 @@ class TestAutoMemoryThrottle:
             _make_state([HumanMessage(content="回滚了 Kafka 的配置")])
         )
         assert mock_write.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_per_thread_cap_limits_writes(self, monkeypatch) -> None:
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_max_per_thread", 2)
-        monkeypatch.setattr(config_mod.config, "auto_memory_min_interval", 0)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        config_mod.current_thread_id.set("t-a")
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="部署了新的 Kafka 限流中间件")])
-        )
-        assert mock_write.await_count == 1
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="回滚了 Kafka 的配置")])
-        )
-        assert mock_write.await_count == 2
-        await mod._maybe_auto_memory(
-            _make_state([HumanMessage(content="升级了 pgvector 索引")])
-        )
-        assert mock_write.await_count == 2  # capped at the per-thread limit
-
-    @pytest.mark.asyncio
-    async def test_global_window_cap_across_threads(self, monkeypatch) -> None:
-        import backend.agent.nodes as mod
-
-        _set_auto_memory(monkeypatch, True)
-        monkeypatch.setattr(config_mod.config, "auto_memory_max_per_window", 2)
-        mock_extract, mock_write = _mock_services(monkeypatch)
-
-        for tid, content in (
-            ("t-a", "部署了新的限流中间件"),
-            ("t-b", "回滚了 Kafka 的配置"),
-            ("t-c", "升级了 pgvector 索引"),
-        ):
-            config_mod.current_thread_id.set(tid)
-            await mod._maybe_auto_memory(
-                _make_state([HumanMessage(content=content)])
-            )
-        assert mock_write.await_count == 2  # third crosses the global window cap
 
 
 class TestAutoMemoryBackgrounding:

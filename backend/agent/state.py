@@ -44,16 +44,3 @@ class AgentState(TypedDict):
     pending_approval: dict[str, Any] | None
     """Non-None when the graph is paused waiting for human approval.
     Set by check_approval_node before ``interrupt()``; cleared on resume."""
-
-    compaction_summary: str | None
-    """Running-summary of the overflowed history computed by this turn's
-    ``call_llm_node`` compaction pass.  ``generate_final_node`` reuses it for
-    the same turn's synthesis bound (the overflow prefix is identical), then
-    clears it so the next turn recomputes.  ``None`` until the first
-    compaction pass of a turn."""
-
-    compaction_transcript: str | None
-    """The overflow transcript ``compaction_summary`` was computed over.
-    The reuse check compares it against the current overflow so a stale
-    summary never covers a changed prefix.  Cleared together with
-    ``compaction_summary`` at turn end."""

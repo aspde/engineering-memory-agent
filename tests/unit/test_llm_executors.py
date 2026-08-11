@@ -126,7 +126,8 @@ class TestMakeE2ERunner:
                     "id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
                     "summary": "用 pgvector 而非 Elasticsearch 做向量检索",
                     "rerank_score": 0.9,
-                    "decay_factor": 1.0,
+                    "recall_count": 1,
+                    "recalled_at": None,
                 }
             ]
 

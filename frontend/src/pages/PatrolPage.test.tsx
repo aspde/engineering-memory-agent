@@ -210,4 +210,60 @@ describe('PatrolPage', () => {
     });
     expect(screen.queryByText(/今日.*已执行/)).toBeNull();
   });
+
+  it('shows the empty-state notice when every category is an empty array', async () => {
+    mockListPatrolLogs.mockResolvedValue({
+      items: [{ ...logSummary, finding_count: 0 }],
+      total: 1,
+    });
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      finding_count: 0,
+      findings: { contradictions: [], entity_coverage: [], decay_alerts: [] },
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/0 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/0 个发现/));
+
+    // All-empty categories are a "nothing to report" scan — the empty state,
+    // not a bare heading + timestamp.
+    await waitFor(() => {
+      expect(screen.getByText('未发现需关注事项')).toBeDefined();
+    });
+    // No group headings for the empty categories.
+    expect(screen.queryByText(/矛盾发现/)).toBeNull();
+    expect(screen.queryByText(/实体覆盖/)).toBeNull();
+  });
+
+  it('renders the raw report of an unstructured patrol log', async () => {
+    mockListPatrolLogs.mockResolvedValue({
+      items: [{ ...logSummary, finding_count: 0 }],
+      total: 1,
+    });
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      finding_count: 0,
+      findings: { raw_output: '# 矛盾扫描巡逻报告\n\n未发现矛盾。' },
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/0 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/0 个发现/));
+
+    // The raw report is shown as-is under its own heading, not the empty state.
+    await waitFor(() => {
+      expect(screen.getByText('原始报告')).toBeDefined();
+    });
+    expect(screen.getByText(/# 矛盾扫描巡逻报告/)).toBeDefined();
+    expect(screen.queryByText('未发现需关注事项')).toBeNull();
+  });
 });

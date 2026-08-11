@@ -1,10 +1,9 @@
 """Baseline migration — the EMA schema in its current, complete form.
 
-This captures the final structure that ``backend/db/schema.py``'s
-``build_schema_statements()`` (all CREATE TABLEs plus every historical
-``DO $$`` patch applied on top) produces today.  It is the version-1
-snapshot: everything before this commit is considered "already migrated",
-and every *future* schema change must be a new migration.
+This is the version-1 snapshot of the whole schema (tables, columns,
+indexes) as it exists today.  Everything before this commit is considered
+"already migrated", and every *future* schema change must be a new
+migration.
 
 Two deliberate choices:
 
@@ -17,9 +16,10 @@ Two deliberate choices:
 - **Embedding columns use the placeholder dimension 1024** (BGE-M3, the
   default in ``config.embedding.dimension``).  The real dimension is a
   *runtime* choice (the configured embedding model), so it cannot live in a
-  static migration.  ``init_db()`` aligns the live column to the configured
-  dimension afterwards (the same resize the old ``init_db`` did), so this
-  placeholder is only ever the initial value.
+  static migration.  ``init_db()`` *verifies* the live columns against the
+  configured dimension and refuses to start on a mismatch — the database is
+  recreated via ``python -m scripts.recreate_db``, never auto-resized — so
+  this placeholder is the dimension fresh databases are born with.
 
 revision: 0001_baseline
 revises:

@@ -10,8 +10,8 @@ After retries are exhausted it raises :class:`LLMStructuredError`.  Callers
 then decide:
   - correctness-critical (conflict detection, entity match): propagate —
     the write/operation fails rather than storing unverified data;
-  - enrichment (entity/relation extraction): catch, log at ERROR level,
-    count via ``record_structured_failure``, and degrade to ``[]``.
+  - enrichment (entity/relation extraction): catch, log at ERROR level, and
+    degrade to ``[]``.
 
 Plain ``for`` loop instead of tenacity: smaller, no SDK-exception coupling,
 and trivially testable with mocks.

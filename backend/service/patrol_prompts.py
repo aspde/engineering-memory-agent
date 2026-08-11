@@ -17,5 +17,3 @@ from backend.service.prompts import get_prompt
 
 DAILY_PATROL_PROMPT = get_prompt("patrol.daily")[1]
 WEEKLY_PATROL_PROMPT = get_prompt("patrol.weekly")[1]
-CI_FAILURE_PATROL_PROMPT = get_prompt("patrol.ci_failure")[1]
-JIRA_RESOLVED_PATROL_PROMPT = get_prompt("patrol.jira_resolved")[1]

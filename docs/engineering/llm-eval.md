@@ -128,14 +128,16 @@ LLM 调用，全量 + LLM 裁判约 80-120 次调用，适合每周定时任务�
 
 ```
 tests/eval/
-  llm_ground_truth.py   # 四套标注集 + validate_llm_dataset()
+  llm_ground_truth.py   # 四套标注集的 item 类型 + validate_llm_dataset()（数据在 data/*.jsonl）
   llm_metrics.py        # 纯函数指标（无 I/O，单测覆盖）
   llm_executors.py      # 默认执行器：包装 call_llm_node / extract_memory / 答案 prompt / e2e 检索
   llm_judge.py          # LLM-as-judge：答案覆盖/忠实 + 摘要忠实/完整
-  llm_runner.py         # 每套件一个 run_*：执行 + 聚合 + 错误行归零
-  llm_report.py         # Markdown + JSON 报告 + summarize 一行
+  core.py               # 共用骨架（与检索/task 评测共享）：EvalResult / 聚合 / judge 失败零值 / JSON 序列化
+  llm_runner.py         # 每套件一个 run_*：执行 + 聚合 + 错误行归零（结果类/聚合复用 core）
+  llm_report.py         # Markdown + JSON 报告 + summarize 一行（序列化复用 core）
   e2e_seed.py           # e2e 语料 seeding CLI（--clear / --dry-run，独立标签）
   run_llm_eval.py       # CLI：--suite（逗号分隔）/ --judge / --sample / --min-*
+  experiments/          # 一次性研究脚本归档（A/B、阈值标定、judge 校准、scale 探测…）：不复用主骨架、不进 CI，按需 `python -m tests.eval.experiments.<script>`
 ```
 
 设计要点：
@@ -176,7 +178,7 @@ tests/eval/
 - **语义基线**：`tests/eval/reports/llm-eval-semantic-baseline.json`——judge 通道稳定后
   用 `--judge llm` 跑出的语义判定结果（groundedness / hallucination_rate /
   summary_faithfulness / summary_completeness），供手动分析；不进 CI 门禁。
-- **对比**：`python -m tests.eval.compare_baseline` 把当前报告与基线做 diff，
+- **对比**：`python -m tests.eval.experiments.compare_baseline` 把当前报告与基线做 diff，
   输出逐指标 delta，任何跌破 `--tolerance`（默认 0.01，吸收 ~±0.001 的
   运行间噪声）的下降都以非零退出码标红。**每次改 prompt 或模型后跑一次**，
   用 delta 判断该改动是提升还是回归。确定性报告与 LLM-judge 报告混比会被

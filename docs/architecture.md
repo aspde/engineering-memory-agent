@@ -27,7 +27,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
 | Backend | FastAPI + Python 3.12 | 36 个 API 路由已实现（含 SSE 流式 + HITL） |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
-| Memory | PostgreSQL + pgvector | 记忆写入/检索/衰减/去重全链路已实现 |
+| Memory | PostgreSQL + pgvector | 记忆写入/检索/召回统计/去重全链路已实现 |
 | Entity Graph | PostgreSQL + pgvector | 实体归一化、一度关系查询、图谱可视化已实现 |
 | Storage | PostgreSQL + pgvector | docker-compose 已就绪 |
 | LLM | OpenAI SDK / Anthropic SDK | provider 抽象 + chat_raw 工具调用 + chat_json 结构化输出已实现 |
@@ -38,7 +38,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 - **Frontend**: 用户交互、请求提交、结果展示
 - **Backend**: API 接口、请求生命周期、调用 Agent
 - **Agent**: ReAct 工具调用循环、状态管理、Tool/Memory 编排
-- **Memory**: 长期记忆管理、检索、上下文构建、衰减加权
+- **Memory**: 长期记忆管理、检索、上下文构建、召回统计
 - **Storage**: 业务数据 + 向量存储
 - **LLM**: 统一模型调用封装，支持多 provider 切换，支持工具调用 (chat_raw)
 
@@ -51,12 +51,10 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/agent/threads` | 获取对话历史列表 |
 | GET | `/api/agent/thread/{thread_id}` | 获取指定对话消息历史 |
 | DELETE | `/api/agent/thread/{thread_id}` | 删除对话及 checkpoint 数据 |
-| GET | `/api/agent/usage` | Agent 进程内 LLM 调用计数快照 |
-| POST | `/api/agent/usage/reset` | 重置进程内计数 |
 | POST | `/api/memory/ingest` | 文档分块 → 嵌入 → 存入 chunks 表 |
 | POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索（+稀疏）→ 可选 rerank（hybrid 默认跳过） |
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
-| POST | `/api/memory/memories/search` | 记忆搜索：衰减加权 → rerank → 更新 decay |
+| POST | `/api/memory/memories/search` | 记忆搜索：相似度排序 → rerank → 记录召回 |
 | GET | `/api/memory/memories/{memory_id}` | 通过 ID 获取单条记忆 |
 | DELETE | `/api/memory/memories/{memory_id}` | 软删除记忆（设置 deleted_at） |
 | GET | `/api/memory/stats` | 记忆库统计信息（总数、来源分布、高频实体、知识图谱指标等） |
@@ -134,7 +132,6 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - **trace 链路**：入口处设置 `current_trace_id` contextvar（agent 的 `/chat`、`/chat/stream` 每请求一个新 uuid；patrol 用 `patrol_id`），provider 读取后为每条记录盖上 trace_id，`/api/usage/trace/{id}` 可端到端回放一次 agent 运行。会话维度由 `thread_id` 关联（webhook/连接器等未设 trace 的后台任务仍按 scenario 记录）。
 - **字段**：trace_id / thread_id / scenario / provider / model / input|output|total_tokens / latency_ms / status(success|error) / error / prompt|response_chars / created_at（`seq` BIGSERIAL 保证插入顺序，trace 回放按它排序）。
 - **成本估算**：`estimate_cost` 按模型内置价格表（deepseek / openai / claude 家族，$ 每 1M tokens）估算，未知模型用保守默认值——仅用于报告，真实账单以 provider 为准。
-- **与进程内计数器关系**：`/api/agent/usage` 的内存计数器（重启清零）保留，是即时快照；`/api/usage/*` 读持久化 `llm_usage` 表，是历史查询。两者由同一批 provider 打点驱动，互不依赖。
 - 配置项：`USAGE_ENABLED`（默认 true）、`USAGE_FLUSH_INTERVAL_SECONDS`（默认 10）、`USAGE_BUFFER_MAX`（默认 5000）。
 
 ### Observability (Runtime health metrics — Prometheus)
@@ -145,6 +142,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - **LLM 层**：与 `llm_usage` 同一咽喉点（`usage.record_call`）打点——按 scenario 的调用数（success/error）、延迟直方图、input/output/total token 计数。
 - **韧性层**：`resilience.py` 的 `CircuitBreaker` 在状态转换处打点——open/closed 状态 gauge、进入 OPEN 次数、open 期间快速拒绝次数。
 - **Agent 层**：交互式并发槽位占用 gauge + 超 `MAX_AGENT_CONCURRENCY` 的 503 拒绝计数（`agent_service.py`）；每次 chat 完成记录 ReAct 步数分布（`agent_routes.py`）——**task eval 测到的过度调用信号在产线持续可见**。
+- **结构化输出降级**：实体/关系提取重试耗尽降级为 `[]` 时按 scenario 计数（`ema_structured_failures_total`）——**llm_usage 看不见这个信号**：降级的提取在 provider 层仍是 success 行（返回了 JSON、schema 校验在之后失败），只有该时序能暴露记忆质量的静默退化。
 - 所有记录函数在 `config.metrics_enabled` 关闭时 no-op、异常吞掉，绝不阻塞/拖垮热路径；测试用 `reset_runtime_metrics()` 隔离。
 - 与 `llm_usage` 的分工：**usage 表回答"花了多少钱、哪次调用贵"（历史查询）；Prometheus 回答"现在健不健康、慢在哪、并发满没满"（实时时序）**。二者由同一批 provider 打点驱动，互不依赖。
 - **采集闭环已落地**（compose）：`prometheus` 服务每 15s 抓取 `/metrics`，`grafana` 服务渲染 "EMA — Runtime Health" 看板（9 面板，见 [deployment.md](./deployment.md) Monitoring）。当前为观测/可视化，Prometheus 告警规则 / Alertmanager 尚未配置。
@@ -171,7 +169,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - **文档索引与检索**：分块 → 嵌入 → pgvector，双 reranker（cross-encoder / LLM）
 - **三阶段记忆提取**：摘要 + 实体并行提取 → 关系提取
 - **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `tests/eval/reports/threshold_calibration_report.md`）
-- **艾宾浩斯遗忘衰减**：`R = max(e^(-t/S), 0.10)`，`S = 1 + (recall+1)·12`，召回时自动更新（参数经 decay A/B 校准，见 `tests/eval/reports/decay_ab_report.md`）
+- **召回统计**：检索按纯相似度排序，命中记忆记录 `recall_count`/`recalled_at` 作元数据；原艾宾浩斯衰减加权因 A/B 实测掉 recall（0.667 vs 无衰减 0.900，见 `tests/eval/reports/decay_ab_report.md`）已从排序路径移除，过期记忆归档改由 patrol LLM 读原始召回字段判断
 
 ### Agent
 

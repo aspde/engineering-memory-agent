@@ -54,20 +54,20 @@ class TestExtractEntities:
     async def test_persistent_failure_degrades_to_empty(self, monkeypatch) -> None:
         """Structured output that never validates → loud degradation to []."""
         import backend.service.extraction as mod
-        failures = []
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")
 
         # A provider without PROVIDER_NAME skips the function-calling channel
         # and lands straight on chat_structured (patched to raise below).
+        mock_inc = MagicMock()
+        monkeypatch.setattr(mod, "inc_structured_failures", mock_inc)
         monkeypatch.setattr(mod, "get_llm_provider", lambda: MagicMock())
         monkeypatch.setattr(mod, "chat_structured", _raise)
-        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
 
         result = await extract_entities("some summary")
         assert result == []
-        assert failures == ["extraction_entities"]
+        mock_inc.assert_called_once_with("extraction_entities")
 
     @pytest.mark.asyncio
     async def test_circuit_open_degrades_to_empty(self, monkeypatch) -> None:
@@ -75,18 +75,18 @@ class TestExtractEntities:
         CircuitOpenError; enrichment must degrade to [] so the memory write
         proceeds instead of crashing write_memory."""
         import backend.service.extraction as mod
-        failures = []
 
         async def _raise(*args, **kwargs):
             raise CircuitOpenError("Circuit breaker 'x' is open")
 
+        mock_inc = MagicMock()
+        monkeypatch.setattr(mod, "inc_structured_failures", mock_inc)
         monkeypatch.setattr(mod, "get_llm_provider", lambda: MagicMock())
         monkeypatch.setattr(mod, "chat_structured", _raise)
-        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
 
         result = await extract_entities("some summary")
         assert result == []
-        assert failures == ["extraction_entities"]
+        mock_inc.assert_called_once_with("extraction_entities")
 
 
 class TestExtractRelations:
@@ -126,19 +126,19 @@ class TestExtractRelations:
     @pytest.mark.asyncio
     async def test_persistent_failure_degrades_to_empty(self, monkeypatch) -> None:
         import backend.service.extraction as mod
-        failures = []
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")
 
+        mock_inc = MagicMock()
+        monkeypatch.setattr(mod, "inc_structured_failures", mock_inc)
         monkeypatch.setattr(mod, "get_llm_provider", lambda: MagicMock())
         monkeypatch.setattr(mod, "chat_structured", _raise)
-        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
 
         entities = [{"name": "A", "type": "concept"}, {"name": "B", "type": "concept"}]
         result = await extract_relations("summary", entities)
         assert result == []
-        assert failures == ["extraction_relations"]
+        mock_inc.assert_called_once_with("extraction_relations")
 
     @pytest.mark.asyncio
     async def test_circuit_open_degrades_to_empty(self, monkeypatch) -> None:
@@ -146,19 +146,19 @@ class TestExtractRelations:
         CircuitOpenError; relation extraction must degrade to [] so the memory
         write proceeds instead of crashing write_memory."""
         import backend.service.extraction as mod
-        failures = []
 
         async def _raise(*args, **kwargs):
             raise CircuitOpenError("Circuit breaker 'x' is open")
 
+        mock_inc = MagicMock()
+        monkeypatch.setattr(mod, "inc_structured_failures", mock_inc)
         monkeypatch.setattr(mod, "get_llm_provider", lambda: MagicMock())
         monkeypatch.setattr(mod, "chat_structured", _raise)
-        monkeypatch.setattr(mod, "record_structured_failure", lambda s: failures.append(s))
 
         entities = [{"name": "A", "type": "concept"}, {"name": "B", "type": "concept"}]
         result = await extract_relations("summary", entities)
         assert result == []
-        assert failures == ["extraction_relations"]
+        mock_inc.assert_called_once_with("extraction_relations")
 
 
 class TestExtractMemory:

@@ -7,8 +7,7 @@ tables other test modules rely on if run in place.
 
 Covered:
   - ``upgrade head`` on an empty database creates exactly the 9 business
-    tables (matching the table list ``build_schema_statements`` emits, so a
-    future schema change that forgets a migration cannot drift silently).
+    tables (the ``EXPECTED_TABLES`` set below).
   - the version table is stamped at head.
   - ``downgrade base`` clears the tables; ``upgrade head`` rebuilds.
   - running ``upgrade head`` twice is a no-op.
@@ -17,7 +16,6 @@ Covered:
 from __future__ import annotations
 
 import os
-import re
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -26,7 +24,7 @@ import pytest
 from alembic import command
 from alembic.config import Config as AlembicConfig
 
-from backend.db.schema import _ALEMBIC_INI, _MIGRATIONS_DIR, build_schema_statements
+from backend.db.schema import _ALEMBIC_INI, _MIGRATIONS_DIR
 from backend.shared.config import config
 
 EXPECTED_TABLES = {"chunks", "memories", "entities", "memory_entities",
@@ -111,29 +109,6 @@ class TestBaselineMigration:
                 "SELECT version_num FROM alembic_version"
             ).fetchone()
             assert version == ("0001_baseline",)
-        finally:
-            conn.close()
-
-    def test_baseline_tables_match_build_schema_statements(self, temp_migration_db) -> None:
-        """The migration and the (kept) DDL source of truth must not drift.
-
-        ``build_schema_statements`` still drives the runtime embedding
-        resize; if a future schema change adds a table only to one of the
-        two, this test fails.
-        """
-        emitted = {
-            m.group(1)
-            for stmt in build_schema_statements(1024)
-            for m in re.finditer(r"CREATE TABLE IF NOT EXISTS (\w+)", stmt)
-        }
-        assert emitted == EXPECTED_TABLES
-
-        command.upgrade(_migration_config(), "head")
-        conn = psycopg.connect(
-            _psycopg_url(config.database_url)
-        )
-        try:
-            assert _schema_tables(conn) & emitted == emitted
         finally:
             conn.close()
 
@@ -301,3 +276,12 @@ class TestInitDbIntegration:
             conn.close()
         assert EXPECTED_TABLES <= tables
         assert version[0] == "0001_baseline"
+
+    @pytest.mark.asyncio
+    async def test_init_db_rejects_dimension_mismatch(self, temp_migration_db) -> None:
+        """A configured dimension different from the migration's vector(1024)
+        is refused — init_db verifies, it never auto-migrates."""
+        from backend.db.schema import init_db
+
+        with pytest.raises(RuntimeError, match=r"vector\(1536\)"):
+            await init_db(dimension=1536)

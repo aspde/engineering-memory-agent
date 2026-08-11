@@ -60,7 +60,7 @@ class TestCompactionDisabled:
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         messages = [HumanMessage(content=f"m{i}") for i in range(30)]
-        result, _summary, _transcript = await mod._maybe_compact(messages)
+        result = await mod._maybe_compact(messages)
         assert result is messages
         mock_provider.chat.assert_not_awaited()
 
@@ -73,7 +73,7 @@ class TestCompactionDisabled:
         # Short messages stay well under the default token budget, so windowing
         # keeps everything and compaction (disabled) never summarises.
         messages = [HumanMessage(content=f"m{i}") for i in range(30)]
-        result, _summary, _transcript = await mod._bounded_messages(messages)
+        result = await mod._bounded_messages(messages)
         expected = mod._window_messages(messages)
         assert result == expected
         assert result[-1].content == "m29"
@@ -98,7 +98,7 @@ class TestCompactionEnabled:
             HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ] + [HumanMessage(content="current question")]
 
-        result, _summary, _transcript = await mod._maybe_compact(messages)
+        result = await mod._maybe_compact(messages)
 
         # One summary SystemMessage prepended, tail preserved.
         assert isinstance(result[0], SystemMessage)
@@ -118,7 +118,7 @@ class TestCompactionEnabled:
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         messages = [HumanMessage(content=f"m{i}") for i in range(5)]
-        result, _summary, _transcript = await mod._maybe_compact(messages)
+        result = await mod._maybe_compact(messages)
         assert result is messages
         mock_provider.chat.assert_not_awaited()
 
@@ -135,17 +135,18 @@ class TestCompactionEnabled:
         messages = [
             HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(30)
         ]
-        result, _summary, _transcript = await mod._maybe_compact(messages)
+        result = await mod._maybe_compact(messages)
         # Falls back to the original list; windowing still truncates later.
         assert result is messages
 
 
-class TestCompactionMemoization:
-    """A tool turn bounds the conversation twice — the second bound reuses the
-    first's compaction summary instead of paying a second compaction LLM call."""
+class TestCompactionIndependentBounds:
+    """A tool turn bounds the conversation twice — the tool-selection and
+    synthesis bounds each compact independently, paying their own compaction
+    LLM call (no summary is shared through AgentState)."""
 
     @pytest.mark.asyncio
-    async def test_second_bound_reuses_cached_summary(self, monkeypatch) -> None:
+    async def test_second_bound_compacts_independently(self, monkeypatch) -> None:
         import backend.agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
@@ -158,8 +159,7 @@ class TestCompactionMemoization:
             HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ]
         # call_llm_node bounds before tools run; generate_final_node bounds
-        # after (extra tool messages in the tail).  The oldest overflow
-        # prefix is identical, so one compaction call must serve both.
+        # after (extra tool messages in the tail).  Each pays its own call.
         pre_tool = overflow + [HumanMessage(content="current question")]
         post_tool = overflow + [
             HumanMessage(content="current question"),
@@ -167,23 +167,14 @@ class TestCompactionMemoization:
             ToolMessage(content="result", tool_call_id="c1"),
         ]
 
-        # The first bound (call_llm) computes the summary; the second bound
-        # (generate_final) passes it back in — AgentState carries it between
-        # the two — and reuses it without a second LLM call.
-        r1, summary, transcript = await mod._maybe_compact(pre_tool)
-        r2, _summary2, _transcript2 = await mod._maybe_compact(
-            post_tool,
-            existing_summary=summary,
-            existing_transcript=transcript,
-        )
-
-        mock_provider.chat.assert_awaited_once()
-        # Both bounds inject the SAME summary (deterministic within a turn).
-        assert str(r1[0].content) == "SUMMARY-OF-OLD-HISTORY"
-        assert str(r2[0].content) == "SUMMARY-OF-OLD-HISTORY"
+        r1 = await mod._maybe_compact(pre_tool)
+        r2 = await mod._maybe_compact(post_tool)
+        assert mock_provider.chat.await_count == 2
+        assert isinstance(r1[0], SystemMessage)
+        assert isinstance(r2[0], SystemMessage)
 
     @pytest.mark.asyncio
-    async def test_distinct_overflow_recompacts(self, monkeypatch) -> None:
+    async def test_each_bound_pays_own_compaction_call(self, monkeypatch) -> None:
         import backend.agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
@@ -192,7 +183,7 @@ class TestCompactionMemoization:
         mock_provider.chat.return_value = "S"
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
-        # One extra early message changes the overflow transcript → new call.
+        # Two bounds over different transcripts each compact independently.
         list_a = [
             HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ]
@@ -204,7 +195,7 @@ class TestCompactionMemoization:
         assert mock_provider.chat.await_count == 2
 
     @pytest.mark.asyncio
-    async def test_failed_summary_not_cached(self, monkeypatch) -> None:
+    async def test_failed_summary_retried_by_next_bound(self, monkeypatch) -> None:
         import backend.agent.nodes as mod
 
         _set_compaction(monkeypatch, True)
@@ -216,10 +207,9 @@ class TestCompactionMemoization:
         messages = [
             HumanMessage(content=_OVERFLOW_MSG.format(i=i)) for i in range(14)
         ]
-        r1, _summary, _transcript = await mod._maybe_compact(messages)
+        r1 = await mod._maybe_compact(messages)
         assert r1 is messages  # failure falls back to the original list
-        r2, _summary2, _transcript2 = await mod._maybe_compact(messages)
-        # A failed summary is not reused — the retry hits the LLM again.
+        r2 = await mod._maybe_compact(messages)
         assert mock_provider.chat.await_count == 2
         assert isinstance(r2[0], SystemMessage)
 
@@ -528,6 +518,4 @@ def _agent_state(messages: list) -> dict:
         final_prompt=None,
         error=None,
         pending_approval=None,
-        compaction_summary=None,
-        compaction_transcript=None,
     )

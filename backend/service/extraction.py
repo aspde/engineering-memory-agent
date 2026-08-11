@@ -15,8 +15,8 @@ from backend.service.llm_service import get_llm_provider
 from backend.service.prompts import get_prompt
 from backend.service.structured import chat_structured
 from backend.shared.config import config
-from backend.shared.metrics import record_structured_failure
 from backend.shared.resilience import CircuitOpenError
+from backend.shared.runtime_metrics import inc_structured_failures
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +93,7 @@ async def extract_entities(content_or_summary: str) -> list[dict]:
         # circuit breaker is open and chat_structured failed fast
         # (CircuitOpenError).  Enrichment is not correctness-critical — degrade
         # to [] so the memory write proceeds rather than dropping the content.
-        record_structured_failure("extraction_entities")
+        inc_structured_failures("extraction_entities")
         logger.error(
             "Entity extraction degraded to [] after retries (content=%r)",
             content_or_summary[:200],
@@ -355,7 +355,7 @@ async def extract_relations(
         # (LLMStructuredError) or the circuit breaker is open and
         # chat_structured failed fast (CircuitOpenError).  Degrade to [] so the
         # memory write proceeds.
-        record_structured_failure("extraction_relations")
+        inc_structured_failures("extraction_relations")
         logger.error(
             "Relation extraction degraded to [] after retries (summary=%r)",
             summary[:200],

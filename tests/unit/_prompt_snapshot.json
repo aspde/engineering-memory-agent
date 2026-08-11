@@ -31,25 +31,13 @@
     "version": "2",
     "sha256": "f2a8dffec9bf1344c70e7a32c6c3a2cd8db464565bb679436f11a921f253aef0"
   },
-  "patrol.ci_failure": {
-    "version": "2",
-    "sha256": "60a826b86a906508f8b5a9b62813d05cf471ceb94dd245a4f3dda64a3fb63508"
-  },
   "patrol.daily": {
     "version": "3",
     "sha256": "6a08005d70cf2a062ea25e4a3dd92425083c30ea5f80b43e9d5fc08a98aa7e7c"
   },
-  "patrol.jira_resolved": {
-    "version": "2",
-    "sha256": "7581fcad8bbb3199305eb8ba73b475f4836d65c5f8138e780bd94b4e53776102"
-  },
-  "patrol.repair": {
-    "version": "3",
-    "sha256": "699ef0454585e207b29fcd1c25b27d6c3e00dc9ae03103c40c54c3e245f7c88d"
-  },
   "patrol.weekly": {
-    "version": "4",
-    "sha256": "d8a4abbdafe50f79477ea592c32a17836ed78dca5379c243bea8aeaaf61b9bc8"
+    "version": "5",
+    "sha256": "ea542a13cd90efb82d10d3d81bd4d31e8b2a671fc036a8ea38e5cd295e536986"
   },
   "query_rewrite": {
     "version": "3",

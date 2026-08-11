@@ -11,7 +11,7 @@ expansion path: given the seed corpus (``tests/eval/seed_memories.jsonl``,
   but whose wording makes the retriever likely to rank this one first
   (the discriminator case that extra positives never exercise).
 
-Output is a candidate file (default ``tests/eval/query_candidates.jsonl``)
+Output is a candidate file (default ``tests/eval/experiments/query_candidates.jsonl``)
 for HUMAN REVIEW — LLM-labeled queries are not trusted blindly, they are a
 first-pass generator feeding a manual filter (the review step is
 deliberately manual; there is no auto-promotion into ground_truth.py).
@@ -27,16 +27,16 @@ a reviewer knows where each query came from.
 Usage::
 
     # Plan only — print how many seeds would be processed, call no LLM
-    python -m tests.eval.generate_queries --dry-run
+    python -m tests.eval.experiments.generate_queries --dry-run
 
     # Generate for the first 3 memories (3 LLM calls), merge into the file
-    python -m tests.eval.generate_queries --limit 3
+    python -m tests.eval.experiments.generate_queries --limit 3
 
     # Narrow to specific seeds
-    python -m tests.eval.generate_queries --seed seed-001,seed-007
+    python -m tests.eval.experiments.generate_queries --seed seed-001,seed-007
 
     # Re-generate one seed, replacing its old candidates
-    python -m tests.eval.generate_queries --seed seed-001 --force
+    python -m tests.eval.experiments.generate_queries --seed seed-001 --force
 """
 
 from __future__ import annotations
@@ -370,7 +370,7 @@ async def generate_candidates(
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m tests.eval.generate_queries",
+        prog="python -m tests.eval.experiments.generate_queries",
         description="Generate retrieval-eval query candidates from the seed "
         "corpus (3 positives + 1 hard negative per memory) for human review.",
     )

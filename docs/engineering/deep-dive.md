@@ -23,7 +23,7 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 - CI/CD 构建记录
 - 飞书讨论
 
-每条原始内容经过：**分块 → 嵌入 → 三阶段提取（摘要+实体+关系）→ 四级相似度去重 → 入库**。检索时用向量召回 + 衰减加权 + rerank。
+每条原始内容经过：**分块 → 嵌入 → 三阶段提取（摘要+实体+关系）→ 四级相似度去重 → 入库**。检索时用向量召回 + 召回统计 + rerank。
 
 一句话价值：**让团队的工程记忆可检索、可复用、不随人走**。
 
@@ -54,13 +54,13 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 | 前端 | React + TS + Vite + Tailwind | 6 个页面：聊天、记忆库、实体图谱、连接器、巡检、冲突解决 |
 | 后端 | FastAPI + Python 3.12 + async | API、生命周期、调用 Agent |
 | Agent | LangGraph 手动 StateGraph | ReAct 循环 + 2 个 HITL 卡点 |
-| 记忆 | 自实现 service 函数 | 提取、去重、衰减、检索——不用 LangChain Retriever |
+| 记忆 | 自实现 service 函数 | 提取、去重、召回统计、检索——不用 LangChain Retriever |
 | 存储 | PostgreSQL 16 + pgvector | 结构化数据 + 向量 + 对话 checkpoint 三合一 |
 | LLM | LLMProvider 抽象 | DeepSeek / Claude 切换，业务代码不依赖具体 SDK |
 
 ### 核心设计原则
 
-**记忆系统不依赖 LangChain**。我没用 LangChain 的 Retriever/Chain 黑盒，每个环节（chunk/embed/extract/rerank/decay）都是独立 async 函数，单独可测、单独可替换。这是有意为之——LangChain 的链条式抽象在调试和定制上代价太高。
+**记忆系统不依赖 LangChain**。我没用 LangChain 的 Retriever/Chain 黑盒，每个环节（chunk/embed/extract/rerank/recall）都是独立 async 函数，单独可测、单独可替换。这是有意为之——LangChain 的链条式抽象在调试和定制上代价太高。
 
 ---
 
@@ -172,36 +172,17 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 - Q：为什么不用 LLM 直接判断要不要合并？→ A：LLM 判断成本高且不稳定。先用向量相似度做粗筛（便宜、稳定），只在边界区间（0.72-0.85）才调 LLM 做精细判断。这样 90% 的写入只需要一次向量搜索，不用调 LLM。
 - Q：冲突检测的 prompt 长什么样？→ A：很简洁——给 LLM 两个 summary，让它返回 `{"conflict": true/false}` 的 JSON。强制 JSON 输出便于解析，失败时假定无冲突。
 
-### 难点 2：艾宾浩斯衰减加权检索
+### 难点 2：衰减加权为什么被移除
 
-**问题**：记忆库会膨胀，老的记忆和新的记忆在向量相似度上没区别，但很多老记忆已经过时。
+**问题**：记忆库会膨胀，老记忆和没被用过的记忆混在相似度排序里——怎么让常用知识浮上来、过时的沉下去？
 
-**方案**：借鉴遗忘曲线，给每条记忆一个 `decay_factor`，检索时排序用"相似度 × decay_factor"。
+**第一版方案（已废弃）**：借鉴艾宾浩斯遗忘曲线，给每条记忆算一个 `decay_factor`，检索时按"相似度 × decay_factor"排序。公式 `R = e^(-t/S)`，`S = 1 + (recall_count + 1) × 12`，召回时自动更新。
 
-**公式**：
-```
-R = e^(-t / S)
-t = 距上次召回的小时数
-S = 1 + (recall_count + 1) × 2   (相对强度)
-```
+**为什么废弃（关键决策）**：decay A/B（`tests/eval/reports/decay_ab_report.md`）在合成老化分布上跑双臂——衰减加权 recall@5 **0.667**，纯相似度 **0.900**。项目的测量数据表明衰减让检索变差，而它的前提「近期/高频=相关」来自合成的老化分布，没有真实语料支撑。更微妙的是：连续调参三轮（S=2x→8x→12x + floor 0.10）本质是把曲线越调越接近 no-op（0.367→0.633→0.667，单调逼近 0.900）——这是"把一个该删的功能调成无害"的信号。于是把衰减移出排序路径。
 
-> recall_count 是召回前的存储值，`+1` 得到召回后的计数（post-recall 约定，`compute_decay_factor` / `update_decay_batch` / `search_memories` 三处调用点统一）。
+**最终方案**：`search_memories` 纯相似度单段 HNSW 排序（删掉两段候选窗 + Python 重排），命中记忆记录 `recall_count`/`recalled_at` 作**元数据**（`record_recalls`，单条 `UPDATE ... WHERE id = ANY(:ids)`，无 N+1）。「是否过期」由人/LLM 判断：`search_memories_tool` 展示行带 `recalls` 和 `last_recalled`，每周 patrol 的过期记忆扫描直接让 LLM 读这两个字段做归档建议。判断从"机器算公式"变成"人读访问记录"。
 
-**实现细节**（`backend/service/decay.py`）：
-- 新记忆 `decay_factor = 1.0`（满保留）
-- 每次被检索召回，`update_decay_batch()` 执行：`recall_count += 1`，`recalled_at = NOW()`，重算 decay
-- 频繁召回的记忆 S 大，衰减慢；长期没召回的 S=1，几小时就衰减到 0.5 以下
-- SQL 排序：`(1 - (embedding <=> :vec)) * decay_factor DESC`
-
-**为什么这个设计有效**：
-- **自我演化**：不用人工清理，常用记忆自然浮在上面，过时的自然沉底
-- **可恢复**：长期没召回的记忆 decay 低但没删除，被精确问到时仍能召回。decay 层 `search_memories` 默认 `threshold=0.0`；生产入口 `query_memories` 默认 `threshold=0.3` 作为垃圾过滤门槛（作用于原始相似度、衰减加权之前）——低于 0.3 的记忆不进候选池，衰减无法把它们救回
-- **抗噪声**：刚写入的高相似度记忆不会立刻盖过长期验证过的记忆
-
-**设计权衡**：
-- Q：衰减会不会让重要但少问的记忆消失？→ A：不会删除，只是排序靠后。生产入口 `query_memories` 默认 `threshold=0.3` 作为垃圾过滤门槛（作用于原始相似度、衰减加权之前）——低于 0.3 的记忆不进候选池，衰减救不回；但 0.3 以上、只是排序靠后的记忆，精确查询时向量相似度高仍能召回。decay 层 `search_memories` 自身默认 `threshold=0.0`
-- Q：S 的公式怎么来的？→ A：参考艾宾浩斯原始强度模型，简化为 `1 + (recall_count + 1) × 12`（`recall_count` 是召回前的存储值，`+1` 得到召回后的计数）。系数最初是 2，但 decay A/B 显示 `×2` 半衰期太短、把低频相关旧记忆整体埋掉（合成老化分布下 recall@5 只有 0.367）；调大到 12 并加 0.10 保留下限后同分布重测 recall 回升到 0.667，保留"过时沉底"偏好的同时不埋掉旧知识（见 decay_ab_report.md）。
-- Q：召回时同步更新 decay 会不会拖慢检索？→ A：会有一点。`update_decay_batch` 是一条原子 `UPDATE ... RETURNING`，对召回的 top_k 条批量更新（替代了早期逐条 UPDATE 的 N+1 写法）。实测 top_k=5 时增加约 20ms，可接受。未来可以改成异步队列。
+**教训**：能用测量否掉自己的功能，比维护一个测量证明有害的功能更有价值。衰减的**问题**（冷记忆埋没、需要清理）仍然存在，但解法是 LLM 读原始召回历史，而不是在排序路径上叠一个数学公式。
 
 ### 难点 3：双 HITL 卡点的 LangGraph 实现
 
@@ -263,7 +244,7 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 **评估集设计**：30 条标注 query，5 类 × 6 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard。**三个如实披露的点**：
 1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5=1.0 只能证明"找得到"，不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
 2. **语义通道已改为显式 opt-in（非默认）**：30 条里 3 条靠"被评测的 BGE-M3 给自己打分"（embedding 相似度 ≥0.80）判为相关（0.900→1.000、0.844→0.944）。这部分是模型"认出自已"，不是独立判据——所以默认评估是**确定性纯子串基线**（recall 0.90/MRR 0.84，无自证），语义通道显式开启才启用，贡献已在报告里如实披露。
-3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对 decay 排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)。
+3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)。
 
 **设计选择**：对抗性审查要求"hard negative 跑一遍还 1.0 吗"必须能回答——与其让 1.0 被当自证拆穿，不如主动把真实判别力数字摆出来：1.0 的局限是什么、用 27 条陷阱集量化了真实判别力、下一步怎么改进。诚实暴露比完美数字可信。
 
@@ -311,8 +292,8 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 ┌──────────────────────▼──────────────────────────────┐
 │  记忆层 (自实现 service 函数, 非 LangChain)          │
 │  写: extract → embed → 四级相似度 → merge/conflict/insert │
-│  读: embed → 衰减加权搜索 → rerank(cross-encoder/LLM 默认关) │
-│  衰减: R=max(e^(-t/S),0.1), S=1+(recall+1)×12                │
+│  读: embed → 相似度搜索 → 记召回 → rerank(cross-encoder/LLM 默认关) │
+│  召回: record_recalls 批量记 recall_count/recalled_at（元数据）      │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
@@ -334,7 +315,7 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 | 高危追问 | 准备要点 |
 |---------|---------|
 | "四级相似度阈值怎么定的？" | 已标定：收集三类摘要对的相似度分布（同义改写 0.84-0.97 / 同类 ≤0.79 / 异类 ≤0.72），发现旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测；0.85 是分离点，已改 MERGE 0.85 / CONFLICT 0.72（见 threshold_calibration_report.md）。诚实边界：8 对改写样本小，真实生产分布待部署后确认 |
-| "衰减公式为什么是这个？" | 艾宾浩斯简化 `R = max(e^(-t/S), 0.10)`，`S=1+(recall+1)×12`（post-recall 约定，三处调用点统一）。**参数经 decay A/B 校准**：原 `×2` 半衰期太短，合成老化分布下 recall 0.367；调 `×12` + 0.10 floor 后 0.667，保留"过时沉底"偏好（见 decay_ab_report.md）。另说明"从未召回按 created_at 衰减"（否则旧记忆永不沉底） |
+| "衰减公式为什么是这个？" | 诚实回答：衰减已从排序路径移除。decay A/B 显示衰减加权 recall@5 0.667、无衰减 0.900，唯一测量数据表明衰减让检索变差，且其前提「近期/高频=相关」只建立在合成老化分布上。连续调参（S=2x→8x→12x）本质是逼近 no-op。改为纯相似度排序 + `record_recalls` 记录召回元数据，过期归档由 patrol LLM 读原始 recall 字段判断（见 decay_ab_report.md）。这个"用数据否掉自己的功能"的决策本身就是亮点 |
 | "评估数字 1.0 是自证吧？" | 主动认 + 给诚实口径：主评估集 30 条**默认是确定性纯子串基线**（recall 0.90 / MRR 0.84，无自证）；语义通道是显式 opt-in（救回 3/30 → 1.00/0.94，用被评测模型自评故非默认）；真实判别力看 27 条陷阱集——纯向量综合通过仅 59.3%、11 条陷阱压过目标。**已用这个集落地改进**：bounded cross-encoder top-3 重排提至 81.5%（默认关、显式启用），排除 query 重写/hybrid（会放大表层词问题） |
 | "为什么不用 LangChain Agent？" | 黑盒 + HITL 控制弱 + 调试代价 |
 | "pgvector 性能不行吧？" | 万级数据 hnsw 够用，讲拐点 |

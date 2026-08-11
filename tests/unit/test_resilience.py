@@ -393,9 +393,10 @@ class TestCircuitBreakerWiring:
 class TestUsageOnRetry:
     @pytest.mark.asyncio
     async def test_usage_recorded_once_after_retry_succeeds(self) -> None:
-        from backend.shared import metrics
+        from backend.service.usage import pending_rows
+        from tests.support.process_state import reset_usage_buffer
 
-        metrics.reset_token_usage()
+        reset_usage_buffer()
         provider = _openai_provider()
         resp = _chat_response("ok")
         resp.usage = SimpleNamespace(total_tokens=7)
@@ -404,7 +405,7 @@ class TestUsageOnRetry:
 
         await provider.chat([{"role": "user", "content": "hi"}], scenario="agent_final")
         # One successful response → tokens counted once, despite 2 SDK calls.
-        assert metrics.get_token_usage() == {"agent_final": 7}
+        assert sum(r.get("total_tokens") or 0 for r in pending_rows()) == 7
 
 
 # ── Streaming connection retry ──────────────────────────────────────

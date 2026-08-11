@@ -1,4 +1,4 @@
-"""Unit tests for tests/eval/hard_negative.py — discrimination scoring.
+"""Unit tests for tests/eval/experiments/hard_negative.py — discrimination scoring.
 
 Pure functions only (no DB / no LLM): the discrimination logic is the part
 worth locking down — whether a trap seed ranked above the target correctly
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from tests.eval.hard_negative import aggregate, load_hard_negatives
+from tests.eval.experiments.hard_negative import aggregate, load_hard_negatives
 
 
 def _item(

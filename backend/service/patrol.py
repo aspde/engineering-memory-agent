@@ -17,11 +17,8 @@ from langgraph.types import Command
 
 from backend.db import get_session_factory
 from backend.service.agent_service import get_agent
-from backend.service.llm_service import get_llm_provider
 from backend.service.patrol_prompts import (
-    CI_FAILURE_PATROL_PROMPT,
     DAILY_PATROL_PROMPT,
-    JIRA_RESOLVED_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )
 from backend.shared.config import config, current_thread_id, current_trace_id
@@ -45,15 +42,7 @@ _MAX_AUTO_CONFLICT_RESOLUTIONS = 3
 _PATROL_MAX_STEPS: dict[str, int] = {
     "daily": 15,
     "weekly": 20,
-    "contradiction_scan": 20,
 }
-
-# Repair-retry threshold: a patrol output that failed contract validation is
-# re-emitted as JSON by one dedicated LLM call (see ``_repair_findings``).
-# Only outputs substantial enough to repair qualify — a mid-thought fragment
-# ("Let me scan more…") is not a report, and re-emitting it as empty JSON
-# would turn a genuine scan failure into a misleading 'completed'.
-_PATROL_REPAIR_MIN_CHARS = 300
 
 
 def _interrupt_payload(interrupt: Any) -> Any:
@@ -72,31 +61,19 @@ def _is_conflict_interrupt(result: dict) -> bool:
 _PATROL_PROMPTS: dict[str, str] = {
     "daily": DAILY_PATROL_PROMPT,
     "weekly": WEEKLY_PATROL_PROMPT,
-    "contradiction_scan": WEEKLY_PATROL_PROMPT,  # reuse weekly prompt
-    "event_driven": "",  # set dynamically based on event source
-}
-
-_EVENT_PROMPTS: dict[str, str] = {
-    "ci_failure": CI_FAILURE_PATROL_PROMPT,
-    "jira_resolved": JIRA_RESOLVED_PATROL_PROMPT,
 }
 
 # Valid patrol_type values for manual trigger
-VALID_PATROL_TYPES = {"daily", "weekly", "contradiction_scan"}
+VALID_PATROL_TYPES = {"daily", "weekly"}
 
 # Minimal structural contract per patrol type (see prompts.py templates):
 # the daily/weekly templates instruct the model to emit every category key —
 # an empty array when a category has nothing to report — so a missing key
 # means the model deviated from the JSON contract, not that the category is
-# empty.  The ci_failure / jira_resolved templates share the "matches" key
-# plus a decision key.
+# empty.
 _PATROL_REQUIRED_KEYS: dict[str, set[str]] = {
     "daily": {"pattern_matches", "knowledge_gaps", "new_entities"},
-    "weekly": {"contradictions", "decay_alerts", "entity_coverage"},
-    "contradiction_scan": {"contradictions", "decay_alerts", "entity_coverage"},
-    "ci_failure": {"matches", "should_alert"},
-    "jira_resolved": {"matches", "is_repeat"},
-    "event_driven": {"matches"},
+    "weekly": {"contradictions", "stale_memories", "entity_coverage"},
 }
 
 
@@ -171,84 +148,29 @@ def _parse_findings(raw_text: str) -> dict | None:
     return {"raw_output": text[:5000]}
 
 
-async def _repair_findings(
-    raw_text: str, parse_error: str, patrol_type: str
-) -> dict | None:
-    """One bounded LLM attempt to turn an invalid patrol output into
-    contract-compliant JSON.
-
-    The agent occasionally finishes a run with output that passes parsing but
-    violates the JSON contract (prose instead of the schema, or a report
-    truncated at the output ceiling).  Rather than record the patrol failed,
-    this re-emits the existing output through one dedicated LLM call with a
-    strict "pure JSON, every key present" instruction.  Returns valid findings,
-    or ``None`` (which records the patrol failed exactly as before).
-
-    Bounded: called at most once per run, only when the raw output is
-    substantial enough to repair (``_PATROL_REPAIR_MIN_CHARS``), and capped at
-    ``config.patrol_max_tokens`` — the raw report alone can exceed the
-    interactive ``LLM_MAX_TOKENS``.
-    """
-    required = _PATROL_REQUIRED_KEYS.get(patrol_type)
-    if required is None:
-        return None
-    if len(raw_text.strip()) < _PATROL_REPAIR_MIN_CHARS:
-        return None
-    try:
-        from backend.service.prompts import get_prompt
-
-        version, prompt = get_prompt("patrol.repair")
-        logger.info(
-            "Patrol repair: re-emitting invalid %s output as JSON "
-            "(prompt patrol.repair v%s)",
-            patrol_type, version,
-        )
-        content = prompt.format(
-            error=parse_error,
-            keys=", ".join(sorted(required)),
-            raw=raw_text[:4000],
-        )
-        provider = get_llm_provider()
-        text = await provider.chat(
-            [{"role": "user", "content": content}],
-            scenario="patrol_repair",
-            max_tokens=config.patrol_max_tokens,
-        )
-    except Exception:
-        logger.exception("Patrol repair call failed")
-        return None
-
-    repaired = _parse_findings(text)
-    if _validate_findings(repaired, patrol_type) is not None:
-        logger.warning(
-            "Patrol repair produced output that still fails validation"
-        )
-        return None
-    return repaired
-
-
 async def run_patrol(
     patrol_type: str,
     trigger: str,
     system_prompt: str,
     scope: str | None = None,
-    event_source: str | None = None,
+    patrol_id: str | None = None,
 ) -> str:
     """Execute a patrol and persist results to ``patrol_logs``.
 
     Args:
-        patrol_type: ``daily``, ``weekly``, ``contradiction_scan``,
-            or ``event_driven``.
+        patrol_type: ``daily`` or ``weekly``.
         trigger: ``cron``, ``webhook``, or ``manual``.
         system_prompt: The patrol System Prompt to use.
         scope: Optional scope filter (``"all"`` or ``"entity:<name>"``).
-        event_source: For event_driven patrols, the connector source name
-            (e.g. ``"ci"``, ``"pingcode"``).
+        patrol_id: Optional log id to use.  When omitted, a fresh UUID is
+            generated.  The manual-trigger route passes one in so the caller
+            gets the real id up front instead of a "pending" placeholder.
 
     Returns:
-        The patrol log ID (UUID string).
+        The patrol log ID (UUID string), or ``""`` when an overlapping run
+        of the same type was already in flight (the run was skipped).
     """
-    patrol_id = str(uuid.uuid4())
+    patrol_id = patrol_id or str(uuid.uuid4())
     started_at = datetime.now(timezone.utc)
 
     # Build the user message for the agent
@@ -258,8 +180,6 @@ async def run_patrol(
     ]
     if scope and scope != "all":
         user_message_parts.append(f"Scope: {scope}")
-    if event_source:
-        user_message_parts.append(f"Event source: {event_source}")
 
     user_message = "\n".join(user_message_parts)
 
@@ -412,22 +332,6 @@ async def run_patrol(
                 findings = _parse_findings(raw_text) if raw_text else None
                 parse_error = _validate_findings(findings, patrol_type)
                 if parse_error:
-                    # One bounded repair attempt: a malformed scan is re-emitted
-                    # as contract-compliant JSON by a dedicated LLM call.  On
-                    # success the report is kept (status stays 'completed'); on
-                    # failure the run is recorded failed exactly as before.
-                    repaired = await _repair_findings(
-                        raw_text, parse_error, patrol_type
-                    )
-                    if repaired is not None:
-                        logger.warning(
-                            "Patrol %s (%s) findings repaired after failed "
-                            "validation: %s",
-                            patrol_id, patrol_type, parse_error,
-                        )
-                        findings = repaired
-                        parse_error = None
-                if parse_error:
                     # A malformed scan must never persist as 'completed' — the
                     # UI would render "done" while every finding click fails.
                     status = "failed"
@@ -536,11 +440,6 @@ async def run_patrol(
 def get_patrol_prompt(patrol_type: str) -> str:
     """Return the pre-defined System Prompt for a patrol type."""
     return _PATROL_PROMPTS.get(patrol_type, DAILY_PATROL_PROMPT)
-
-
-def get_event_prompt(event_source: str) -> str:
-    """Return the event-driven System Prompt for a given event source."""
-    return _EVENT_PROMPTS.get(event_source, CI_FAILURE_PATROL_PROMPT)
 
 
 async def mark_stale_patrols_failed() -> int:

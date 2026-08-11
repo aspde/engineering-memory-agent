@@ -4,7 +4,7 @@
 
 ## 方法
 
-三类摘要对（`tests/eval/threshold_calibration.py`）：
+三类摘要对（`tests/eval/experiments/threshold_calibration.py`）：
 
 - **duplicate**：8 条 seed 的 LLM 同义改写（应 merge）
 - **same-category**：同类 15 对/类（应 独立或补充，不 merge）

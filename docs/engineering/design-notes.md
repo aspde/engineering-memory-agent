@@ -100,7 +100,7 @@ extract_entities(content) ─┘
 1. 表结构：`embedding vector(1024)`（BGE-M3 输出 1024 维）
 2. 索引：`hnsw` on `embedding vector_cosine_ops`（pgvector ≥ 0.5）
 3. 相似度计算：`1 - (embedding <=> :vec ::vector)`，`<=>` 是 cosine distance，1 减一下变成相似度
-4. 加权排序：`相似度 × 实时 decay_factor DESC`（decay_factor 由 `recalled_at`/`recall_count` 在 SQL 里现算，不读存储快照）
+4. 排序：**纯相似度**，单段 HNSW 直接按 `embedding <=> :vec` 返回。原实现曾用「相似度 × 实时 decay_factor」加权排序，decay A/B 实测掉 recall（0.667 vs 0.900）后已移除（见 decision-faq 第 7 节）；`recall_count`/`recalled_at` 只作元数据记录，不参与排序
 
 **HNSW vs ivfflat**：当前用 hnsw。早期用 ivfflat 时 lists 参数依赖数据量，小库（< 千条）下 lists=100 把探针散布到大量空聚类，召回差；hnsw 无聚类依赖、小库也稳，参数用默认。数据量到百万级才重新评估专用向量库。PQ 是有损压缩、召回精度下降，当前数据量内存够用不需要。
 
@@ -108,17 +108,17 @@ extract_entities(content) ─┘
 
 ```sql
 SELECT id, source_type, summary, entities, relations,
-       decay_factor, recall_count, meta, created_at,
-       (1 - (embedding <=> :vec ::vector)) * decay_factor AS weighted_score
+       recall_count, meta, created_at, recalled_at,
+       1 - (embedding <=> :vec ::vector) AS similarity
 FROM memories
 WHERE embedding IS NOT NULL
   AND deleted_at IS NULL
   AND 1 - (embedding <=> :vec ::vector) > :threshold
-ORDER BY (1 - (embedding <=> :vec ::vector)) * decay_factor DESC
+ORDER BY embedding <=> :vec ::vector
 LIMIT :limit
 ```
 
-要点：`embedding IS NOT NULL` 防止空向量；`deleted_at IS NULL` 软删除过滤；threshold 过滤低相似度（decay 层 `search_memories` 默认 0.0；生产入口 `query_memories` 默认 0.3 作垃圾过滤门槛，作用于原始相似度、衰减加权之前）；排序键是"相似度 × 衰减因子"。
+要点：`embedding IS NOT NULL` 防止空向量；`deleted_at IS NULL` 软删除过滤；threshold 过滤低相似度（`search_memories` 默认 0.0；生产入口 `query_memories` 默认 0.3 作垃圾过滤门槛）；排序键是原始相似度——HNSW 索引只服务按 `embedding <=> :vec` 排序的扫描，所以不需要两段候选窗 + Python 重排。召回统计由 `record_recalls` 在搜索后单独批量记录。
 
 ### 实体归一化怎么做的？
 
@@ -202,7 +202,7 @@ fails safe 原则：
 4. **max_steps 限制**：防止 Agent 无限调 tool 烧 token
 5. **传输韧性**：LLM/Embedding 调用统一走 tenacity 指数退避重试 + 熔断器（[resilience.py](../../backend/shared/resilience.py)），429/5xx 自动重试、连续失败熔断快速失败；重复投递靠 content-hash 幂等去重
 
-成本监控：provider 层是唯一咽喉点，每次调用写 `llm_usage` 表（scenario / tokens / latency / 成本估算），`/api/usage/*` 按天、按场景、按模型汇总，trace_id 能回放单轮 agent 的调用链。缓存没做——记忆检索是动态的，相同 query 召回结果会因 decay 变化，缓存意义不大。
+成本监控：provider 层是唯一咽喉点，每次调用写 `llm_usage` 表（scenario / tokens / latency / 成本估算），`/api/usage/*` 按天、按场景、按模型汇总，trace_id 能回放单轮 agent 的调用链。缓存没做——记忆检索是动态的，相同 query 召回结果会随写入变化，缓存意义不大。
 
 ### 系统健康怎么监控？
 
@@ -224,7 +224,7 @@ fails safe 原则：
 1. **存储**：PostgreSQL + pgvector（结构化 + 向量 + checkpoint 三合一）
 2. **Agent**：LangGraph StateGraph + ReAct + HITL 卡点
 3. **记忆写入**：三阶段提取 + 四级相似度去重 + 冲突 HITL
-4. **检索**：向量召回 + rerank + 衰减加权（让常用知识浮上来）
+4. **检索**：向量召回 + rerank + 召回统计（命中记忆记 `recall_count`，过期归档由巡检读访问历史判断）
 5. **数据源**：连接器抽象（Webhook + 适配器），按需接入
 6. **交互**：Web UI + ChatOps Bot + MCP Server（给其他 Agent 用）
 
@@ -234,9 +234,9 @@ fails safe 原则：
 
 1. **存储**：pgvector 可能不够，切 Milvus/Qdrant 做向量库，PG 只存结构化数据。双写一致性用 outbox pattern
 2. **检索**：加 pre-filter（先按 metadata + 时间过滤缩小候选集），再向量搜索
-3. **衰减**：批量异步更新 decay，不在线上召回路径同步更新
+3. **召回统计**：批量更新 recall 元数据，不在线上召回路径同步影响排序（排序是纯相似度）
 4. **分层记忆**：Working / Task / Long-term 三层，向量检索只走 Long-term
-5. **缓存**：高频 query 的检索结果缓存（带 TTL，因为 decay 会变）
+5. **缓存**：高频 query 的检索结果缓存（带 TTL，因为新写入会改召回集合）
 
 **双写一致性**：PG 先写 + outbox 表，异步 worker 消费 outbox 写向量库，失败重试，最终一致。向量库坏了 PG 是 source of truth，可用 outbox 重放重建。
 
@@ -268,7 +268,7 @@ fails safe 原则：
 |------|---------|
 | BGE-M3 维度 | 1024 |
 | pgvector 索引 | hnsw + cosine_ops |
-| 衰减公式 | R=max(e^(-t/S),0.1), S=1+(recall+1)×12 |
+| 召回统计 | record_recalls 批量记 recall_count/recalled_at（元数据，不参与排序） |
 | 四级阈值 | 0.85合并 / 0.72冲突 / 0.60关联 / <0.60新增 |
 | Agent 节点 | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |
 | HITL 卡点 | 2 个：写前审批 + 冲突仲裁 |

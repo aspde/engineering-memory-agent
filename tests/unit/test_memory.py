@@ -498,8 +498,7 @@ class TestWriteMemoryConflictFailSafe:
     Previously LLMStructuredError escaped write_memory, so ingestion (returns
     None on error) and auto-memory (swallows errors) silently lost the commit
     or turn.  The fix degrades to a supplement write — content preserved, no
-    contradiction assumed — and surfaces the degradation via
-    ``record_structured_failure("conflict_detection")``.
+    contradiction assumed — and logs the degradation at ERROR level.
     """
 
     @pytest.mark.asyncio
@@ -525,11 +524,6 @@ class TestWriteMemoryConflictFailSafe:
             captured["metadata"] = metadata
             return {"id": "new-id", "action": "inserted", "summary": "New summary."}
 
-        failures: list[str] = []
-
-        def _record_failure(scenario: str) -> None:
-            failures.append(scenario)
-
         with (
             patch("backend.service.memory._find_by_content_hash", AsyncMock(return_value=None)),
             patch(
@@ -540,7 +534,6 @@ class TestWriteMemoryConflictFailSafe:
             patch("backend.service.memory._find_similar", _fake_find_similar),
             patch("backend.service.memory._detect_conflict", _raise_structured),
             patch("backend.service.memory._supplement_memory", _fake_supplement),
-            patch("backend.service.memory.record_structured_failure", _record_failure),
         ):
             result = await write_memory("new content", source_type="conversation")
 
@@ -548,7 +541,6 @@ class TestWriteMemoryConflictFailSafe:
         # the agent tool / resolve_conflict consumers).
         assert result["action"] == "inserted"
         assert captured["existing_id"] == existing["id"]
-        assert failures == ["conflict_detection"]
 
 
 class TestWriteMemoryFanOut:

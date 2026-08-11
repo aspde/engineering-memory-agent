@@ -12,7 +12,6 @@ import json
 import logging
 import threading
 import time
-from collections import deque
 from typing import Any, Literal
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -394,25 +393,15 @@ def _window_messages(
 # entire early history) must not blow past the compaction call's own budget.
 _COMPACTION_TRANSCRIPT_CHARS = 12000
 
-# ── Compaction reuse within a turn ─────────────────────────────────
+# ── Compaction: two independent bounds ────────────────────────────
 # A tool turn bounds the conversation twice — ``call_llm_node`` (tool
-# selection) and ``generate_final_node`` (synthesis) — over message lists
-# that usually share the same overflow prefix.  Each pass would otherwise pay
-# its own compaction LLM call and could produce a different, non-deterministic
-# summary.  Instead the summary (and the overflow transcript it was computed
-# over) is carried in ``AgentState.compaction_summary`` /
-# ``compaction_transcript``: the second bound reuses the first's summary when
-# the current overflow's transcript matches — no second LLM call, one
-# deterministic summary per turn.  ``generate_final_node`` clears the fields
-# at turn end so the next turn starts fresh.
-#
-# Deliberate simplification vs. a transcript-keyed global cache: the two
-# bounds run strictly sequentially within one ReAct turn (the graph has no
-# concurrent compaction call sites), so reuse is state passing — no lock, no
-# in-flight dedup, no cross-turn cache to invalidate.  A transcript mismatch
-# (e.g. a large tool result pushed more history into the overflow) simply
-# re-summarises, so a stale summary can never silently drop newly-overflowed
-# content.
+# selection) and ``generate_final_node`` (synthesis) — and each bound
+# compacts independently.  The second bound's message list always differs
+# from the first (the tool-call AIMessage and its ToolMessage are new), so
+# sharing one running summary through AgentState rarely matched on exactly
+# the turns that need compaction — the extra state cost more than the
+# occasional saved call.  The worst case is one extra summariser call per
+# turn on oversized history.
 
 
 # Cap per-ToolMessage content in the compaction transcript — a single huge
@@ -518,10 +507,7 @@ def _split_overflow(
 async def _maybe_compact(
     messages: list[BaseMessage],
     max_tokens: int | None = None,
-    *,
-    existing_summary: str | None = None,
-    existing_transcript: str | None = None,
-) -> tuple[list[BaseMessage], str | None, str | None]:
+) -> list[BaseMessage]:
     """Fold history older than the token budget into a running-summary SystemMessage.
 
     Only active when ``config.conversation_compaction_enabled`` is set
@@ -534,58 +520,32 @@ async def _maybe_compact(
     unchanged and the caller's windowing still truncates — compaction never
     loses more context than the existing behaviour.
 
-    Returns ``(messages, new_summary, new_transcript)``.  ``new_summary`` is
-    the summary just computed (``None`` when nothing was summarised, or when
-    the caller's *existing_summary* was reused); ``new_transcript`` is the
-    overflow transcript that summary was computed over, ``None`` alongside
-    ``new_summary``.
-
-    Reuse: a tool turn bounds the conversation twice — ``call_llm_node``
-    then ``generate_final_node`` — over message lists that usually share the
-    same overflow prefix.  Passing *existing_summary* / *existing_transcript*
-    (the previous bound's output, carried in ``AgentState``) reuses the old
-    summary WITHOUT a second LLM call — but only when the current overflow's
-    transcript exactly matches *existing_transcript*.  A large tool result
-    can push more history into the overflow; if the prefix changed, the old
-    summary would drop that newly-overflowed content, so the check
-    re-summarises.  Failures are never reused: a failed summarise returns
-    ``None`` and leaves the caller's state untouched, so the next pass retries.
+    Each caller compacts independently — the tool-selection and synthesis
+    bounds of a turn do not share a summary (see "Compaction: two
+    independent bounds" above).
     """
     from backend.shared.config import config
 
     if max_tokens is None:
         max_tokens = _context_budget()
     if not config.conversation_compaction_enabled:
-        return messages, None, None
+        return messages
     system = [m for m in messages if isinstance(m, SystemMessage)]
     rest = [m for m in messages if not isinstance(m, SystemMessage)]
     if sum(_message_tokens(m) for m in rest) <= max_tokens:
-        return messages, None, None
+        return messages
     # Reserve ~60% of the window for the retained tail; the running summary
     # gets the rest.  If even the tail can't fit (a single oversized message),
     # the split still keeps the newest message and compacts everything older.
     tail_budget = max(int(max_tokens * 0.6), 1)
     overflow, tail = _split_overflow(rest, tail_budget)
     if not overflow:
-        return messages, None, None
+        return messages
     transcript = _overflow_transcript(overflow)
-    if existing_summary and existing_transcript == transcript:
-        # Same overflow prefix as the previous bound in this turn — the old
-        # summary still covers it.  Pinned system messages stay first, then
-        # the running summary, then the retained tail.  The summary may
-        # coexist with the persona system in the LangChain message list —
-        # ``call_llm_node`` coalesces all system messages into one before
-        # serialization, so Anthropic's single-top-level-system constraint
-        # is met (see ``_merge_system_messages``).
-        return (
-            system + [SystemMessage(content=existing_summary)] + tail,
-            None,
-            None,
-        )
     summary = await _summarize_overflow(overflow, transcript=transcript)
     if not summary:
-        return messages, None, None
-    return system + [SystemMessage(content=summary)] + tail, summary, transcript
+        return messages
+    return system + [SystemMessage(content=summary)] + tail
 
 
 def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -623,29 +583,14 @@ def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 async def _bounded_messages(
     messages: list[BaseMessage],
     max_tokens: int | None = None,
-    *,
-    existing_summary: str | None = None,
-    existing_transcript: str | None = None,
-) -> tuple[list[BaseMessage], str | None, str | None]:
+) -> list[BaseMessage]:
     """Compact (when enabled) then window *messages* for the LLM.
 
     With compaction disabled this is exactly ``_window_messages`` — the
-    default behaviour is unchanged.  Returns ``(windowed, new_summary,
-    new_transcript)`` — see :func:`_maybe_compact` for the summary contract.
-    Callers publish a non-``None`` ``new_summary`` into ``AgentState`` so the
-    same turn's later bound reuses it instead of paying a second call.
+    default behaviour is unchanged.
     """
-    compacted, new_summary, new_transcript = await _maybe_compact(
-        messages,
-        max_tokens,
-        existing_summary=existing_summary,
-        existing_transcript=existing_transcript,
-    )
-    return (
-        _window_messages(compacted, max_tokens),
-        new_summary,
-        new_transcript,
-    )
+    compacted = await _maybe_compact(messages, max_tokens)
+    return _window_messages(compacted, max_tokens)
 
 
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
@@ -692,127 +637,13 @@ _AUTO_MEMORY_MIN_SUMMARY_LEN = 15  # summaries shorter than this = no substance
 
 # Each capture costs 3 LLM extractions (summary + entities + relations) plus
 # embedding and a similarity scan, so a quality gate decides *before the
-# expensive extraction pipeline* whether a turn is durable knowledge.  With
-# AUTO_MEMORY_LLM_GATE=true (default) the gate is one cheap structured LLM
-# call after a zero-cost fast-path; with it false, a free keyword heuristic
-# is the sole gate.  Deliberately conservative: a missed capture is
-# recoverable, a junk memory pollutes retrieval forever.
+# expensive extraction pipeline* whether a turn is durable knowledge.  The
+# gate is one cheap structured LLM call, preceded by a zero-cost length
+# fast-path; the keyword heuristics this pipeline once carried are gone —
+# "is this durable knowledge?" is judged by the LLM, not by phrase tables.
+# Deliberately conservative: a missed capture is recoverable, a junk memory
+# pollutes retrieval forever.
 _AUTO_MEMORY_MIN_CONTENT_LEN = 12  # raw user message must be this long
-# After stripping chatty words and symbols, this many informative characters
-# (CJK hanzi / ASCII letters & digits) must remain — emoji spam, symbol runs
-# and bare links pass the raw length gate but carry zero knowledge.
-_AUTO_MEMORY_MIN_INFORMATIVE_CHARS = 6
-_AUTO_MEMORY_QUESTION_SUFFIXES = ("？", "?", "吗", "呢", "吧", "啊")
-_AUTO_MEMORY_QUESTION_MARKERS = (
-    "什么", "怎么", "如何", "为什么", "哪些", "哪个", "能否", "能不能",
-    "是不是", "有没有", "是否", "请问",
-)
-_AUTO_MEMORY_REQUEST_PREFIXES = (
-    "帮我", "请帮我", "查一下", "搜索", "搜一下", "找一下", "找找",
-    "介绍一下", "解释", "讲讲", "看看", "分析一下", "评估一下",
-    "总结一下", "列出", "推荐", "对比一下",
-)
-_AUTO_MEMORY_CHATTY = frozenset({
-    "你好", "您好", "谢谢", "感谢", "辛苦了", "再见", "拜拜", "好的",
-    "嗯", "收到", "在吗", "hello", "hi", "ok", "okay",
-    # Expanded — common acknowledgements / filler / pleasantries that carry
-    # no durable knowledge.  Short tokens are redundant with the length gate,
-    # so these are the multi-word or multi-char forms worth matching.
-    "明白了", "知道了", "了解了", "没问题", "可以的", "好的呢", "好的哟",
-    "好的好的", "好的没问题", "收到收到", "哈哈", "呵呵", "好的谢谢",
-    "谢谢谢谢", "非常感谢", "辛苦了辛苦了", "早上好", "中午好", "下午好",
-    "晚上好", "早安", "晚安", "加油", "欢迎欢迎", "恭喜恭喜", "好的呀",
-    "好嘞", "行吧", "嗯嗯", "嗯呢", "thx", "thanks", "tks", "okay",
-    "ok ok", "great", "fine", "sure", "yes", "no", "got it", "nice",
-})
-
-
-# Polite acknowledgement phrases stripped before the informative-char count —
-# a pure-acknowledgement turn ("好的，明白了，收到，谢谢！") otherwise keeps
-# 9 CJK hanzi and passes the symbol-noise check.  Longer phrases first so a
-# short one never shadows a longer match.
-_AUTO_MEMORY_POLITE_PHRASES = (
-    "好的好的", "好的没问题", "明白了", "知道了", "没问题", "辛苦了",
-    "可以的", "好的呢", "好的哟", "好的呀", "收到收到", "谢谢谢谢",
-    "好的", "收到", "谢谢", "感谢", "哈哈", "呵呵", "嗯嗯", "好嘞",
-)
-
-
-def _is_symbol_noise(text: str) -> bool:
-    """True when *text* carries fewer than ``_AUTO_MEMORY_MIN_INFORMATIVE_CHARS``
-    informative characters after stripping polite filler.
-
-    Polite phrases (谢谢 / 收到 / 明白了 …) are stripped first, then CJK
-    hanzi and ASCII letters/digits count as informative; emoji, other
-    non-CJK symbols, punctuation and whitespace are ignored.  A turn that is
-    only emoji ("🎉"×12), symbol runs ("！！！！！"), or a bare polite
-    acknowledgement ("好的，明白了，收到，谢谢！") collapses to near-zero —
-    treated as noise.
-    """
-    stripped = text
-    for phrase in _AUTO_MEMORY_POLITE_PHRASES:
-        stripped = stripped.replace(phrase, "")
-    informative = 0
-    for ch in stripped:
-        if ord(ch) > 0x7F:
-            if "一" <= ch <= "鿿" or ch.isalnum():
-                informative += 1
-        elif ch.isalnum():
-            informative += 1
-    return informative < _AUTO_MEMORY_MIN_INFORMATIVE_CHARS
-
-
-def _auto_memory_fast_worthy(content: str) -> bool:
-    """Cheap zero-cost pre-filter: length, exact chatty set, symbol noise.
-
-    Deliberately does NOT apply the question/request heuristics — they misfire
-    on complex declarative statements ("为什么 X 会 Y？后来查明是……" carries a
-    question marker but is durable knowledge).  In LLM-gate mode (the default)
-    those cases are judged by ``_llm_gate_worthy`` instead.
-    """
-    text = content.strip()
-    if len(text) < _AUTO_MEMORY_MIN_CONTENT_LEN:
-        return False
-    if text.lower() in _AUTO_MEMORY_CHATTY:
-        return False
-    if _is_symbol_noise(text):
-        return False
-    return True
-
-
-def _is_auto_memory_worthy(content: str) -> bool:
-    """Full keyword heuristic — the quality gate when AUTO_MEMORY_LLM_GATE=false.
-
-    Fast path plus question/request rejection.  Free but coarse, so it misfires
-    on complex phrasing (kills a declarative statement that contains a question
-    marker, lets long chatty filler through).  With the LLM gate enabled (the
-    default) only ``_auto_memory_fast_worthy`` runs before the LLM judge and
-    this full heuristic is bypassed.  ``记住…`` requests are deliberately NOT
-    filtered — they are the explicit-remember path, normally handled by
-    ``write_memory_tool``, and capturing them here when the tool was not
-    invoked is correct.
-    """
-    if not _auto_memory_fast_worthy(content):
-        return False
-    text = content.strip()
-    if text.endswith(_AUTO_MEMORY_QUESTION_SUFFIXES):
-        return False
-    if any(marker in text for marker in _AUTO_MEMORY_QUESTION_MARKERS):
-        return False
-    lowered = text.lower()
-    if any(text.startswith(p) for p in _AUTO_MEMORY_REQUEST_PREFIXES):
-        return False
-    if any(lowered.startswith(p) for p in ("please ", "can you ", "could you ")):
-        return False
-    return True
-
-
-# ── LLM quality gate (B3) ─────────────────────────────────────────
-# The keyword heuristic alone is free but coarse — it lets chatty-but-long
-# filler through and can misfire on complex phrasing.  AUTO_MEMORY_LLM_GATE=
-# true (default) routes every fast-path-passing turn through one cheap
-# structured call asking whether the message is durable knowledge; setting it
-# false restores the zero-LLM-cost keyword gate.
 _AUTO_MEMORY_GATE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["worthy"],
@@ -824,8 +655,8 @@ async def _llm_gate_worthy(content: str) -> bool:
     """Ask the LLM whether *content* is durable knowledge (best-effort).
 
     Returns True when the gate is unavailable (LLM failure, schema-valid but
-    missing verdict) so a gate outage never drops a heuristic-passing turn —
-    the later ``_has_substance`` check still guards the write.  *content* is
+    missing verdict) so a gate outage never drops a length-passing turn — the
+    later ``_has_substance`` check still guards the write.  *content* is
     truncated so a long message doesn't inflate the gate call's prompt, and
     braces in it are escaped so a code snippet can't break the template's
     ``.format()`` interpolation (which would otherwise raise KeyError and
@@ -857,48 +688,33 @@ async def _llm_gate_worthy(content: str) -> bool:
 
 # ── Auto-memory frequency control ───────────────────────────────────
 # Capture is throttled before extraction runs (a throttled turn costs zero
-# LLM calls): a per-thread minimum interval, a per-thread lifetime cap, an
-# exact-repeat skip, and a process-wide rolling-window cap.  State is
-# in-memory (same as the circuit breaker / token-usage counters) and resets
-# on process restart.
-_AUTO_MEMORY_WINDOW_SECONDS = 3600  # rolling window for the process-wide cap
-
+# LLM calls) by a single per-thread minimum interval.  The per-thread lifetime
+# cap, process-wide rolling-window cap and exact-repeat skip this once carried
+# all defended the same "don't write too much" goal — the interval alone
+# bounds the steady-state write rate, and the content-hash idempotency in
+# ``write_memory`` (backend/service/memory.py) already makes an exact repeat
+# a no-op.  State is in-memory (same as the circuit breaker / token-usage
+# counters) and resets on process restart.
 _auto_memory_lock = threading.Lock()
 _auto_memory_last_write: dict[str, float] = {}  # thread_id -> monotonic ts
-_auto_memory_write_count: dict[str, int] = {}   # thread_id -> lifetime count
-_auto_memory_last_content: dict[str, str] = {}  # thread_id -> last content
-_auto_memory_recent_writes: deque = deque()     # monotonic ts, process-wide
 
 
-def _auto_memory_throttled(thread_id: str, content: str) -> bool:
+def _auto_memory_throttled(thread_id: str) -> bool:
     """True when a new auto-memory capture should be skipped (throttled)."""
     from backend.shared.config import config
 
     now = time.monotonic()
     with _auto_memory_lock:
-        if _auto_memory_last_content.get(thread_id) == content:
-            return True
         last = _auto_memory_last_write.get(thread_id)
         if last is not None and now - last < config.auto_memory_min_interval:
             return True
-        if _auto_memory_write_count.get(thread_id, 0) >= config.auto_memory_max_per_thread:
-            return True
-        while (
-            _auto_memory_recent_writes
-            and now - _auto_memory_recent_writes[0] > _AUTO_MEMORY_WINDOW_SECONDS
-        ):
-            _auto_memory_recent_writes.popleft()
-        return len(_auto_memory_recent_writes) >= config.auto_memory_max_per_window
+    return False
 
 
-def _record_auto_memory_write(thread_id: str, content: str) -> None:
-    """Note a completed auto-memory capture for the throttle windows."""
-    now = time.monotonic()
+def _record_auto_memory_write(thread_id: str) -> None:
+    """Note a completed auto-memory capture for the interval throttle."""
     with _auto_memory_lock:
-        _auto_memory_last_write[thread_id] = now
-        _auto_memory_write_count[thread_id] = _auto_memory_write_count.get(thread_id, 0) + 1
-        _auto_memory_last_content[thread_id] = content
-        _auto_memory_recent_writes.append(now)
+        _auto_memory_last_write[thread_id] = time.monotonic()
 
 
 def _message_text(message: BaseMessage) -> str:
@@ -965,12 +781,11 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     (the memory pipeline as a whole is opt-out via ``MEMORY_ENABLED=false`` —
     with no memory tools the agent is pure chat, so it must not keep writing
     memories behind the scenes).  A turn is captured only when (1) it passes
-    the quality gate — the cheap fast-path plus, with ``AUTO_MEMORY_LLM_GATE``
-    on (the default), one LLM judge call; with it off, the full keyword
-    heuristic — (2) capture is not throttled (``_auto_memory_throttled``),
-    (3) the agent did not already call ``write_memory_tool`` this turn, and
-    (4) extraction yields substantive content.  Any failure is logged and
-    swallowed — auto memory must never break the chat response.
+    the length fast-path, (2) capture is not throttled
+    (``_auto_memory_throttled``), (3) the LLM quality gate judges it durable
+    knowledge, (4) the agent did not already call ``write_memory_tool`` this
+    turn, and (5) extraction yields substantive content.  Any failure is
+    logged and swallowed — auto memory must never break the chat response.
     """
     from backend.shared.config import config, current_thread_id
 
@@ -983,31 +798,22 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     if _write_tool_used_this_turn(state["messages"]):
         return
 
-    # Quality gate — with the LLM gate enabled (default) only the cheap
-    # fast-path applies here (length / chatty / symbol noise), so complex
-    # declarative statements that carry a question marker or request phrasing
-    # are NOT killed — they proceed to the LLM judge below.  With the LLM
-    # gate disabled, the full keyword heuristic is the sole gate (zero LLM
-    # cost per turn, coarser).
-    if config.auto_memory_llm_gate:
-        worthy = _auto_memory_fast_worthy(user_content)
-    else:
-        worthy = _is_auto_memory_worthy(user_content)
-    if not worthy:
-        logger.info("Auto-memory: not a knowledge statement, skipping")
+    # Length fast-path — the only zero-cost pre-filter.  Everything deeper
+    # (is this durable knowledge?) is judged by the LLM gate below; the
+    # keyword heuristics that once sat here are gone.
+    if len(user_content) < _AUTO_MEMORY_MIN_CONTENT_LEN:
+        logger.info("Auto-memory: message too short, skipping")
         return
 
     # Frequency control — before the LLM gate, so a throttled turn never
     # pays for the judge call.
     thread_id = current_thread_id.get("") or "_"
-    if _auto_memory_throttled(thread_id, user_content):
-        logger.info("Auto-memory: throttled (interval/cap/window), skipping")
+    if _auto_memory_throttled(thread_id):
+        logger.info("Auto-memory: throttled (interval), skipping")
         return
 
-    # LLM gate (AUTO_MEMORY_LLM_GATE=true, the default) — one cheap structured
-    # call judging durable knowledge, after the zero-cost throttle so a
-    # throttled turn pays nothing.
-    if config.auto_memory_llm_gate and not await _llm_gate_worthy(user_content):
+    # LLM quality gate — one cheap structured call judging durable knowledge.
+    if not await _llm_gate_worthy(user_content):
         logger.info("Auto-memory: LLM gate judged not worthy, skipping")
         return
 
@@ -1029,7 +835,7 @@ async def _maybe_auto_memory(state: AgentState) -> None:
             result.get("id"),
             result.get("action"),
         )
-        _record_auto_memory_write(thread_id, user_content)
+        _record_auto_memory_write(thread_id)
     except Exception:
         logger.exception("Auto-memory write failed")
 
@@ -1049,9 +855,9 @@ async def _maybe_auto_memory(state: AgentState) -> None:
 # ``backend/service/memory.py``).  Concurrency is bounded by a semaphore:
 # every agent run can spawn one capture per turn, and each fires up to 4-7
 # LLM calls — unbounded, concurrent sessions would stack that onto the
-# provider rate limit on top of the interactive traffic.  The per-thread /
-# per-window throttle inside ``_maybe_auto_memory`` limits *writes*; this
-# bounds the *calls*.
+# provider rate limit on top of the interactive traffic.  The interval
+# throttle inside ``_maybe_auto_memory`` limits *writes*; this bounds the
+# *calls*.
 _AUTO_MEMORY_MAX_CONCURRENCY = 4
 _auto_memory_semaphore = asyncio.Semaphore(_AUTO_MEMORY_MAX_CONCURRENCY)
 _auto_memory_tasks: set[asyncio.Task] = set()
@@ -1121,17 +927,10 @@ async def call_llm_node(
 
     # Prepend the system prompt if this is the first call, then bound the
     # history sent to the LLM (compact when enabled, then window to the
-    # recent tail + pinned system prompts).  The previous bound's compaction
-    # summary (this turn, or an earlier ReAct loop pass) is passed in so the
-    # same overflow prefix reuses it instead of paying a second summariser
-    # call; a fresh summary is published in the return update below.
+    # recent tail + pinned system prompts).
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
-    messages, compaction_summary, compaction_transcript = await _bounded_messages(
-        messages,
-        existing_summary=state.get("compaction_summary"),
-        existing_transcript=state.get("compaction_transcript"),
-    )
+    messages = await _bounded_messages(messages)
     if not has_system:
         version, system_text = get_prompt("agent.system")
         logger.info("call_llm_node: using agent.system prompt v%s", version)
@@ -1207,14 +1006,6 @@ async def call_llm_node(
         aimessage = AIMessage(content=content)
 
     update: dict[str, Any] = {"messages": [aimessage], "step_count": step_base + 1}
-    if compaction_summary:
-        # A fresh summary was computed this pass — publish it (with the
-        # overflow transcript it covers) so ``generate_final_node``'s bound
-        # later in the same turn reuses it.  A reused summary leaves the
-        # existing state fields untouched, so they stay valid for the next
-        # bound.
-        update["compaction_summary"] = compaction_summary
-        update["compaction_transcript"] = compaction_transcript
     return update
 
 
@@ -1255,10 +1046,6 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         return {
             "final_prompt": None,
             "final_response": str(last.content),
-            # The turn ends here — clear the compaction fields so the next
-            # turn's first call_llm computes its own summary.
-            "compaction_summary": None,
-            "compaction_transcript": None,
         }
 
     # ── Harvest context from ToolMessages in the recent conversation ──
@@ -1267,14 +1054,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     # prompt on every turn.  When compaction is enabled the overflow is folded
     # into a running-summary SystemMessage, which is folded into the context
     # block below so the synthesis LLM still sees the compressed history.
-    # Reuse the compaction summary computed by this turn's call_llm bound —
-    # the overflow prefix is identical, so the synthesis prompt sees the same
-    # running summary without a second summariser call.
-    windowed, _, _ = await _bounded_messages(
-        state["messages"],
-        existing_summary=state.get("compaction_summary"),
-        existing_transcript=state.get("compaction_transcript"),
-    )
+    windowed = await _bounded_messages(state["messages"])
     context_parts: list[str] = []
     # Compaction summaries (SystemMessages) become <summary> context items.
     for m in windowed:
@@ -1382,10 +1162,6 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         "final_prompt": messages,
         "final_response": response,
         "messages": [aimessage],
-        # The turn ends here — clear the compaction fields so the next
-        # turn's first call_llm computes its own summary.
-        "compaction_summary": None,
-        "compaction_transcript": None,
     }
 
 

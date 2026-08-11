@@ -68,19 +68,24 @@ async def search_memories_tool(
     lines = [f"Found {len(results)} relevant memories:"]
     sources: list[dict[str, Any]] = []
     for i, r in enumerate(results):
-        score = r.get("rerank_score", r.get("weighted_score", 0))
-        decay = r.get("decay_factor", 1.0)
+        score = r.get("rerank_score", r.get("similarity", 0))
         mid = str(r["id"])
         entities = entity_map.get(mid, [])
         entity_names = [e["canonical_name"] for e in entities]
 
         # Expose the stable memory short ID in the display text so the LLM
         # can cite it inline (per the agent.system citation guidance).  The
-        # full ID stays in the sources envelope for the UI.
+        # full ID stays in the sources envelope for the UI.  Recall stats are
+        # shown so the model can judge staleness (patrol archival) from the
+        # raw access history.
         short_id = mid[:8]
+        recalls = int(r.get("recall_count", 0) or 0)
+        recalled_at = r.get("recalled_at")
+        last_recalled = recalled_at.isoformat()[:10] if recalled_at else "never"
         line = (
             f"[{i + 1}] (memory: {short_id}, relevance: {score:.2f}, "
-            f"decay: {decay:.2f}) {r['summary']}"
+            f"recalls: {recalls}, last_recalled: {last_recalled}) "
+            f"{r['summary']}"
         )
         if entity_names:
             line += f"  [entities: {', '.join(entity_names)}]"
@@ -91,7 +96,6 @@ async def search_memories_tool(
             "type": "memory",
             "summary": str(r["summary"])[:200],
             "relevance": round(float(score), 4),
-            "decay": round(float(decay), 4),
             "entities": entities,
         })
     return build_tool_envelope("\n".join(lines), sources)

@@ -175,22 +175,6 @@ class TestValidateConfig:
         problems = config_mod.validate_config()
         assert any("USAGE_SAMPLE_RETENTION_DAYS" in p for p in problems)
 
-    def test_alert_error_rate_threshold_out_of_range(self, monkeypatch) -> None:
-        _valid_patrol(monkeypatch)
-        monkeypatch.setattr(config_mod.config, "app_env", "test")
-        monkeypatch.setattr(config_mod.config, "alert_error_rate_threshold", -0.1)
-
-        problems = config_mod.validate_config()
-        assert any("ALERT_ERROR_RATE_THRESHOLD" in p for p in problems)
-
-    def test_alert_check_interval_below_one(self, monkeypatch) -> None:
-        _valid_patrol(monkeypatch)
-        monkeypatch.setattr(config_mod.config, "app_env", "test")
-        monkeypatch.setattr(config_mod.config, "alert_check_interval_seconds", 0)
-
-        problems = config_mod.validate_config()
-        assert any("ALERT_CHECK_INTERVAL_SECONDS" in p for p in problems)
-
     def test_agent_concurrency_below_one(self, monkeypatch) -> None:
         _valid_patrol(monkeypatch)
         monkeypatch.setattr(config_mod.config, "app_env", "test")

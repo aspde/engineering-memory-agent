@@ -34,7 +34,7 @@ async function writeMemory(
   });
 }
 
-/** Semantic search over structured memories with decay-weighted ranking. */
+/** Semantic search over structured memories ranked by similarity. */
 async function searchMemories(query: string, topK: number): Promise<MemorySearchResponse> {
   return apiPost<MemorySearchResponse>('/api/memory/memories/search', {
     query,

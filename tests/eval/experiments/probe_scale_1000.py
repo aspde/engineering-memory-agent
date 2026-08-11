@@ -17,10 +17,10 @@ Flow:
   7. Cleanup: DELETE FROM chunks WHERE document_id = 'distractor'
 
 Usage:
-  python -m tests.eval.probe_scale_1000            # 1000 chunks, no rerank
-  python -m tests.eval.probe_scale_1000 --target 10000
-  python -m tests.eval.probe_scale_1000 --target 10000 --rerank
-  python -m tests.eval.probe_scale_1000 --target 200 --template-only  # smoke
+  python -m tests.eval.experiments.probe_scale_1000            # 1000 chunks, no rerank
+  python -m tests.eval.experiments.probe_scale_1000 --target 10000
+  python -m tests.eval.experiments.probe_scale_1000 --target 10000 --rerank
+  python -m tests.eval.experiments.probe_scale_1000 --target 200 --template-only  # smoke
 """
 
 from __future__ import annotations
@@ -37,7 +37,9 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+# ``parent`` × 4 climbs from experiments/ to the repo root (one level deeper
+# than the old tests/eval location).
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
 DISTRACTOR_DOCUMENT_ID = "distractor"
 SEED_DOCUMENT_ID = "ema-eval-seed"
@@ -345,7 +347,7 @@ async def main(target: int, template_only: bool, with_rerank: bool) -> None:
         logger.info("Cleaned up %d leftover distractors", leftover)
 
     # 1. Baseline on the current corpus (before inserting distractors).
-    baseline_path = _REPO_ROOT / "tests" / "eval" / "scale_baseline.json"
+    baseline_path = Path(__file__).parent / "scale_baseline.json"
     logger.info("Running baseline eval on %d-chunk corpus...", seed_count)
     baseline = _run_eval("hybrid_norerank", baseline_path)
     if not baseline:
@@ -378,7 +380,7 @@ async def main(target: int, template_only: bool, with_rerank: bool) -> None:
     logger.info("Inserted %d distractors. Total chunks: %d", inserted, total_chunks)
 
     # 4-5. Scaled evals.
-    norerank_path = _REPO_ROOT / "tests" / "eval" / f"scale_{target}_norerank.json"
+    norerank_path = Path(__file__).parent / f"scale_{target}_norerank.json"
     logger.info("Running eval: hybrid_norerank on %d-chunk corpus...", total_chunks)
     scaled = _run_eval("hybrid_norerank", norerank_path)
     if not scaled:
@@ -390,7 +392,7 @@ async def main(target: int, template_only: bool, with_rerank: bool) -> None:
         return
     rerank: dict | None = None
     if with_rerank and scaled:
-        rerank_path = _REPO_ROOT / "tests" / "eval" / f"scale_{target}_rerank.json"
+        rerank_path = Path(__file__).parent / f"scale_{target}_rerank.json"
         logger.info("Running eval: hybrid + cross-encoder on %d-chunk corpus (~20s/query)...", total_chunks)
         rerank = _run_eval("hybrid", rerank_path, ["--cross-encoder"])
 

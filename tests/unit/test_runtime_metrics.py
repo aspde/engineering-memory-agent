@@ -19,6 +19,7 @@ from backend.shared.runtime_metrics import (
     inc_agent_slots_rejected,
     inc_circuit_breaker_opens,
     inc_circuit_breaker_rejections,
+    inc_structured_failures,
     observe_agent_steps,
     record_http_request,
     record_llm_call,
@@ -79,6 +80,20 @@ class TestLlmMetrics:
         out = _sample_lines()
         assert 'ema_llm_calls_total{scenario="rerank",status="error"} 1.0' in out
 
+    def test_structured_failures_counted_by_scenario(self) -> None:
+        inc_structured_failures("extraction_entities")
+        inc_structured_failures("extraction_entities")
+        inc_structured_failures("extraction_relations")
+        out = _sample_lines()
+        assert (
+            'ema_structured_failures_total{scenario="extraction_entities"} 2.0'
+            in out
+        )
+        assert (
+            'ema_structured_failures_total{scenario="extraction_relations"} 1.0'
+            in out
+        )
+
     def test_disabled_metrics_record_nothing(self, monkeypatch) -> None:
         monkeypatch.setattr(config_mod.config, "metrics_enabled", False)
         record_llm_call(
@@ -86,12 +101,14 @@ class TestLlmMetrics:
             input_tokens=1, output_tokens=1, total_tokens=2,
         )
         record_http_request("GET", "/health", 200, 0.01)
+        inc_structured_failures("extraction_entities")
         out = _sample_lines()
         # Zero-valued gauges/histograms still emit sample lines — what must
         # NOT appear is any recorded count for the disabled calls.
         assert "ema_llm_calls_total" not in out
         assert "ema_llm_tokens_total" not in out
         assert "ema_http_requests_total" not in out
+        assert "ema_structured_failures_total" not in out
 
 
 class TestHttpMetrics:

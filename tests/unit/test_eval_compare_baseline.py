@@ -1,4 +1,4 @@
-"""Unit tests for tests/eval/compare_baseline.py — the baseline diff gate.
+"""Unit tests for tests/eval/experiments/compare_baseline.py — the baseline diff gate.
 
 The compare logic is a pure function over two metric dicts, so it is tested
 with fabricated data — no DB, no retrieval, no LLM.
@@ -6,7 +6,7 @@ with fabricated data — no DB, no retrieval, no LLM.
 
 from __future__ import annotations
 
-from tests.eval.compare_baseline import _report_judge_mode, compare
+from tests.eval.experiments.compare_baseline import _report_judge_mode, compare
 
 
 def _report(results: list[dict]) -> dict:

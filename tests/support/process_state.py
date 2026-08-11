@@ -18,7 +18,6 @@ from prometheus_client import Counter, Gauge, Histogram, Summary
 
 import backend.agent.nodes as _nodes
 import backend.api.ratelimit as _ratelimit
-import backend.service.alerts as _alerts
 import backend.service.retrieval as _retrieval
 import backend.service.usage as _usage
 import backend.shared.resilience as _resilience
@@ -26,12 +25,9 @@ import backend.shared.runtime_metrics as _runtime_metrics
 
 
 def reset_auto_memory_throttle() -> None:
-    """Drop auto-memory throttle state (per-thread caps + rolling window)."""
+    """Drop auto-memory throttle state (per-thread last-write timestamps)."""
     with _nodes._auto_memory_lock:
         _nodes._auto_memory_last_write.clear()
-        _nodes._auto_memory_write_count.clear()
-        _nodes._auto_memory_last_content.clear()
-        _nodes._auto_memory_recent_writes.clear()
 
 
 async def wait_auto_memory_tasks() -> None:
@@ -55,13 +51,6 @@ def reset_usage_buffer() -> None:
     _usage._consecutive_flush_failures = 0
     with _usage._pending_lock:
         _usage._pending.clear()
-
-
-def reset_alert_state() -> None:
-    """Drop alert cooldown and counter baselines."""
-    with _alerts._alerts_lock:
-        _alerts._last_fired.clear()
-        _alerts._prev_structured_failures = {}
 
 
 def clear_embed_query_cache() -> None:
@@ -91,6 +80,7 @@ def reset_runtime_metrics() -> None:
         _runtime_metrics.LLM_CALLS,
         _runtime_metrics.LLM_DURATION,
         _runtime_metrics.LLM_TOKENS,
+        _runtime_metrics.STRUCTURED_FAILURES,
         _runtime_metrics.CIRCUIT_STATE,
         _runtime_metrics.CIRCUIT_OPENS,
         _runtime_metrics.CIRCUIT_REJECTIONS,

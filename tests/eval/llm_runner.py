@@ -1,9 +1,10 @@
 """Orchestration for the LLM behavior eval — one runner per suite.
 
-Mirrors ``tests.eval.runner``: each ``run_*`` function executes every item
-in its labeled set through an executor, computes per-item metrics via the
-pure functions in ``llm_metrics``, and rolls up overall + per-category
-aggregates into a :class:`LlmEvalResult`.
+Each ``run_*`` function executes every item in its labeled set through an
+executor, computes per-item metrics via the pure functions in
+``llm_metrics``, and rolls up overall + per-category aggregates.  The result
+container and aggregation machinery are shared with the task suite via
+``tests.eval.core`` (``LlmEvalResult`` is an alias of ``core.EvalResult``).
 
 Design notes:
 
@@ -18,21 +19,25 @@ Design notes:
   ``judge_error`` and is counted in ``judge_errors`` — distinct from ``errors``
   so a degraded *judgment* and a failed *execution* stay distinguishable.
   In the answer / e2e suites a judge failure *zeroes* the judge-owned metric
-  keys (``fact_coverage`` / ``groundedness`` / ``hallucination_rate``) instead
-  of substituting the deterministic channel under the same names, so the CI
-  gate on ``--min-groundedness`` etc. fails loudly rather than silently
-  grading substring matches; the deterministic values stay available under
-  ``det_*`` for cross-checking.  In the extraction suite a failed judgment
-  leaves the summary keys unset (aggregated as 0.0) rather than writing a
-  fake 0.0 verdict.
+  keys (``fact_coverage`` / ``groundedness`` / ``hallucination_rate``, via
+  ``core.zero_judge_keys``) instead of substituting the deterministic channel
+  under the same names, so the CI gate on ``--min-groundedness`` etc. fails
+  loudly rather than silently grading substring matches; the deterministic
+  values stay available under ``det_*`` for cross-checking.  In the extraction
+  suite a failed judgment leaves the summary keys unset (aggregated as 0.0)
+  rather than writing a fake 0.0 verdict.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
 from typing import Any
 
+from tests.eval.core import (
+    EvalResult,
+    finish,
+    zero_judge_keys,
+)
 from tests.eval.llm_ground_truth import (
     ANSWER_CATEGORIES,
     EXTRACTION_CATEGORIES,
@@ -71,45 +76,16 @@ AnswerGenerator = Callable[[str, str, list[str] | None], Any]
 E2ERunner = Callable[[str], Any]
 
 # The final-answer metrics the LLM judge produces (answer + e2e suites).  On
-# a judge failure these are zeroed explicitly rather than re-fed from the
-# deterministic channel (``answer_deterministic_metrics``), which returns the
-# *same key names* with a *different semantic* — substring matching.  Reusing
-# them would make ``--min-groundedness`` silently grade substrings.  The
-# deterministic values remain available under ``det_*`` keys.
-ANSWER_JUDGE_METRIC_KEYS: tuple[str, ...] = (
-    "fact_coverage",
-    "groundedness",
-    "hallucination_rate",
-)
+# a judge failure these are zeroed (``core.zero_judge_keys``) rather than
+# re-fed from the deterministic channel (``answer_deterministic_metrics``),
+# which returns the *same key names* with a *different semantic* — substring
+# matching.  Reusing them would make ``--min-groundedness`` silently grade
+# substrings.  The deterministic values remain available under ``det_*`` keys;
+# the constant lives in ``tests.eval.core``.
 
-
-@dataclass
-class LlmEvalResult:
-    """Aggregate result of one suite over its labeled set."""
-
-    suite: str  # "tool_selection" | "extraction" | "answer"
-    judge: str  # "llm" | "deterministic"
-    per_query: list[dict[str, Any]]
-    overall: dict[str, float]
-    by_category: dict[str, dict[str, float]]
-    metric_keys: tuple[str, ...]
-    n_items: int
-    errors: list[dict[str, str]] = field(default_factory=list)
-    judge_errors: list[dict[str, str]] = field(default_factory=list)
-
-    def metric(self, key: str) -> float:
-        """Read an overall metric (0.0 if absent)."""
-        return float(self.overall.get(key, 0.0))
-
-
-def _aggregate(rows: Sequence[dict[str, Any]], keys: Sequence[str]) -> dict[str, float]:
-    """Mean of each key across rows. Empty input → all zeros."""
-    if not rows:
-        return {k: 0.0 for k in keys}
-    return {
-        k: sum(float(r.get(k, 0.0)) for r in rows) / len(rows)
-        for k in keys
-    }
+# The generic result container is shared with the task suite via
+# ``tests.eval.core``; only the name is suite-specific.
+LlmEvalResult = EvalResult
 
 
 def _finish(
@@ -121,21 +97,8 @@ def _finish(
     keys: Sequence[str],
     categories: Sequence[str],
 ) -> LlmEvalResult:
-    by_category: dict[str, dict[str, float]] = {
-        cat: _aggregate([r for r in rows if r.get("category") == cat], keys)
-        for cat in categories
-    }
-    return LlmEvalResult(
-        suite=suite,
-        judge=judge,
-        per_query=rows,
-        overall=_aggregate(rows, keys),
-        by_category=by_category,
-        metric_keys=tuple(keys),
-        n_items=len(rows),
-        errors=errors,
-        judge_errors=judge_errors,
-    )
+    """Roll up a suite's rows via the shared :func:`tests.eval.core.finish`."""
+    return finish(suite, judge, rows, errors, judge_errors, keys, categories)
 
 
 # ── Tool selection ──────────────────────────────────────────────────
@@ -306,7 +269,7 @@ async def run_answer(
                     # Zero the judge-owned keys so --min-fact-coverage /
                     # --min-groundedness fail loudly; the deterministic values
                     # stay under det_* for cross-checking.
-                    row.update({k: 0.0 for k in ANSWER_JUDGE_METRIC_KEYS})
+                    zero_judge_keys(row)
             else:
                 row.update(det)
         except Exception as exc:
@@ -425,7 +388,7 @@ async def run_e2e(
                     # Same as run_answer: zero the judge-owned metric keys
                     # instead of re-feeding the deterministic channel into the
                     # gate keys (substring semantics under an LLM-judge name).
-                    row.update({k: 0.0 for k in ANSWER_JUDGE_METRIC_KEYS})
+                    zero_judge_keys(row)
             else:
                 row.update(det)
         except Exception as exc:

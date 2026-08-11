@@ -7,15 +7,20 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from backend.model.llm import LLMProvider
-from backend.shared.metrics import (
-    _extract_total_tokens,
-    get_token_usage,
-    pop_scenario,
-    record_usage,
-    reset_token_usage,
-)
+from backend.shared.metrics import pop_scenario
 from backend.service.usage import pending_rows
 from tests.support.process_state import reset_circuit_breakers, reset_usage_buffer
+
+
+def _total_recorded_tokens() -> int:
+    """Sum ``total_tokens`` across buffered usage observations.
+
+    The in-memory per-scenario counters behind ``/api/agent/usage`` were
+    removed as redundant; the usage recording buffer (drained into
+    ``llm_usage``) is now the single recording path, so token assertions in
+    this module read it.
+    """
+    return sum(r.get("total_tokens") or 0 for r in pending_rows())
 
 
 @pytest.fixture(autouse=True)
@@ -86,61 +91,6 @@ class TestFakeLLMProvider:
 
 
 # ── Token usage accounting ────────────────────────────────────────────
-
-
-class TestTokenUsageAccounting:
-    """Tests for the module-level token counters used in cost monitoring."""
-
-    def setup_method(self) -> None:
-        reset_token_usage()
-
-    def teardown_method(self) -> None:
-        reset_token_usage()
-
-    def test_extract_total_tokens_openai_shape(self) -> None:
-        """OpenAI CompletionUsage exposes ``total_tokens``."""
-        usage = SimpleNamespace(total_tokens=1234, prompt_tokens=1000, completion_tokens=234)
-        assert _extract_total_tokens(usage) == 1234
-
-    def test_extract_total_tokens_anthropic_shape(self) -> None:
-        """Anthropic Usage exposes ``input_tokens`` + ``output_tokens``."""
-        usage = SimpleNamespace(input_tokens=800, output_tokens=200)
-        assert _extract_total_tokens(usage) == 1000
-
-    def test_extract_total_tokens_dict_shape(self) -> None:
-        assert _extract_total_tokens({"total_tokens": 42}) == 42
-        assert _extract_total_tokens({"input_tokens": 30, "output_tokens": 12}) == 42
-
-    def test_extract_total_tokens_none(self) -> None:
-        assert _extract_total_tokens(None) == 0
-
-    def test_record_usage_accumulates_per_scenario(self) -> None:
-        record_usage("agent_chat", SimpleNamespace(total_tokens=100))
-        record_usage("agent_chat", SimpleNamespace(total_tokens=250))
-        record_usage("conflict_detection", {"total_tokens": 50})
-
-        snapshot = get_token_usage()
-        assert snapshot["agent_chat"] == 350
-        assert snapshot["conflict_detection"] == 50
-
-    def test_record_usage_ignores_zero_and_none(self) -> None:
-        record_usage("empty", None)
-        record_usage("zero", SimpleNamespace(total_tokens=0))
-        assert get_token_usage() == {}
-
-    def test_reset_clears_all_counters(self) -> None:
-        record_usage("agent_chat", SimpleNamespace(total_tokens=999))
-        assert get_token_usage() == {"agent_chat": 999}
-        reset_token_usage()
-        assert get_token_usage() == {}
-
-    def test_get_token_usage_returns_snapshot_copy(self) -> None:
-        """Mutating the returned dict must not affect internal state."""
-        record_usage("x", SimpleNamespace(total_tokens=10))
-        snap = get_token_usage()
-        snap["x"] = 99999
-        snap["injected"] = 1
-        assert get_token_usage() == {"x": 10}
 
 
 class TestPopScenario:
@@ -281,10 +231,8 @@ class TestOpenAICompatibleChatJson:
         """When the empty response triggers the no-response_format fallback,
         the first (empty) response's token usage must be recorded too — it
         consumed tokens even though its content was empty."""
-        from backend.shared.metrics import get_token_usage, reset_token_usage
         from backend.service.llm_service import OpenAICompatibleProvider
 
-        reset_token_usage()
         provider = OpenAICompatibleProvider(
             api_key="test-key", base_url="https://example.com/v1", model="test-model"
         )
@@ -315,7 +263,7 @@ class TestOpenAICompatibleChatJson:
         assert raw == '{"ok": true}'
         assert len(calls) == 2
         # Both the empty first response (10) and the fallback (20) are counted.
-        assert get_token_usage()["agent_chat"] == 30
+        assert _total_recorded_tokens() == 30
 
 
 class TestOpenAICompatibleChatRaw:
@@ -901,12 +849,6 @@ class TestStreamingUsage:
     """Streaming paths must record token usage per scenario so
     ``agent_chat`` / ``agent_final`` are not permanently zero."""
 
-    def setup_method(self) -> None:
-        reset_token_usage()
-
-    def teardown_method(self) -> None:
-        reset_token_usage()
-
     @pytest.mark.asyncio
     async def test_openai_stream_object_usage_recorded(self) -> None:
         from backend.service.llm_service import OpenAICompatibleProvider
@@ -930,7 +872,7 @@ class TestStreamingUsage:
         ]
 
         assert events == [{"type": "content", "text": "hello"}]
-        assert get_token_usage()["agent_chat"] == 42
+        assert _total_recorded_tokens() == 42
 
     @pytest.mark.asyncio
     async def test_openai_final_chunk_usage_fallback(self) -> None:
@@ -962,7 +904,7 @@ class TestStreamingUsage:
         )
 
         assert text == "Hello"
-        assert get_token_usage()["agent_chat"] == 55
+        assert _total_recorded_tokens() == 55
 
     @pytest.mark.asyncio
     async def test_openai_chat_stream_records_usage(self) -> None:
@@ -991,7 +933,7 @@ class TestStreamingUsage:
         )
 
         assert text == "done"
-        assert get_token_usage()["agent_final"] == 30
+        assert _total_recorded_tokens() == 30
 
     @pytest.mark.asyncio
     async def test_openai_no_usage_is_silent(self) -> None:
@@ -1016,7 +958,7 @@ class TestStreamingUsage:
         ]
 
         assert events == [{"type": "content", "text": "x"}]
-        assert get_token_usage() == {}
+        assert _total_recorded_tokens() == 0
 
     @pytest.mark.asyncio
     async def test_anthropic_stream_usage_recorded(self) -> None:
@@ -1059,7 +1001,7 @@ class TestStreamingUsage:
         ]
 
         assert events == [{"type": "content", "text": "hello"}]
-        assert get_token_usage()["agent_chat"] == 150
+        assert _total_recorded_tokens() == 150
 
     @pytest.mark.asyncio
     async def test_anthropic_no_usage_is_silent(self) -> None:
@@ -1097,7 +1039,7 @@ class TestStreamingUsage:
         ]
 
         assert events == []
-        assert get_token_usage() == {}
+        assert _total_recorded_tokens() == 0
 
 
 class TestStreamingBreaker:

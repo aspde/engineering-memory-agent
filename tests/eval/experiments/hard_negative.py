@@ -32,7 +32,7 @@ Reports are written to ``tests/eval/reports/hard_negative_report.{json,md}``.
 
 Run:
     DATABASE_URL=postgresql://ema:ema123@localhost:5432/ema_eval_hn \\
-        python -m tests.eval.hard_negative
+        python -m tests.eval.experiments.hard_negative
 
 This module touches **no** other eval file — ``ground_truth.py`` /
 ``dataset.py`` / ``runner.py`` / ``run_eval.py`` are left untouched.

@@ -12,7 +12,7 @@ function mockStats(overrides: Partial<MemoryStatsResponse> = {}): MemoryStatsRes
       { source_type: 'api', count: 20 },
       { source_type: 'git_commit', count: 15 },
     ],
-    avg_decay_factor: 0.85,
+    avg_recall_count: 3.4,
     avg_entities_per_memory: 3.2,
     avg_relations_per_memory: 1.5,
     recent_count_7d: 10,

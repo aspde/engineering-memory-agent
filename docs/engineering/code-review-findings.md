@@ -58,7 +58,7 @@
 
 **证据**：全仓库（docs/tests/eval）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
 
-**现状（已标定）**：`tests/eval/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
+**现状（已标定）**：`tests/eval/experiments/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 1 节（四级阈值怎么定的）。
 
@@ -73,7 +73,9 @@
 
 **现状**：文档已与代码一致（公式/rerank/threshold 改口）；7b 的"从未召回永不衰减"已修（时间基准 `COALESCE(recalled_at, created_at)`，见 `decay.py`）；7a 公式参数已随 A/B 校准同步。
 
-→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 7 节（衰减公式和"沉底"对得上吗）。
+> **2026-08-11 后续**：衰减已从排序路径整体移除——decay A/B 显示衰减加权 recall@5 0.667 vs 无衰减 0.900，唯一测量表明衰减让检索变差（见 [decision-faq.md](./decision-faq.md) 第 7 节）。`decay.py` 删除，`search_memories` 改纯相似度单段 HNSW，`recall_count`/`recalled_at` 由 `record_recalls` 记录为元数据。
+
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 7 节（衰减加权为什么被移除）。
 
 ### ✅ P0-8 分块对中文无感知，"不截断语义单元"对中文是假的
 
@@ -165,9 +167,9 @@
 
 ### 🗣 P2-6 双连接池、无迁移工具、启动 DDL 清向量列
 
-**证据**：`db/__init__.py:34`（asyncpg 池 5+10）+ `agent_service.py:123-128`（psycopg 池 max_size=5）互不感知、参数写死；`schema.py:23-47` embedding 维度变更清空全部向量列、无可回滚。
+**证据**：`db/__init__.py:34`（asyncpg 池 5+10）+ `agent_service.py:123-128`（psycopg 池 max_size=5）互不感知、参数写死；旧版 `schema.py`（2026-08-11 重构前）embedding 维度变更清空全部向量列、无可回滚。
 
-**现状**：已引入 Alembic schema 版本化迁移（`alembic_version` 表 + upgrade/downgrade 成对迁移，基线固化 9 表，新库/旧库/回滚三路径已实测）——"清向量列换维度"的危险路径已可回滚。双池仍是驱动差异技术债。
+**现状**：已引入 Alembic schema 版本化迁移（`alembic_version` 表 + upgrade/downgrade 成对迁移，基线固化 9 表，新库/旧库/回滚三路径已实测）；2026-08-11 进一步移除启动时自动清向量列——`init_db` 只校验维度，不匹配直接启动失败 + `python -m scripts.recreate_db` 重建，"误配清空向量"风险已彻底消除。双池仍是驱动差异技术债。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 13 节（为什么有两套连接池）。
 
@@ -175,7 +177,9 @@
 
 **证据**：`retrieval.py:786-795` 每次 `query_memories` 对 top-k 结果执行 `update_decay_batch`；`decay.py:103-118`。语义失真：`recall_count` 记录"被任意查询返回过"而非"被使用过"，垃圾查询无差别强化返回的记忆，马太效应自我强化。
 
-→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 2 节（检索为什么每次 UPDATE decay）。
+> **2026-08-11 后续**：此发现是衰减被移除的诱因之一——衰减加权整体掉 recall，且"曝光即强化"的语义失真无法通过调参修复。现 `record_recalls` 只记访问历史、不参与排序，该失真不再有排序影响。
+
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 2 节（检索为什么每次记 recall_count）。
 
 ### ✅ P2-8 读路径的 LLM 用量会计丢失瞬时失败（错误率被低估）
 

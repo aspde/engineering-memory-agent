@@ -28,7 +28,6 @@ class TestSearchMemoriesTool:
                     "id": "mem-001",
                     "summary": "PostgreSQL is the primary database",
                     "rerank_score": 0.95,
-                    "decay_factor": 0.9,
                 }
             ]
 
@@ -333,7 +332,6 @@ class TestSearchMemoriesToolWithEntities:
                     "id": "mem-001",
                     "summary": "PostgreSQL with pgvector",
                     "rerank_score": 0.95,
-                    "decay_factor": 0.9,
                 }
             ]
 

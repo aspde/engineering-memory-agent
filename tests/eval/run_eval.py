@@ -124,12 +124,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override the run name in reports. Default: auto-generated label.",
     )
     p.add_argument(
-        "--no-decay",
-        action="store_true",
-        help="Memory retriever: rank by raw similarity and skip the decay "
-        "write (the decay A/B control). Default: decay-weighted ranking.",
-    )
-    p.add_argument(
         "--min-recall@5",
         dest="min_recall_at_5",
         type=float,
@@ -171,7 +165,6 @@ def _make_config(
     use_cross_encoder: bool,
     threshold: float | None,
     categories: list[str] | None,
-    use_decay: bool = True,
 ) -> EvalConfig:
     cfg = EvalConfig(
         name=name or f"{retriever}:{rerank_tag(use_llm_rerank, use_cross_encoder)}@k{top_k}",
@@ -181,7 +174,6 @@ def _make_config(
         use_cross_encoder=use_cross_encoder,
         threshold=threshold,
         categories=categories,
-        use_decay=use_decay,
     )
     return cfg
 
@@ -235,7 +227,6 @@ async def _run(args: argparse.Namespace) -> int:
             use_cross_encoder=args.cross_encoder,
             threshold=args.threshold,
             categories=categories,
-            use_decay=not args.no_decay,
         )
         results = [await run_eval(cfg, semantic_relevance=args.semantic_relevance)]
 

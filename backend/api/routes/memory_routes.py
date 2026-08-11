@@ -78,7 +78,6 @@ class MemoryGetResponse(BaseModel):
     summary: str
     entities: list[dict[str, Any]] = Field(default_factory=list)
     relations: list[dict[str, Any]] = Field(default_factory=list)
-    decay_factor: float
     recall_count: int
     meta: dict[str, Any] = Field(default_factory=dict)
     created_at: str
@@ -96,7 +95,7 @@ class MemoryStatsResponse(BaseModel):
     total_chunks: int
     total_conversations: int
     by_source_type: list[dict[str, Any]]
-    avg_decay_factor: float
+    avg_recall_count: float
     avg_entities_per_memory: float
     avg_relations_per_memory: float
     recent_count_7d: int
@@ -189,10 +188,10 @@ async def memory_write(req: MemoryWriteRequest) -> MemoryWriteResponse:
 
 @router.post("/memories/search", response_model=MemorySearchResponse)
 async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
-    """Search structured memories with decay-weighted ranking.
+    """Search structured memories ranked by semantic similarity.
 
-    Decay factors are updated on recall — frequently retrieved memories
-    are boosted over time.
+    Recalls are recorded for every surfaced memory (recall_count /
+    recalled_at) as metadata for the UI and the patrol archival scan.
     """
     try:
         results = await query_memories(
@@ -229,7 +228,7 @@ async def get_memory_by_id(memory_id: str) -> MemoryGetResponse:
         r = await session.execute(
             text(
                 "SELECT id, source_type, summary, entities, relations, "
-                "       decay_factor, recall_count, meta, created_at "
+                "       recall_count, meta, created_at "
                 "FROM memories WHERE id = :id AND deleted_at IS NULL"
             ),
             {"id": memory_id},
@@ -244,7 +243,6 @@ async def get_memory_by_id(memory_id: str) -> MemoryGetResponse:
             summary=str(row.summary),
             entities=row.entities or [],
             relations=row.relations or [],
-            decay_factor=float(row.decay_factor),
             recall_count=int(row.recall_count),
             meta=row.meta or {},
             created_at=row.created_at.isoformat() if row.created_at else "",
@@ -283,7 +281,7 @@ async def memory_stats() -> MemoryStatsResponse:
     """Return aggregate statistics about the memory store.
 
     Used by the frontend dashboard to show total counts, source
-    distribution, decay health, and frequently mentioned entities.
+    distribution, recall stats, and frequently mentioned entities.
     """
     session_factory = get_session_factory()
     async with session_factory() as session:
@@ -305,12 +303,12 @@ async def memory_stats() -> MemoryStatsResponse:
         ))
         by_source_type = [{"source_type": row[0], "count": row[1]} for row in r.fetchall()]
 
-        # ── Decay & entity/relation averages
+        # ── Recall & entity/relation averages
         #     jsonb_array_length returns NULL, not 0, for non-array / NULL columns.
         r = await session.execute(text(
-            "SELECT COALESCE(AVG(decay_factor), 0) FROM memories WHERE deleted_at IS NULL"
+            "SELECT COALESCE(AVG(recall_count), 0) FROM memories WHERE deleted_at IS NULL"
         ))
-        avg_decay_factor = round(float(r.fetchone()[0]), 4)
+        avg_recall_count = round(float(r.fetchone()[0]), 4)
 
         r = await session.execute(text(
             "SELECT COALESCE(AVG("
@@ -399,7 +397,7 @@ async def memory_stats() -> MemoryStatsResponse:
         total_chunks=total_chunks,
         total_conversations=total_conversations,
         by_source_type=by_source_type,
-        avg_decay_factor=avg_decay_factor,
+        avg_recall_count=avg_recall_count,
         avg_entities_per_memory=avg_entities_per_memory,
         avg_relations_per_memory=avg_relations_per_memory,
         recent_count_7d=recent_count_7d,

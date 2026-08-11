@@ -5,7 +5,7 @@ whether a model answer is grounded in the provided context and which required
 facts it covers.  Its verdicts have no ground truth by construction — they
 *are* the measurement.  This module supplies the missing oracle: a
 hand-authored sample set with human verdicts, so the judge's agreement with a
-human grader can be quantified (see ``tests.eval.judge_calibration``).
+human grader can be quantified (see ``tests.eval.experiments.judge_calibration``).
 
 Design rules:
 

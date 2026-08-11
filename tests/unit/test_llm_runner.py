@@ -388,7 +388,8 @@ def _memory_context(text: str, sid: str) -> str:
     # Mirrors the production search_memories_tool display format.
     return (
         f"<memory source=\"search_memories_tool\">\n"
-        f"[1] (memory: {sid[:8]}, relevance: 0.90, decay: 1.00) {text}\n"
+        f"[1] (memory: {sid[:8]}, relevance: 0.90, recalls: 1, "
+        f"last_recalled: never) {text}\n"
         f"</memory>"
     )
 

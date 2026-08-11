@@ -17,7 +17,7 @@
 | Windows 降级 | [main.py:24-30](../../backend/main.py) PostgresSaver 降级 InMemorySaver | 🟢 已知平台差异 |
 | 连接池写死 | [db/__init__.py](../../backend/db/__init__.py) 5+10 | 🟢 低 |
 
-> **已补齐（相对本文档初版）**：评估体系（Recall@K/MRR/NDCG + LLM-as-judge，见 §2.4）、成本监控（`llm_usage` 表 + `/api/usage/*` 端点 + 成本估算，见 [architecture.md](../architecture.md)）、CI/CD（`.github/workflows/ci.yml` 跑后端 pytest + 前端 vitest + `eval.yml` 每周检索评估）、Prompt 版本管理（[prompts.py](../../backend/service/prompts.py) 中央注册表 + 版本号）、**运行监控指标**（[runtime_metrics.py](../../backend/shared/runtime_metrics.py) + `GET /metrics` 暴露 Prometheus 时序：HTTP 请求/延迟、LLM 调用/token、熔断器状态、Agent 并发槽位与 ReAct 步数分布，见 [architecture.md](../architecture.md) Observability）、**数据库备份与恢复**（compose `backup` 容器每小时 pg_dump -Fc 到 `./backups/` + 恢复 runbook，已实测恢复一致，见 [deployment.md](../deployment.md) Backup & Restore）、**监控采集闭环**（compose `prometheus` 抓取 `/metrics` + `grafana` 渲染 "EMA — Runtime Health" 看板，见 [deployment.md](../deployment.md) Monitoring）、**API 限流**（per-key 令牌桶中间件，chat/general 两档，429 + Retry-After，见 [ratelimit.py](../../backend/api/ratelimit.py)）、**Caddy TLS 反代**（compose `caddy` 服务，默认本地 HTTP、配域名自动 Let's Encrypt，见 [deployment.md](../deployment.md) HTTPS (TLS)）、**日志结构化**（`LOG_FORMAT=json` 单行 JSON + trace_id/thread_id，见 [logging_config.py](../../backend/shared/logging_config.py) + deployment.md 日志（结构化））、**Alembic schema 版本化迁移**（`alembic_version` 表 + `migrations/versions/` 成对 upgrade/downgrade，基线迁移固化 9 张业务表；`init_db()` 跑 `upgrade head` + 运行时 embedding 维度对齐，新库/旧库/回滚三路径已实测，见 deployment.md Schema Migration）。这些不再列为短板。
+> **已补齐（相对本文档初版）**：评估体系（Recall@K/MRR/NDCG + LLM-as-judge，见 §2.4）、成本监控（`llm_usage` 表 + `/api/usage/*` 端点 + 成本估算，见 [architecture.md](../architecture.md)）、CI/CD（`.github/workflows/ci.yml` 跑后端 pytest + 前端 vitest + `eval.yml` 每周检索评估）、Prompt 版本管理（[prompts.py](../../backend/service/prompts.py) 中央注册表 + 版本号）、**运行监控指标**（[runtime_metrics.py](../../backend/shared/runtime_metrics.py) + `GET /metrics` 暴露 Prometheus 时序：HTTP 请求/延迟、LLM 调用/token、熔断器状态、Agent 并发槽位与 ReAct 步数分布，见 [architecture.md](../architecture.md) Observability）、**数据库备份与恢复**（compose `backup` 容器每小时 pg_dump -Fc 到 `./backups/` + 恢复 runbook，已实测恢复一致，见 [deployment.md](../deployment.md) Backup & Restore）、**监控采集闭环**（compose `prometheus` 抓取 `/metrics` + `grafana` 渲染 "EMA — Runtime Health" 看板，见 [deployment.md](../deployment.md) Monitoring）、**API 限流**（per-key 令牌桶中间件，chat/general 两档，429 + Retry-After，见 [ratelimit.py](../../backend/api/ratelimit.py)）、**Caddy TLS 反代**（compose `caddy` 服务，默认本地 HTTP、配域名自动 Let's Encrypt，见 [deployment.md](../deployment.md) HTTPS (TLS)）、**日志结构化**（`LOG_FORMAT=json` 单行 JSON + trace_id/thread_id，见 [logging_config.py](../../backend/shared/logging_config.py) + deployment.md 日志（结构化））、**Alembic schema 版本化迁移**（`alembic_version` 表 + `migrations/versions/` 成对 upgrade/downgrade，基线迁移固化 9 张业务表；`init_db()` 跑 `upgrade head` + 校验 embedding 维度（不匹配启动失败，`python -m scripts.recreate_db` 重建），新库/旧库/回滚三路径已实测，见 deployment.md Schema Migration）。这些不再列为短板。
 
 ### 1.2 优先补全顺序
 
@@ -38,7 +38,7 @@
 评估体系要回答的三个核心问题：：
 1. 「你怎么知道你的 RAG 检索准不准？」
 2. 「换了个 reranker，效果变好还是变差？怎么量化？」
-3. 「你的记忆衰减加权有没有让检索变好？」
+3. 「记忆衰减加权到底有没有让检索变好？」（答案：A/B 显示没有——衰减加权 recall@5 0.667 vs 无衰减 0.900，已移除，见 decision-faq 第 7 节）
 
 评估体系已交付（见 §2.4）——现在这三问都有数字可答，而非只讲设计。§2.2-2.3 保留最初的设计草案与实现说明，供回顾演进过程。
 
@@ -238,10 +238,11 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 | 文件 | 职责 |
 |------|------|
 | [metrics.py](../../tests/eval/metrics.py) | 6 个纯函数指标：Recall@K / Precision@K / HitRate@K / MRR / NDCG@K / MAP@K + `compute_all` |
-| [ground_truth.py](../../tests/eval/ground_truth.py) | 70 条标注集，5 类（技术决策/故障复盘/架构设计/代码实现/历史背景）× 14 条，含 difficulty 分级 |
-| [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 70 条种子记忆（EMA 自身工程史，覆盖评估/衰减校准/阈值标定/容器化等），每条 summary 含独特指纹 |
+| [ground_truth.py](../../tests/eval/ground_truth.py) | 检索标注集访问器 + 常量 + 一致性守卫（70 条标注数据在 [data/ground_truth.jsonl](../../tests/eval/data/ground_truth.jsonl)） |
+| [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 70 条种子记忆（EMA 自身工程史，覆盖评估/阈值标定/衰减移除/容器化等），每条 summary 含独特指纹 |
 | [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配（`is_relevant`/`relevance_mask`）+ 语义相关性通道（`semantic_relevance_mask`，embedding cosine≥0.80）+ retriever 适配（chunk/memory）+ 4 项一致性校验 |
 | [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合，error 容错；语义通道默认关闭（opt-in），per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
+| [core.py](../../tests/eval/core.py) | 与 LLM 行为/task 评测共用的骨架：EvalResult / 聚合 / judge 失败零值 / JSON 序列化（runner 与 report 在其之上） |
 | [report.py](../../tests/eval/report.py) | Markdown + JSON 报告，含 A/B delta 表 |
 | [run_eval.py](../../tests/eval/run_eval.py) | CLI：`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
 | [seed.py](../../tests/eval/seed.py) | CLI：`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
@@ -292,7 +293,7 @@ python -m tests.eval.run_eval --retriever memory
 | chunks 总条数 | `SELECT COUNT(*) FROM chunks` | 70（评估种子） | "种子语料 70 条，覆盖 5 类记忆" |
 | 向量召回 P95 延迟 | 在 `/api/memory/search` 加计时日志 | ~190ms（hybrid 无 rerank，含 embed + sparse + sort） | "hybrid 稳态 190ms，含 BGE-M3 embed" |
 | 完整检索 P95（含 rerank） | 同上，覆盖 rerank | 17.5s/query（CPU 瓶颈） | "cross-encoder rerank CPU 上 17.5s/query，是已知瓶颈，待 GPU 优化" |
-| Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | **10 轮真实对话实测 P95 73.6s**（P50 43.2s / mean 35.9s / min 12.7s / max 73.6s，2026-08-11，DeepSeek deepseek-v4-flash + 本地 BGE-M3）。**已定位根因并从工具 schema 锁死 LLM rerank**——那 73.6s 里约 40s 是每轮 ~19 次 `rerank_llm`（模型自主把 `use_llm_rerank=True` 传给检索工具）。锁死后对话检索走纯衰减排序（~2s/query，recall@5 0.90 基线），预期 P95 降至 ~25s 量级；task_eval 验证移除 rerank 后任务完成率 0.500 持平、groundedness 1.000 不变 | "对话 P95 73.6s 是含 LLM 重排的实测。重排每轮约 19 次、占 40s——模型被工具 schema 允许自主开 rerank。我已从 schema 锁死这个开关，检索质量不变（eval 证明 rerank 不改 recall@5），task 完成率也不掉，P95 预期降到大半。" |
+| Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | **10 轮真实对话实测 P95 73.6s**（P50 43.2s / mean 35.9s / min 12.7s / max 73.6s，2026-08-11，DeepSeek deepseek-v4-flash + 本地 BGE-M3）。**已定位根因并从工具 schema 锁死 LLM rerank**——那 73.6s 里约 40s 是每轮 ~19 次 `rerank_llm`（模型自主把 `use_llm_rerank=True` 传给检索工具）。锁死后对话检索走纯相似度排序（~2s/query，recall@5 0.90 基线），预期 P95 降至 ~25s 量级；task_eval 验证移除 rerank 后任务完成率 0.500 持平、groundedness 1.000 不变 | "对话 P95 73.6s 是含 LLM 重排的实测。重排每轮约 19 次、占 40s——模型被工具 schema 允许自主开 rerank。我已从 schema 锁死这个开关，检索质量不变（eval 证明 rerank 不改 recall@5），task 完成率也不掉，P95 预期降到大半。" |
 | 单次对话平均 token 数 | LLMProvider 加计数（见 §4） | **≈28.6k tokens/轮**（10 轮合计 285.9k；估 $0.008/轮 ≈ ¥0.06，用内置价格表，见 [usage.py](../../backend/service/usage.py) `estimate_cost`） | "10 轮真实对话合计 285.9k tokens、估算 $0.081（约 ¥0.06/轮）；成本大头是 rerank_llm（75.6k tokens）+ agent_chat（165.8k，其中 144k 是 cache_read 折扣价）——缓存命中大幅压低实际成本" |
 | 单次对话平均 tool 调用数 | 在 Agent 加计数 | 2.6 次/任务（task 轨迹均值） | "任务级评测 8 任务平均 2.6 次 LLM 调用，概念查询会到 5" |
 | Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | "8 任务实测：工具选择意图准（0.94）但过度调用（unexpected 0.375）拉低严格完成率，是轨迹级真实短板" |
@@ -301,7 +302,7 @@ python -m tests.eval.run_eval --retriever memory
 | 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 0.886（70 条默认确定性基线，2026-08-11）；语义通道 opt-in 更高 | "生产默认路径（query_memories, threshold 0.3）70 条标注集默认纯子串实测 recall@5=0.886；语义通道自证故默认关，如实披露" |
 | 检索 MRR | 同上 | 0.767（70 条默认） | "生产 memory 路径默认 MRR 0.77（70 条语料，hard 占比 30% 更真实）" |
 | 检索 NDCG@5 | 同上 | 0.959 | "memory 路径 NDCG@5 0.96" |
-| 检索判别力（hard-negative） | `python -m tests.eval.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | "27 条陷阱集实测：纯向量找得到但容易被表面词带偏（综合通过 59.3%）。已落地 bounded cross-encoder top-3 重排（`query_memories(use_cross_encoder=True)`，默认关）提至 81.5%，见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)" |
+| 检索判别力（hard-negative） | `python -m tests.eval.experiments.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | "27 条陷阱集实测：纯向量找得到但容易被表面词带偏（综合通过 59.3%）。已落地 bounded cross-encoder top-3 重排（`query_memories(use_cross_encoder=True)`，默认关）提至 81.5%，见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)" |
 | 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | "QPS 随并发线性涨至 160 仍 0 失败，瓶颈在 BGE CPU embed" |
 | 检索 P95（压测） | 同上 | 10 并发 110ms / 80 并发 690ms / 160 并发 1.0s | "缓存热路径 P95 110ms@10 并发；冷查询单次 1.75s（含 embed）" |
 
@@ -365,38 +366,7 @@ async def query_memories(query: str, top_k: int = 5, use_llm_rerank: bool = Fals
 
 ## 四、成本监控（已交付）
 
-> **现状**：已按方案落地并超越——provider 层统一埋点（唯一咽喉点），观测值进内存缓冲 + 后台 flusher 批量 INSERT 到 `llm_usage` 表（持久化），暴露 `/api/usage/*` 端点（summary/scenarios/models/threads/trace），含 `estimate_cost` 按模型价格表估算成本。详见 [architecture.md](../architecture.md) 的 "Observability (LLM usage tracing)" 一节。下方的 §4.1-4.2 为最初的内存计数草案，现被持久化方案取代，仅保留作演进记录。
-
-### 4.1 （已实现替代）内存计数草案
-
-```python
-# 已被 backend/service/usage.py 的 llm_usage 持久化方案取代——
-# 原草案是进程内 dict 计数（重启清零），现方案是内存缓冲 + 后台落库。
-# 此处保留最初设计供回顾。
-from collections import defaultdict
-import logging
-
-_token_usage: dict[str, int] = defaultdict(int)  # key: 场景, value: 累计 token
-
-
-def _record_usage(scenario: str, usage: dict | None) -> None:
-    """记录 token 用量。usage 是 LLM 返回的 usage 字段。"""
-    if not usage:
-        return
-    total = usage.get("total_tokens", 0)
-    _token_usage[scenario] += total
-    logger.info(
-        "LLM token usage: scenario=%s, this_call=%d, cumulative=%d",
-        scenario, total, _token_usage[scenario]
-    )
-
-
-def get_token_usage() -> dict[str, int]:
-    """返回各场景累计 token 用量，供对外演示。"""
-    return dict(_token_usage)
-```
-
-> 该草案的计数逻辑现由 `backend/service/usage.py` 实现（`record_usage` + 有界内存缓冲 + 后台 flusher + `estimate_cost`），场景字段与 `llm_usage.scenario` 对齐。
+> **现状**：已按方案落地并超越——provider 层统一埋点（唯一咽喉点），观测值进内存缓冲 + 后台 flusher 批量 INSERT 到 `llm_usage` 表（持久化），暴露 `/api/usage/*` 端点（summary/scenarios/models/threads/trace），含 `estimate_cost` 按模型价格表估算成本。详见 [architecture.md](../architecture.md) 的 "Observability (LLM usage tracing)" 一节。最早的进程内 dict 计数草案（原 `/api/agent/usage` 端点）已连同该计数器一并移除——进程内计数重启清零、相对持久化行无增益；现仅保留 `llm_usage` 持久化与 Prometheus 两个观测来源。结构化输出降级信号（原进程内 `structured_failures` 计数）随该计数器一并移除后，迁移为 Prometheus 的 `ema_structured_failures_total`（按 scenario 计数，见 [architecture.md](../architecture.md) Observability）——`llm_usage` 看不见该信号（降级提取在 provider 层仍是 success 行），故保留为独立时序。
 
 ### 4.2 表述口径
 
@@ -565,7 +535,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 | 双 HITL LangGraph | 🟢 深 | 3 层 | [graph.py:41-51](../../backend/agent/graph.py) max_steps 防循环 + Command(goto) 动态路由 | **主打** |
 | 实体归一化双层 | 🟢 深 | 2-3 层 | [entity.py:67-91](../../backend/service/entity.py) 向量粗筛 + [entity.py:160-189](../../backend/service/entity.py) LLM 精判 fails safe | **主打** |
 | LLMProvider 抽象 | 🟢 中深 | 2 层 | [llm_service.py:191-199](../../backend/service/llm_service.py) Anthropic system 拆分 + [llm_service.py:157-174](../../backend/service/llm_service.py) tool_calls 双形态处理 | 主打 |
-| 衰减加权整合 | 🟡 中 | 2 层 | [retrieval.py:161](../../backend/service/retrieval.py) top_k*4 + [retrieval.py:171](../../backend/service/retrieval.py) `_RERANK_FLOOR=0.15` | 讲整合不讲公式 |
+| 召回统计 | 🟡 中 | 2 层 | [recall.py](../../backend/service/recall.py) 单条 UPDATE 批量记召回 + [retrieval.py](../../backend/service/retrieval.py) search_memories 纯相似度排序 | 讲「用 A/B 数据移除衰减」的决策 |
 | 三阶段提取 | 🟢 中深 | 2 层 | [extraction.py](../../backend/service/extraction.py) gather 并行 + few-shot prompt v3 + 函数调用通道（enum 生成期约束、降级 chat_structured） | **主动讲**：A/B 数字见 §10 |
 | rerank | 🟡 薄 | 1-2 层 | [rerank.py:57](../../backend/service/rerank.py) SDK 调用 + [rerank.py:95](../../backend/service/rerank.py) pointwise gather | cross-encoder 原理必须会 |
 | vector_search | 🟡 薄 | 1 层 | [retrieval.py:99-104](../../backend/service/retrieval.py) 白名单 filter | 讲 SQL 可见 |
@@ -583,7 +553,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 - 三阶段提取：只讲"并行编排 + fails safe"，**不主动提 prompt 优化**
 - rerank：cross-encoder 原理必须能讲，**不主动提 listwise/微调**
-- 衰减：讲"工程整合"，**不主动讲公式系数调参**
+- 衰减：不主动讲旧公式调参细节——**主动讲的是移除决策**：A/B 显示衰减加权掉 recall，且调参轨迹（2x→8x→12x）逼近 no-op，所以用 `record_recalls` 记原始访问历史代替排序加权
 
 ### 9.5 缺失深度的表述
 
@@ -776,7 +746,7 @@ async def eval_extraction():
 | 「为什么不用 few-shot？」 | 答不上 | 「加 few-shot 后 entity_recall 0.781→0.927（+0.146）、relation_recall 0.531→0.688（+0.157）、relation_f1 0.356→0.427」 |
 | 「JSON 解析失败怎么办？」 | 「fails safe 返回空」 | 「entity/relation 走函数调用通道——enum 在生成期约束，非法 type 机制上产生不出来；格式错误率趋近 0。DeepSeek thinking 模式拒绝强制 tool_choice（400），所以不强制、靠模型自然调用工具，失败降级 chat_structured」 |
 | 「entity 抽取准确率？」 | 没测过 | 「8 条标注集：entity_recall 0.927 / entity_f1 0.772 / type_accuracy 0.792（few-shot + 函数调用）」 |
-| 「prompt 怎么迭代？」 | 靠 git | 「有标注集，`python -m tests.eval.extraction_ab` 每次改动跑 zero-shot/few-shot/函数调用三臂对比」 |
+| 「prompt 怎么迭代？」 | 靠 git | 「有标注集，`python -m tests.eval.experiments.extraction_ab` 每次改动跑 zero-shot/few-shot/函数调用三臂对比」 |
 
 **核心收益**：把"三阶段提取"从 🟡 薄 升到 🟢 中深，多一个能扛 2 层追问的深度点。
 
@@ -1063,7 +1033,7 @@ python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 
 #### 11.5.3 万级实测验证：rerank 转正实锤（2026-08-11）
 
-> 复用 [probe_scale_1000.py](../../tests/eval/probe_scale_1000.py)（重写为参数化：`--target 10000 --rerank`），LLM 精修 33 个相邻主题 856 条 + 模板填充 9114 条 = 9969 条干扰 chunks，插入后跑 hybrid_norerank **和** hybrid+cross-encoder 两轮 eval（每轮 30 query 全量）。报告：[scale_10000_norerank.json](../../tests/eval/scale_10000_norerank.json) / [scale_10000_rerank.json](../../tests/eval/scale_10000_rerank.json)。
+> 复用 [probe_scale_1000.py](../../tests/eval/experiments/probe_scale_1000.py)（重写为参数化：`--target 10000 --rerank`），LLM 精修 33 个相邻主题 856 条 + 模板填充 9114 条 = 9969 条干扰 chunks，插入后跑 hybrid_norerank **和** hybrid+cross-encoder 两轮 eval（每轮 30 query 全量）。报告：[scale_10000_norerank.json](../../tests/eval/experiments/scale_10000_norerank.json) / [scale_10000_rerank.json](../../tests/eval/experiments/scale_10000_rerank.json)。
 
 | 指标 | 30 条 | 9999 条（无 rerank） | 9999 条（+CE rerank） | rerank 增益 |
 |------|-------|--------------------|----------------------|------------|

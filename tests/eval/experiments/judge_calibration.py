@@ -2,7 +2,7 @@
 
 The eval's LLM-as-judge (:func:`tests.eval.llm_judge.judge_answer`) is an LLM
 judging a model's answers; its verdicts have no oracle.  :mod:
-``tests.eval.judge_calibration_samples`` supplies the missing oracle — a
+``tests.eval.experiments.judge_calibration_samples`` supplies the missing oracle — a
 hand-authored sample set with human verdicts.  This module runs the *real*
 configured judge over those samples and quantifies how closely the judge
 tracks the human:
@@ -28,13 +28,13 @@ the primary model — self-judging, which defeats calibration).
 
 Examples:
     # Validate the sample set (no LLM needed)
-    python -m tests.eval.judge_calibration --validate-only
+    python -m tests.eval.experiments.judge_calibration --validate-only
 
     # Cheap smoke run — first 3 samples only
-    python -m tests.eval.judge_calibration --sample 3
+    python -m tests.eval.experiments.judge_calibration --sample 3
 
     # Full calibration with Markdown + JSON reports
-    python -m tests.eval.judge_calibration \
+    python -m tests.eval.experiments.judge_calibration \
         --report-md tests/eval/reports/judge_calibration_report.md \
         --report-json tests/eval/reports/judge_calibration_report.json
 """
@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.shared.config import config
-from tests.eval.judge_calibration_samples import (
+from tests.eval.experiments.judge_calibration_samples import (
     CALIBRATION_SAMPLES,
     CalibrationSample,
     validate_calibration_samples,
@@ -386,7 +386,7 @@ def summarize(result: CalibrationResult) -> str:
 
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="python -m tests.eval.judge_calibration",
+        prog="python -m tests.eval.experiments.judge_calibration",
         description="Quantify how closely the LLM answer judge tracks human "
         "verdicts over a small hand-labeled sample set.",
     )

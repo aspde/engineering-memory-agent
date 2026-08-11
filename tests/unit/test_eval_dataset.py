@@ -382,31 +382,6 @@ class TestBuildAdapter:
         adapter = build_adapter("memory")
         assert isinstance(adapter, RetrieverAdapter)
 
-    def test_memory_adapter_no_decay_label(self) -> None:
-        """use_decay=False (the decay A/B control) is visible in the label so
-        the A/B arms are distinct in reports."""
-        adapter = build_adapter("memory", use_decay=False)
-        assert adapter.name == "memory:norank:nodecay"
-
-    def test_memory_adapter_no_decay_passes_flag(self, monkeypatch) -> None:
-        """The no-decay adapter must forward use_decay=False to query_memories
-        — otherwise the control arm would rank decay-weighted anyway."""
-        import asyncio
-        from unittest.mock import AsyncMock
-
-        from backend.service import retrieval as mod
-
-        qm = AsyncMock(return_value=[])
-        monkeypatch.setattr(mod, "query_memories", qm)
-        asyncio.run(build_adapter("memory", use_decay=False).fn("q", 5))
-        assert qm.await_args.kwargs["use_decay"] is False
-
-        # The default memory adapter forwards use_decay=True.
-        qm2 = AsyncMock(return_value=[])
-        monkeypatch.setattr(mod, "query_memories", qm2)
-        asyncio.run(build_adapter("memory").fn("q", 5))
-        assert qm2.await_args.kwargs["use_decay"] is True
-
     def test_vector_adapter_name_and_field(self) -> None:
         adapter = build_adapter("vector")
         assert adapter.name == "vector:raw"

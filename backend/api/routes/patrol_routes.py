@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
@@ -38,7 +39,7 @@ _patrol_tasks: set[asyncio.Task] = set()
 
 
 class PatrolTriggerRequest(BaseModel):
-    patrol_type: str = Field(..., description="daily | weekly | contradiction_scan")
+    patrol_type: str = Field(..., description="daily | weekly")
     scope: str | None = Field(default="all", description="all | entity:<name>")
 
 
@@ -77,7 +78,8 @@ class PatrolLogList(BaseModel):
 
 @router.post("/trigger", response_model=PatrolTriggerResponse, status_code=202)
 async def trigger_patrol(body: PatrolTriggerRequest):
-    """Manually trigger a patrol run.  Runs asynchronously — returns 202 immediately."""
+    """Manually trigger a patrol run.  Runs asynchronously — returns 202 with
+    the real patrol id up front (``run_patrol`` writes the matching log row)."""
     if body.patrol_type not in VALID_PATROL_TYPES:
         raise HTTPException(
             status_code=422,
@@ -85,8 +87,11 @@ async def trigger_patrol(body: PatrolTriggerRequest):
         )
 
     prompt = get_patrol_prompt(body.patrol_type)
+    # The log id is generated here so the caller gets the real id immediately;
+    # run_patrol accepts it as input instead of minting its own.
+    patrol_id = str(uuid.uuid4())
 
-    # Fire-and-forget: run in background, return patrol_id immediately
+    # Fire-and-forget: run in background, return patrol_id immediately.
     async def _run() -> None:
         try:
             await run_patrol(
@@ -94,40 +99,17 @@ async def trigger_patrol(body: PatrolTriggerRequest):
                 trigger="manual",
                 system_prompt=prompt,
                 scope=body.scope,
+                patrol_id=patrol_id,
             )
-        except Exception:
-            logger.exception("Manual patrol (%s) failed", body.patrol_type)
-
-    # Get patrol_id from a quick initial insert in run_patrol — but run_patrol
-    # creates its own ID internally.  We need the ID to return to the caller.
-    # Strategy: we create a preliminary patrol_id here and pass it through.
-    # For simplicity, we just fire the background task and return a tracking note.
-    # run_patrol creates its own UUID, so we capture it by wrapping.
-    patrol_id_holder: list[str] = []
-
-    async def _run_and_capture() -> None:
-        try:
-            pid = await run_patrol(
-                patrol_type=body.patrol_type,
-                trigger="manual",
-                system_prompt=prompt,
-                scope=body.scope,
-            )
-            patrol_id_holder.append(pid)
         except Exception:
             logger.exception("Manual patrol (%s) failed", body.patrol_type)
         finally:
             _patrol_tasks.discard(asyncio.current_task())
 
-    task = asyncio.create_task(_run_and_capture())
+    task = asyncio.create_task(_run())
     _patrol_tasks.add(task)
 
-    # We don't have the patrol_id yet (run_patrol creates it internally).
-    # Return a "scheduled" response and let the client poll /logs.
-    return PatrolTriggerResponse(
-        patrol_id="pending",
-        status="accepted",
-    )
+    return PatrolTriggerResponse(patrol_id=patrol_id, status="accepted")
 
 
 @router.get("/logs", response_model=PatrolLogList)

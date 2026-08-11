@@ -22,14 +22,13 @@ from backend.service.entity import normalize_entities
 from backend.service.extraction import extract_memory
 from backend.service.prompts import get_prompt
 from backend.shared.config import current_thread_id
-from backend.shared.metrics import record_structured_failure
 from backend.shared.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
 # Similarity thresholds for grading.
 # Calibrated 2026-08-11 against seed-corpus similarity distributions
-# (tests/eval/threshold_calibration.py): LLM-paraphrase pairs of the same
+# (tests/eval/experiments/threshold_calibration.py): LLM-paraphrase pairs of the same
 # knowledge (should MERGE) land at cosine 0.842-0.965 (p25 0.878); distinct
 # same-category memories (should NOT merge) top out at 0.792.  The old
 # MERGE=0.92 sat above the paraphrase p25, so "the same knowledge written by
@@ -164,7 +163,6 @@ async def write_memory(
                 "Conflict detection failed for memory %s — writing as supplement (fail-safe)",
                 existing["id"],
             )
-            record_structured_failure("conflict_detection")
             return await _supplement_memory(existing, extracted, embedding, source_type, write_meta, content_hash)
         if has_conflict:
             return await _mark_conflict(existing, extracted, embedding, source_type, write_meta, content_hash)
@@ -192,7 +190,7 @@ async def _find_similar(embedding, session_factory, limit: int = 3) -> list[tupl
         result = await session.execute(
             text(
                 """\
-                SELECT id, summary, entities, relations, recall_count, decay_factor,
+                SELECT id, summary, entities, relations, recall_count,
                        meta, content_hash,
                        1 - (embedding <=> :vec ::vector) AS similarity
                 FROM memories
@@ -596,10 +594,100 @@ async def _insert_memory(extracted, embedding, source_type, metadata, content_ha
     }
 
 
+async def _write_resolved_memory(
+    *,
+    session_factory,
+    existing_id: str,
+    peer_id: str | None,
+    summary: str,
+    entities: list[dict],
+    relations: list[dict],
+    embedding: list[float],
+    meta: dict[str, Any],
+    content_hash: str | None,
+    resolution: str,
+) -> dict[str, Any] | None:
+    """Persist a conflict resolution into the surviving memory (A).
+
+    Shared by the overwrite and merge branches of ``resolve_conflict`` — the
+    subtle part exists once, not twice.  When *peer_id* is set (a patrol
+    contradiction), B must be soft-deleted in the *same transaction* before A
+    adopts B's ``content_hash``: the live-content-hash unique index is
+    enforced per statement.  The write carries a ``rowcount != 1`` guard
+    against A being deleted between the liveness check and the write.  If the
+    new content's hash is already live on another memory (it was ingested
+    separately while this conflict sat in the queue), the unique index fires
+    and this returns the winner instead of 500ing.
+
+    Returns ``None`` on success, or the winner dict when the content-hash
+    race was lost.
+    """
+    try:
+        async with session_factory() as session:
+            if peer_id:
+                await session.execute(
+                    text(
+                        "UPDATE memories SET deleted_at = NOW() "
+                        "WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": peer_id},
+                )
+            where = "AND deleted_at IS NULL" if peer_id else ""
+            result = await session.execute(
+                text(
+                    f"""\
+                    UPDATE memories
+                    SET summary = :summary,
+                        entities = :entities,
+                        relations = :relations,
+                        embedding = :embedding,
+                        meta = :meta,
+                        content_hash = :content_hash,
+                        updated_at = NOW()
+                    WHERE id = :id {where}
+                    """
+                ),
+                {
+                    "id": existing_id,
+                    "summary": summary,
+                    "entities": json.dumps(entities, ensure_ascii=False),
+                    "relations": json.dumps(relations, ensure_ascii=False),
+                    "embedding": str(embedding),
+                    "meta": json.dumps(meta),
+                    "content_hash": content_hash,
+                },
+            )
+            if peer_id and result.rowcount != 1:
+                # A deleted between the liveness check and the write — refuse
+                # rather than silently resolve against a gone row.
+                raise ValueError(
+                    f"Surviving memory {existing_id} no longer exists"
+                )
+            await session.commit()
+    except IntegrityError:
+        winner = await _find_by_content_hash(content_hash, session_factory)
+        if winner is None:
+            raise
+        logger.info(
+            "%s lost content-hash race for %s — content already stored as %s",
+            resolution,
+            content_hash[:12],
+            winner["id"],
+        )
+        return {
+            "id": str(winner["id"]),
+            "action": "duplicate",
+            "resolution": resolution,
+            "summary": winner["summary"],
+        }
+    return None
+
+
 async def resolve_conflict(
     resolution: str,
     existing_id: str,
     deferred_payload: dict[str, Any],
+    peer_id: str | None = None,
 ) -> dict[str, Any]:
     """Resolve a memory conflict per the human's decision.
 
@@ -609,6 +697,16 @@ async def resolve_conflict(
         existing_id: The UUID of the conflicting existing memory.
         deferred_payload: The ``_deferred`` dict carried over from the
             ``write_memory`` conflict return value.
+        peer_id: Set when the conflict is a patrol contradiction — two
+            *already-stored* memories (A = ``existing_id`` survives, B =
+            ``peer_id`` loses the arbitration).  In that shape the destructive
+            options soft-delete B *in the same transaction* as the A rewrite
+            (B must be gone before A adopts its ``content_hash``: the
+            live-content-hash unique index is enforced per statement), and
+            ``keep_both`` leaves both rows untouched — the resolved
+            ``pending_conflicts`` row is the keep-both arbitration record.
+            ``None`` (the default) keeps the ingestion semantics: one stored
+            memory + one deferred new-side.
 
     Returns:
         A dict with ``action`` and ``id`` describing what happened.
@@ -621,7 +719,38 @@ async def resolve_conflict(
 
     session_factory = get_session_factory()
 
+    # Patrol shape: the surviving side (A) must still be live before any
+    # resolution is applied — a resolution against a deleted row is
+    # meaningless (keep_both would bless a dead pair, and the destructive
+    # options would report success against a gone row).
+    if peer_id:
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT id FROM memories "
+                        "WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": existing_id},
+                )
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"Surviving memory {existing_id} no longer exists"
+                )
+
     if resolution == "keep_existing":
+        if peer_id:
+            # A survives unchanged; B is dropped.
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        "UPDATE memories SET deleted_at = NOW() "
+                        "WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": peer_id},
+                )
+                await session.commit()
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
 
     elif resolution == "overwrite":
@@ -642,52 +771,20 @@ async def resolve_conflict(
         merged_meta = existing_meta | (metadata or {})
         merged_meta = _record_prior_hash(merged_meta, old_content_hash)
 
-        try:
-            async with session_factory() as session:
-                await session.execute(
-                    text(
-                        """\
-                        UPDATE memories
-                        SET summary = :summary,
-                            entities = :entities,
-                            relations = :relations,
-                            embedding = :embedding,
-                            meta = :meta,
-                            content_hash = :content_hash,
-                            updated_at = NOW()
-                        WHERE id = :id
-                        """
-                    ),
-                    {
-                        "id": existing_id,
-                        "summary": extracted["summary"],
-                        "entities": json.dumps(extracted.get("entities") or [], ensure_ascii=False),
-                        "relations": json.dumps(extracted.get("relations") or [], ensure_ascii=False),
-                        "embedding": str(embedding),
-                        "meta": json.dumps(merged_meta),
-                        "content_hash": content_hash,
-                    },
-                )
-                await session.commit()
-        except IntegrityError:
-            # The overwritten content's hash already lives on another live
-            # memory (it got ingested separately while this conflict sat in
-            # the queue).  The new content IS stored — report that row as the
-            # resolution rather than 500ing on the unique index.
-            winner = await _find_by_content_hash(content_hash, session_factory)
-            if winner is None:
-                raise
-            logger.info(
-                "Overwrite lost content-hash race for %s — content already stored as %s",
-                content_hash[:12],
-                winner["id"],
-            )
-            return {
-                "id": str(winner["id"]),
-                "action": "duplicate",
-                "resolution": "overwrite",
-                "summary": winner["summary"],
-            }
+        outcome = await _write_resolved_memory(
+            session_factory=session_factory,
+            existing_id=existing_id,
+            peer_id=peer_id,
+            summary=extracted["summary"],
+            entities=extracted.get("entities") or [],
+            relations=extracted.get("relations") or [],
+            embedding=embedding,
+            meta=merged_meta,
+            content_hash=content_hash,
+            resolution="overwrite",
+        )
+        if outcome is not None:
+            return outcome
         # Sync the memory_entities link table for the overwritten content's
         # entities (same fire-and-forget as _insert_memory/_merge_memory).
         _schedule_normalization(str(existing_id), extracted.get("entities") or [])
@@ -755,58 +852,51 @@ async def resolve_conflict(
         vectors = await get_embedding_provider().embed([merged_summary.strip()])
         merged_embedding = vectors[0]
 
-        try:
-            async with session_factory() as session:
-                await session.execute(
-                    text(
-                        """\
-                        UPDATE memories
-                        SET summary = :summary,
-                            entities = :entities,
-                            relations = :relations,
-                            embedding = :embedding,
-                            meta = :meta,
-                            content_hash = :content_hash,
-                            updated_at = NOW()
-                        WHERE id = :id
-                        """
-                    ),
-                    {
-                        "id": existing_id,
-                        "summary": merged_summary.strip(),
-                        "entities": json.dumps(merged_entities, ensure_ascii=False),
-                        "relations": json.dumps(merged_relations, ensure_ascii=False),
-                        "embedding": str(merged_embedding),
-                        "meta": json.dumps(merged_meta),
-                        "content_hash": content_hash,
-                    },
-                )
-                await session.commit()
-        except IntegrityError:
-            # Same guard as the overwrite branch — the new content's hash
-            # already lives on another live memory; report it as the outcome.
-            winner = await _find_by_content_hash(content_hash, session_factory)
-            if winner is None:
-                raise
-            logger.info(
-                "Merge lost content-hash race for %s — content already stored as %s",
-                content_hash[:12],
-                winner["id"],
-            )
-            return {
-                "id": str(winner["id"]),
-                "action": "duplicate",
-                "resolution": "merge",
-                "summary": winner["summary"],
-            }
+        outcome = await _write_resolved_memory(
+            session_factory=session_factory,
+            existing_id=existing_id,
+            peer_id=peer_id,
+            summary=merged_summary.strip(),
+            entities=merged_entities,
+            relations=merged_relations,
+            embedding=merged_embedding,
+            meta=merged_meta,
+            content_hash=content_hash,
+            resolution="merge",
+        )
+        if outcome is not None:
+            return outcome
         # Sync the memory_entities link table for the merged entities (same
         # fire-and-forget as _merge_memory).
         _schedule_normalization(str(existing_id), merged_entities)
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "merge"}
 
     elif resolution == "keep_both":
+        if peer_id:
+            # Both memories stay — the resolved pending_conflicts row written
+            # by resolve_pending_conflict is the keep-both arbitration record.
+            return {
+                "id": existing_id,
+                "action": "conflict_resolved",
+                "resolution": "keep_both",
+            }
         return await _insert_memory(extracted, embedding, source_type, metadata, content_hash)
 
     else:
         logger.warning("Unknown conflict resolution '%s', defaulting to keep_existing", resolution)
+        if peer_id:
+            # Same semantics as the explicit keep_existing branch above — an
+            # unknown resolution degrades to keep_existing, which in the
+            # patrol shape soft-deletes the losing side B.  Without this the
+            # conflict would be marked resolved while B stays live, so the
+            # pair would re-surface on the next scan.
+            async with session_factory() as session:
+                await session.execute(
+                    text(
+                        "UPDATE memories SET deleted_at = NOW() "
+                        "WHERE id = :id AND deleted_at IS NULL"
+                    ),
+                    {"id": peer_id},
+                )
+                await session.commit()
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}

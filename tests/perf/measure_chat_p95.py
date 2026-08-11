@@ -38,7 +38,6 @@ load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 os.environ["AUTO_MEMORY_ENABLED"] = "false"
 os.environ["PATROL_ENABLED"] = "false"
 os.environ["PATROL_WEEKLY_ENABLED"] = "false"
-os.environ["ALERTS_ENABLED"] = "false"
 
 # Quiet the app's own logging during the run.
 logging.getLogger("backend").setLevel(logging.WARNING)

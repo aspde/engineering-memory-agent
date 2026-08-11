@@ -13,16 +13,21 @@ const FINDING_GROUPS: Record<string, { label: string; color: string; emoji: stri
   knowledge_gaps: { label: '知识盲区', color: 'border-yellow-400', emoji: '🟡' },
   new_entities: { label: '新实体', color: 'border-blue-400', emoji: '🔵' },
   contradictions: { label: '矛盾发现', color: 'border-orange-400', emoji: '🟠' },
-  decay_alerts: { label: '衰减预警', color: 'border-gray-400', emoji: '⚪' },
+  stale_memories: { label: '过期记忆', color: 'border-gray-400', emoji: '⚪' },
   entity_coverage: { label: '实体覆盖', color: 'border-teal-400', emoji: '🟢' },
 };
+
+/**
+ * Fallback styling for finding groups this page has no mapping for — the
+ * retired decay_alerts category (superseded by stale_memories) still appears
+ * on historical patrol logs, and future extensions may add new keys.  Render
+ * them generically instead of silently dropping the findings.
+ */
+const DEFAULT_GROUP = { label: '其他发现', color: 'border-gray-400', emoji: '⚪' };
 
 const PATROL_TYPE_LABELS: Record<string, string> = {
   daily: '每日巡检',
   weekly: '每周巡检',
-  contradiction_scan: '矛盾扫描',
-  event_driven: '事件驱动',
-  manual: '手动触发',
 };
 
 /** Normalized key for a contradiction finding: sorted memory pair, matching the
@@ -93,16 +98,18 @@ function findingCardText(
             : undefined,
         description: f.reason ? String(f.reason) : undefined,
       };
-    case 'decay_alerts':
+    case 'stale_memories':
       return {
         title: f.summary ? String(f.summary) : f.memory_id ? String(f.memory_id) : undefined,
         description: recommendation,
       };
     default:
-      // Unknown/extension groups: keep the generic fields the card used to read.
+      // Unknown/extension groups: fall back to the generic fields — the
+      // headline from title/summary, the body from description (or
+      // recommendation, which the retired decay_alerts group emitted).
       return {
         title: f.title || f.summary ? String(f.title ?? f.summary) : undefined,
-        description: f.description ? String(f.description) : undefined,
+        description: f.description ? String(f.description) : recommendation,
       };
   }
 }
@@ -269,7 +276,6 @@ export default function PatrolPage() {
               { key: '', label: '全部' },
               { key: 'daily', label: '每日巡检' },
               { key: 'weekly', label: '每周巡检' },
-              { key: 'contradiction_scan', label: '矛盾扫描' },
             ].map(({ key, label }) => (
               <button
                 key={key}
@@ -304,19 +310,11 @@ export default function PatrolPage() {
             >
               ▶ 每周
             </button>
-            <button
-              type="button"
-              onClick={() => handleTrigger('contradiction_scan')}
-              disabled={triggering}
-              className="rounded border border-orange-200 px-2 py-0.5 text-orange-600 hover:bg-orange-50 disabled:opacity-40"
-            >
-              ▶ 矛盾
-            </button>
           </div>
           {/* "已执行过" hint — informational, does not block re-triggering */}
           {Object.keys(todayRuns).length > 0 && (
             <div className="mt-2 space-y-1 border-t border-gray-200 pt-1.5">
-              {(['daily', 'weekly', 'contradiction_scan'] as const).map((type) => {
+              {(['daily', 'weekly'] as const).map((type) => {
                 const run = todayRuns[type];
                 if (!run) return null;
                 const ok = run.status === 'completed';
@@ -445,10 +443,37 @@ export default function PatrolPage() {
               </p>
             )}
 
-            {detail.findings && Object.keys(detail.findings).length > 0 ? (
-              Object.entries(detail.findings).map(([groupKey, findings]) => {
-                const group = FINDING_GROUPS[groupKey];
-                if (!group || !Array.isArray(findings) || findings.length === 0) return null;
+            {(() => {
+              if (!detail.findings) {
+                return <p className="text-sm text-gray-400">未发现需关注事项</p>;
+              }
+              // A raw/failed patrol report is a single string under
+              // `raw_output`, not grouped findings — render the original text.
+              const raw = typeof detail.findings.raw_output === 'string'
+                ? detail.findings.raw_output.trim()
+                : '';
+              if (raw) {
+                return (
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-700 mb-2">原始报告</h4>
+                    <pre className="whitespace-pre-wrap rounded-lg bg-gray-50 p-3 text-xs text-gray-700 leading-relaxed max-h-96 overflow-y-auto">
+                      {raw}
+                    </pre>
+                  </div>
+                );
+              }
+              // Only non-empty groups count as findings — a log whose
+              // categories are all empty arrays is a "nothing to report" scan,
+              // matching the finding_count the list already shows.
+              const hasFindings = Object.values(detail.findings).some(
+                (f) => Array.isArray(f) && f.length > 0,
+              );
+              if (!hasFindings) {
+                return <p className="text-sm text-gray-400">未发现需关注事项</p>;
+              }
+              return Object.entries(detail.findings).map(([groupKey, findings]) => {
+                const group = FINDING_GROUPS[groupKey] ?? DEFAULT_GROUP;
+                if (!Array.isArray(findings) || findings.length === 0) return null;
                 return (
                   <div key={groupKey} className="mb-5">
                     <h4 className="text-sm font-semibold text-gray-700 mb-2">
@@ -520,10 +545,8 @@ export default function PatrolPage() {
                     </div>
                   </div>
                 );
-              })
-            ) : (
-              <p className="text-sm text-gray-400">未发现需关注事项</p>
-            )}
+              });
+            })()}
           </div>
         )}
       </div>

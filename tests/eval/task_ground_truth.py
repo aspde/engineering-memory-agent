@@ -31,12 +31,17 @@ seeded by ``python -m tests.eval.e2e_seed --clear`` first.
 
 Write-tasks (task-003) write a real memory row during the run — a documented
 side effect, tagged by its content so it is identifiable and removable.
+
+The tasks themselves live in ``tests/eval/data/tasks.jsonl``; this module
+keeps the item type, constants, loader and validation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+from tests.eval.core import load_jsonl_items
 
 
 TASK_CATEGORIES: tuple[str, ...] = (
@@ -74,87 +79,8 @@ class TaskItem:
     notes: str = ""
 
 
-TASK_ITEMS: list[TaskItem] = [
-    TaskItem(
-        id="task-001",
-        query="向量检索后端选了什么方案，为什么不用 Elasticsearch？",
-        expected_tools=["search_memories_tool"],
-        category="factual",
-        required_facts=["pgvector", "Elasticsearch"],
-        prohibited_claims=["选了 Milvus", "选了 Qdrant"],
-        notes="单一记忆检索 → 接地回答；事实在 e2e-001 seed（memories 表）",
-    ),
-    TaskItem(
-        id="task-002",
-        query="线上 502 事故的根因是什么？另外长代码文件分块时会怎么处理？两个都回答。",
-        expected_tools=["search_memories_tool", "retrieve_chunks_tool"],
-        category="multi_retrieve",
-        required_facts=["连接池", "AST"],
-        prohibited_claims=["根因是内存泄漏"],
-        notes=(
-            "根因在 e2e-002 seed（memories 表），AST 分块在 e2e-008 seed"
-            "（chunks 表）——一次检索拿不全，必须两个工具都调"
-        ),
-    ),
-    TaskItem(
-        id="task-003",
-        query=(
-            "为什么嵌入模型选 BGE-M3？"
-            "然后把『嵌入模型用 BGE-M3，1024 维，本地推理』记成一条记忆。"
-        ),
-        expected_tools=["search_memories_tool", "write_memory_tool"],
-        category="write",
-        required_facts=["BGE-M3"],
-        prohibited_claims=[],
-        notes="检索 + 写入；write_memory_tool 会真实写入一条记忆（eval 副作用，内容可识别）",
-    ),
-    TaskItem(
-        id="task-004",
-        query="之前出过什么问题，会不会陷入死循环？怎么避免？",
-        expected_tools=["search_memories_tool"],
-        category="conceptual",
-        required_facts=["max_agent_steps"],
-        prohibited_claims=[],
-        allowed_tools=["query_rewrite_and_search_tool", "retrieve_chunks_tool"],
-        notes="概念性查询；max_agent_steps 事实在 e2e-007 seed（memories 表）",
-    ),
-    TaskItem(
-        id="task-005",
-        query="怎么把本地仓库的提交历史导入 EMA？然后把方法飞书通知给团队。",
-        expected_tools=["search_memories_tool", "notify_feishu_tool"],
-        category="notify",
-        required_facts=["ingest_git_repo_tool"],
-        prohibited_claims=[],
-        notes="检索 + 通知；notify 走 CHAT_APPROVAL_TOOLS 审批门（eval 自动放行），未配 webhook 时工具返回错误但调用已发生",
-    ),
-    TaskItem(
-        id="task-006",
-        query="Windows 开发环境下 Agent 的对话状态为什么重启后会丢？",
-        expected_tools=["search_memories_tool"],
-        category="factual",
-        required_facts=["InMemorySaver"],
-        prohibited_claims=["重启后状态不会丢"],
-        notes="否定式事实；事实在 e2e-004 seed（memories 表）",
-    ),
-    TaskItem(
-        id="task-007",
-        query="好的，谢谢！",
-        expected_tools=[],
-        category="no_tool",
-        required_facts=[],
-        prohibited_claims=[],
-        notes="纯收尾寒暄——正确行为是一个工具都不调，直接回应",
-    ),
-    TaskItem(
-        id="task-008",
-        query="怎么把本地仓库的提交历史导入 EMA？另外普通文档分块是怎么做的？",
-        expected_tools=["search_memories_tool", "retrieve_chunks_tool"],
-        category="multi_retrieve",
-        required_facts=["ingest_git_repo_tool", "递归"],
-        prohibited_claims=[],
-        notes="git 导入事实在 e2e-005 seed（memories 表），递归分块在 e2e-008 seed（chunks 表）",
-    ),
-]
+# Loaded once at import.  Module-level name so tests can read/replace it.
+TASK_ITEMS: list[TaskItem] = load_jsonl_items("tasks.jsonl", TaskItem)
 
 
 def load_task_items() -> list[TaskItem]:

@@ -103,9 +103,9 @@ def _memory_query_result(*rows) -> MagicMock:
 def _meta_select_result(meta: dict | None = None, content_hash: str | None = "hash-a") -> MagicMock:
     """A ``SELECT meta, content_hash`` result for the surviving memory (A).
 
-    resolve_patrol_conflict reads A's meta + content_hash before an
-    overwrite/merge write so it can preserve provenance and record the
-    superseded hash (prior_hashes).
+    resolve_conflict (patrol shape, peer_id set) reads A's meta + content_hash
+    before an overwrite/merge write so it can preserve provenance and record
+    the superseded hash (prior_hashes).
     """
     r = MagicMock()
     r.fetchone.return_value = (json.dumps(meta or {}), content_hash)
@@ -266,17 +266,17 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_keep_existing_soft_deletes_peer_only(self) -> None:
         """keep_existing drops B; A is untouched."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         mock_session = AsyncMock()
         mock_session.execute.return_value = MagicMock()
 
         with patch(
-            "backend.service.conflicts.get_session_factory",
+            "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
         ):
-            outcome = await resolve_patrol_conflict(
-                "keep_existing", A_ID, B_ID, _patrol_deferred()
+            outcome = await resolve_conflict(
+                "keep_existing", A_ID, _patrol_deferred(), peer_id=B_ID
             )
 
         assert outcome["resolution"] == "keep_existing"
@@ -293,7 +293,7 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_overwrite_soft_deletes_peer_then_updates_a(self) -> None:
         """A adopts B's content; B is soft-deleted first, in the same session."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         update_result = MagicMock()
         update_result.rowcount = 1
@@ -307,13 +307,13 @@ class TestResolvePatrolConflict:
 
         with (
             patch(
-                "backend.service.conflicts.get_session_factory",
+                "backend.service.memory.get_session_factory",
                 return_value=_make_session_factory(mock_session),
             ),
-            patch("backend.service.conflicts._schedule_normalization"),
+            patch("backend.service.memory._schedule_normalization"),
         ):
-            outcome = await resolve_patrol_conflict(
-                "overwrite", A_ID, B_ID, _patrol_deferred()
+            outcome = await resolve_conflict(
+                "overwrite", A_ID, _patrol_deferred(), peer_id=B_ID
             )
 
         assert outcome["action"] == "conflict_resolved"
@@ -343,20 +343,20 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_merge_writes_merged_summary_and_soft_deletes_peer(self) -> None:
         """LLM merges both summaries; merged row lands on A, B is soft-deleted."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         select_result = MagicMock()
-        select_result.fetchone.return_value = ("Use PostgreSQL for storage", '[]', '[]')
+        select_result.fetchone.return_value = (
+            "Use PostgreSQL for storage", '[]', '[]', '{"thread_id": "t-a"}', 'hash-a')
         update_result = MagicMock()
         update_result.rowcount = 1
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [
             MagicMock(),  # call 0: surviving-memory (A) liveness check
-            _meta_select_result({"thread_id": "t-a"}),  # call 1: A meta + content_hash
-            select_result,  # call 2: read A's current content
-            MagicMock(),  # call 3: soft-delete B
-            update_result,  # call 4: write merged summary to A
+            select_result,  # call 1: read A's current content (+ meta + hash)
+            MagicMock(),  # call 2: soft-delete B
+            update_result,  # call 3: write merged summary to A
         ]
 
         mock_llm = AsyncMock()
@@ -366,31 +366,31 @@ class TestResolvePatrolConflict:
 
         with (
             patch(
-                "backend.service.conflicts.get_session_factory",
+                "backend.service.memory.get_session_factory",
                 return_value=_make_session_factory(mock_session),
             ),
             patch("backend.service.llm_service.get_llm_provider", return_value=mock_llm),
-            patch("backend.service.conflicts.get_embedding_provider", return_value=mock_embed),
-            patch("backend.service.conflicts._schedule_normalization"),
+            patch("backend.service.memory.get_embedding_provider", return_value=mock_embed),
+            patch("backend.service.memory._schedule_normalization"),
         ):
-            outcome = await resolve_patrol_conflict(
-                "merge", A_ID, B_ID, _patrol_deferred()
+            outcome = await resolve_conflict(
+                "merge", A_ID, _patrol_deferred(), peer_id=B_ID
             )
 
         assert outcome["action"] == "conflict_resolved"
-        # Call 1: read A's meta + content_hash.
+        # Call 1: read A's current content — one SELECT carries the content,
+        # provenance and old hash (the old pipeline needed a separate meta
+        # read, so this is one fewer DB round-trip).
         assert mock_session.execute.call_args_list[1][0][1]["id"] == A_ID
-        # Call 2: read A's current content.
-        assert mock_session.execute.call_args_list[2][0][1]["id"] == A_ID
-        # Call 3: soft-delete B.
+        # Call 2: soft-delete B.
+        sql2, params2 = mock_session.execute.call_args_list[2][0]
+        assert "deleted_at" in str(sql2)
+        assert params2["id"] == B_ID
+        # Call 3: write merged summary to A — provenance preserved, old hash kept.
         sql3, params3 = mock_session.execute.call_args_list[3][0]
-        assert "deleted_at" in str(sql3)
-        assert params3["id"] == B_ID
-        # Call 4: write merged summary to A — provenance preserved, old hash kept.
-        sql4, params4 = mock_session.execute.call_args_list[4][0]
-        assert params4["id"] == A_ID
-        assert params4["summary"] == "PostgreSQL with a migration exit plan"
-        stored_meta = json.loads(params4["meta"])
+        assert params3["id"] == A_ID
+        assert params3["summary"] == "PostgreSQL with a migration exit plan"
+        stored_meta = json.loads(params3["meta"])
         assert stored_meta["thread_id"] == "t-a"
         assert stored_meta["prior_hashes"] == ["hash-a"]
         # Re-embedded merged text.
@@ -399,17 +399,17 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_keep_both_touches_no_memories(self) -> None:
         """keep_both leaves both rows alone — arbitration is a keep-both record."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         mock_session = AsyncMock()
         mock_session.execute.side_effect = [MagicMock()]  # liveness check passes
 
         with patch(
-            "backend.service.conflicts.get_session_factory",
+            "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
         ):
-            outcome = await resolve_patrol_conflict(
-                "keep_both", A_ID, B_ID, _patrol_deferred()
+            outcome = await resolve_conflict(
+                "keep_both", A_ID, _patrol_deferred(), peer_id=B_ID
             )
 
         assert outcome["resolution"] == "keep_both"
@@ -421,7 +421,7 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_keep_existing_refused_when_survivor_deleted(self) -> None:
         """A deleted while the conflict sat queued → refuse, not silently resolve."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         liveness_result = MagicMock()
         liveness_result.fetchone.return_value = None  # A soft-deleted
@@ -429,12 +429,12 @@ class TestResolvePatrolConflict:
         mock_session.execute.side_effect = [liveness_result]
 
         with patch(
-            "backend.service.conflicts.get_session_factory",
+            "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
         ):
             with pytest.raises(ValueError, match="Surviving memory .* no longer exists"):
-                await resolve_patrol_conflict(
-                    "keep_existing", A_ID, B_ID, _patrol_deferred()
+                await resolve_conflict(
+                    "keep_existing", A_ID, _patrol_deferred(), peer_id=B_ID
                 )
         # B must not have been touched.
         assert mock_session.execute.await_count == 1
@@ -442,7 +442,7 @@ class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_overwrite_refused_when_survivor_gone_at_write(self) -> None:
         """A deleted between the liveness check and the write → rowcount guard."""
-        from backend.service.conflicts import resolve_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         update_result = MagicMock()
         update_result.rowcount = 0  # A no longer live when the UPDATE runs
@@ -455,33 +455,72 @@ class TestResolvePatrolConflict:
         ]
 
         with patch(
-            "backend.service.conflicts.get_session_factory",
+            "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
         ):
             with pytest.raises(ValueError, match="Surviving memory .* no longer exists"):
-                await resolve_patrol_conflict(
-                    "overwrite", A_ID, B_ID, _patrol_deferred()
+                await resolve_conflict(
+                    "overwrite", A_ID, _patrol_deferred(), peer_id=B_ID
                 )
 
     @pytest.mark.asyncio
-    async def test_unknown_resolution_raises(self) -> None:
-        from backend.service.conflicts import resolve_patrol_conflict
+    async def test_unknown_resolution_defaults_to_keep_existing(self) -> None:
+        """Unknown resolutions degrade to keep_existing (agent-path safety).
+
+        resolve_pending_conflict validates the four options up front, so an
+        out-of-enum resolution can only reach resolve_conflict directly (the
+        agent path).  Mirror the ingestion behaviour: degrade to keep_existing
+        rather than raise — a bad interrupt payload must not 500 the turn.
+        """
+        from backend.service.memory import resolve_conflict
 
         mock_session = AsyncMock()
-        mock_session.execute.side_effect = [MagicMock()]  # liveness check passes
+        mock_session.execute.return_value = MagicMock()
 
         with patch(
-            "backend.service.conflicts.get_session_factory",
+            "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
         ):
-            with pytest.raises(ValueError, match="Unknown resolution"):
-                await resolve_patrol_conflict("nuke", A_ID, B_ID, _patrol_deferred())
+            outcome = await resolve_conflict("nuke", A_ID, _patrol_deferred())
+
+        assert outcome["resolution"] == "keep_existing"
+        # No peer_id, no writes — ingestion keep_existing is a no-op.
+        assert mock_session.execute.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_unknown_resolution_patrol_soft_deletes_peer(self) -> None:
+        """Patrol shape: an unknown resolution degrades to keep_existing, which
+        still soft-deletes B — the conflict row is marked resolved by the
+        caller, so B must not survive it (the pair would re-surface on scan)."""
+        from backend.service.memory import resolve_conflict
+
+        mock_session = AsyncMock()
+        mock_session.execute.return_value = MagicMock()
+
+        with patch(
+            "backend.service.memory.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ):
+            outcome = await resolve_conflict(
+                "nuke", A_ID, _patrol_deferred(), peer_id=B_ID
+            )
+
+        assert outcome["resolution"] == "keep_existing"
+        # Call 0: surviving-memory (A) liveness check.
+        sql0, params0 = mock_session.execute.call_args_list[0][0]
+        assert "deleted_at" in str(sql0)
+        assert params0["id"] == A_ID
+        # Call 1: soft-delete B (the degraded keep_existing path).
+        sql1, params1 = mock_session.execute.call_args_list[1][0]
+        assert "deleted_at" in str(sql1)
+        assert params1["id"] == B_ID
+        assert mock_session.execute.await_count == 2
 
 
 class TestResolvePendingConflictDispatch:
     @pytest.mark.asyncio
-    async def test_routes_patrol_to_patrol_pipeline(self) -> None:
-        """conflict_type='patrol' dispatches to resolve_patrol_conflict."""
+    async def test_forwards_patrol_peer_id(self) -> None:
+        """A patrol row reaches resolve_conflict with peer_id=B."""
         from backend.service.conflicts import resolve_pending_conflict
 
         deferred = _patrol_deferred()
@@ -497,10 +536,9 @@ class TestResolvePendingConflictDispatch:
         update_result = MagicMock()
         mock_session = AsyncMock()
 
-        mock_patrol = AsyncMock(
+        mock_resolve = AsyncMock(
             return_value={"id": A_ID, "action": "conflict_resolved", "resolution": "keep_existing"}
         )
-        mock_ingest = AsyncMock()
 
         with (
             patch(
@@ -509,18 +547,53 @@ class TestResolvePendingConflictDispatch:
                     mock_session, side_effect=[select_result, update_result]
                 ),
             ),
-            patch("backend.service.conflicts.resolve_patrol_conflict", mock_patrol),
-            patch("backend.service.conflicts.resolve_conflict", mock_ingest),
+            patch("backend.service.conflicts.resolve_conflict", mock_resolve),
         ):
             outcome = await resolve_pending_conflict("c1", "keep_existing")
 
         assert outcome["id"] == "c1"
-        assert mock_patrol.await_args.args == ("keep_existing", A_ID, B_ID, deferred)
-        mock_ingest.assert_not_awaited()
+        assert mock_resolve.await_args.args == ("keep_existing", A_ID, deferred)
+        assert mock_resolve.await_args.kwargs == {"peer_id": B_ID}
         # Row marked resolved by the shared UPDATE.
         sql, params = mock_session.execute.call_args_list[1][0]
         assert "status = 'resolved'" in str(sql)
         assert params["id"] == "c1"
+
+    @pytest.mark.asyncio
+    async def test_forwards_none_peer_for_ingestion(self) -> None:
+        """An ingestion row reaches resolve_conflict with peer_id=None."""
+        from backend.service.conflicts import resolve_pending_conflict
+
+        deferred = _patrol_deferred()
+        conflict_row = MagicMock()
+        conflict_row.existing_id = A_ID
+        conflict_row.status = "pending"
+        conflict_row.deferred = deferred
+        conflict_row.conflict_type = "ingestion"
+        conflict_row.peer_id = None
+
+        select_result = MagicMock()
+        select_result.fetchone.return_value = conflict_row
+        update_result = MagicMock()
+        mock_session = AsyncMock()
+
+        mock_resolve = AsyncMock(
+            return_value={"id": A_ID, "action": "conflict_resolved", "resolution": "keep_existing"}
+        )
+
+        with (
+            patch(
+                "backend.service.conflicts.get_session_factory",
+                return_value=_make_session_factory(
+                    mock_session, side_effect=[select_result, update_result]
+                ),
+            ),
+            patch("backend.service.conflicts.resolve_conflict", mock_resolve),
+        ):
+            await resolve_pending_conflict("c1", "keep_existing")
+
+        assert mock_resolve.await_args.args == ("keep_existing", A_ID, deferred)
+        assert mock_resolve.await_args.kwargs == {"peer_id": None}
 
 
 class TestReopenPatrolConflict:

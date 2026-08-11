@@ -8,17 +8,23 @@ Output layout (Markdown), one section per suite:
     4. Errors / judge-degradation summary
 
 JSON mirrors the structure for programmatic consumption (CI gates, trend
-dashboards).  ``summarize`` is the one-line CI-log view.
+dashboards) — the layout is shared with the task report via
+``tests.eval.core.to_json``.  ``summarize`` is the one-line CI-log view.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Any
 
-from tests.eval.llm_runner import LlmEvalResult
+from tests.eval.core import (
+    EvalResult,
+    category_table,
+    fmt as _fmt,
+    overall_table,
+    to_json,
+    write_text,
+)
 
 SUITE_TITLES: dict[str, str] = {
     "tool_selection": "工具选择",
@@ -28,49 +34,17 @@ SUITE_TITLES: dict[str, str] = {
 }
 
 
-def _fmt(v: float | None, digits: int = 3) -> str:
-    if v is None:
-        return "—"
-    return f"{v:.{digits}f}"
+def _overall_table(results: Sequence[EvalResult]) -> str:
+    """Overall metric table — shared core helper with per-suite titles."""
+    return overall_table(results, lambda s: SUITE_TITLES.get(s, s))
 
 
-def _overall_table(results: Sequence[LlmEvalResult]) -> str:
-    sections: list[str] = []
-    for r in results:
-        title = SUITE_TITLES.get(r.suite, r.suite)
-        judge_note = "" if r.judge == "deterministic" else " (LLM judge)"
-        sections.append(f"### {title}{judge_note}")
-        sections.append("")
-        cols = list(r.metric_keys)
-        header = "| metric | " + " | ".join(cols) + " |"
-        sep = "|---" * (len(cols) + 1) + "|"
-        lines = [header, sep]
-        cells = [_fmt(r.overall.get(k, 0.0)) for k in cols]
-        lines.append(f"| **overall** | " + " | ".join(cells) + " |")
-        sections.append("\n".join(lines))
-        sections.append("")
-    return "\n".join(sections)
+def _category_table(result: EvalResult) -> str:
+    """Category × headline-metric table — shared core helper."""
+    return category_table(result, ("answer_len", "ungrounded_claims"))
 
 
-def _category_table(result: LlmEvalResult) -> str:
-    cats = list(result.by_category)
-    if not cats:
-        return "_(no category data)_"
-    cols = list(result.metric_keys)
-    # Keep the table narrow: category breakdown only for the suite's headline
-    # metrics (skip auxiliary columns like answer_len / ungrounded_claims).
-    headline = [k for k in cols if k not in ("answer_len", "ungrounded_claims")]
-    header = "| category | " + " | ".join(headline) + " |"
-    sep = "|---" * (len(headline) + 1) + "|"
-    lines = [header, sep]
-    for cat in cats:
-        agg = result.by_category.get(cat, {})
-        cells = [_fmt(agg.get(k, 0.0)) for k in headline]
-        lines.append(f"| {cat} | " + " | ".join(cells) + " |")
-    return "\n".join(lines)
-
-
-def _per_query_detail(result: LlmEvalResult) -> str:
+def _per_query_detail(result: EvalResult) -> str:
     lines: list[str] = [
         f"<details><summary>Per-query detail ({result.suite})</summary>",
         "",
@@ -139,31 +113,7 @@ def _per_query_detail(result: LlmEvalResult) -> str:
     return "\n".join(lines)
 
 
-def to_json(results: Sequence[LlmEvalResult]) -> str:
-    """Serialize a list of LlmEvalResults to a pretty JSON string."""
-    payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "results": [
-            {
-                "suite": r.suite,
-                "judge": r.judge,
-                "metric_keys": list(r.metric_keys),
-                "n_items": r.n_items,
-                "overall": r.overall,
-                "by_category": r.by_category,
-                "n_errors": len(r.errors),
-                "n_judge_errors": len(r.judge_errors),
-                "errors": r.errors,
-                "judge_errors": r.judge_errors,
-                "per_query": r.per_query,
-            }
-            for r in results
-        ],
-    }
-    return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
-def to_markdown(results: Sequence[LlmEvalResult]) -> str:
+def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for one or more suites."""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_errors = sum(len(r.errors) for r in results)
@@ -212,25 +162,17 @@ def to_markdown(results: Sequence[LlmEvalResult]) -> str:
     return "\n".join(sections)
 
 
-def write_json(results: Sequence[LlmEvalResult], path: str) -> str:
+def write_json(results: Sequence[EvalResult], path: str) -> str:
     """Write JSON report to ``path``. Returns the path."""
-    from pathlib import Path
-
-    p = Path(path)
-    p.write_text(to_json(results), encoding="utf-8")
-    return str(p)
+    return write_text(path, to_json(results))
 
 
-def write_markdown(results: Sequence[LlmEvalResult], path: str) -> str:
+def write_markdown(results: Sequence[EvalResult], path: str) -> str:
     """Write Markdown report to ``path``. Returns the path."""
-    from pathlib import Path
-
-    p = Path(path)
-    p.write_text(to_markdown(results), encoding="utf-8")
-    return str(p)
+    return write_text(path, to_markdown(results))
 
 
-def summarize(result: LlmEvalResult) -> str:
+def summarize(result: EvalResult) -> str:
     """One-line summary for stdout / CI logs."""
     if result.suite == "tool_selection":
         return (

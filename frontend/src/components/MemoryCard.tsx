@@ -33,7 +33,8 @@ export default function MemoryCard({ memory, onDelete, isDeleting }: MemoryCardP
       ? memory.summary
       : '(无摘要)';
   const sourceType = typeof memory.source_type === 'string' ? memory.source_type : 'unknown';
-  const decay = typeof memory.decay_factor === 'number' ? memory.decay_factor : 1;
+  const recallCount =
+    typeof memory.recall_count === 'number' ? memory.recall_count : 0;
   const createdAt = typeof memory.created_at === 'string' ? memory.created_at : '';
   const rawId = memory.id;
   const id = rawId != null ? String(rawId) : '';
@@ -93,8 +94,8 @@ export default function MemoryCard({ memory, onDelete, isDeleting }: MemoryCardP
       {/* Metrics row */}
       <div className="mt-3 grid grid-cols-3 gap-2 text-xs">
         <div>
-          <p className="text-gray-400">Decay</p>
-          <p className="font-medium text-gray-700">{decay.toFixed(2)}</p>
+          <p className="text-gray-400">召回次数</p>
+          <p className="font-medium text-gray-700">{recallCount}</p>
         </div>
         <div>
           <p className="text-gray-400">创建时间</p>

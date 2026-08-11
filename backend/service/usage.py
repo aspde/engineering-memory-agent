@@ -114,7 +114,7 @@ def record_call(
     Best-effort and non-blocking: never raises, and appends a row even when
     token usage is missing (``total_tokens=0``) so the call count and latency
     are still observable.  When ``config.usage_enabled`` is false this is a
-    no-op (the in-memory ``/api/agent/usage`` counters are unaffected).
+    no-op.
 
     *attempts* is how many times the provider was actually hit before this
     outcome — 1 for a clean first try, >1 when tenacity retried transient

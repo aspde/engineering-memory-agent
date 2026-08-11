@@ -377,9 +377,8 @@ class TestPatrolConflictRoutes:
     @pytest.mark.asyncio
     async def test_resolve_keep_both_then_requeue_is_suppressed(self) -> None:
         """keep_both marks the pair arbitrated; re-queueing returns already_resolved."""
-        from backend.service.conflicts import (
-            persist_patrol_conflict,
-            resolve_patrol_conflict)
+        from backend.service.conflicts import persist_patrol_conflict
+        from backend.service.memory import resolve_conflict
 
         a_id, b_id, log_id = str(uuid4()), str(uuid4()), str(uuid4())
         await _insert_memory(a_id, "Use PostgreSQL for storage")
@@ -416,7 +415,7 @@ class TestPatrolConflictRoutes:
                 {"id": queued["id"]})
             await session.commit()
 
-        outcome = await resolve_patrol_conflict("keep_both", existing_id, peer_id, deferred)
+        outcome = await resolve_conflict("keep_both", existing_id, deferred, peer_id=peer_id)
         assert outcome["resolution"] == "keep_both"
 
         # Both memories still live → keep_both arbitration → re-queue suppressed.

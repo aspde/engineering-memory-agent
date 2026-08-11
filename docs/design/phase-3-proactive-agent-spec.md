@@ -1,10 +1,19 @@
 # Phase 3: 主动 Agent — 功能规格
 
+> **实现状态（2026-08）**：本 spec 是 Phase 3 的原始设计蓝图，正文保留设计时的意图。
+> 与当前代码的差异：
+> - 定时巡检 `daily` / `weekly` 已实现——weekly 内含全量矛盾扫描与过期记忆扫描（`contradictions` / `stale_memories` / `entity_coverage`），**不再有独立的 `contradiction_scan` 类型**；
+> - 事件驱动响应（CI 失败 / Jira 解决）从未接线，已在精简中移除（含对应 prompt）；
+> - 巡检输出修复重试（repair）已移除——输出不合 JSON 契约时直接记 `failed` 并保留原始输出；
+> - Slack 通知未实现，生产用飞书 webhook 推送；`notify_slack` tool 从未实现；
+> - 手动触发 `POST /api/patrol/trigger` 返回真实 `patrol_id`（异步运行）。
+> 当前 `patrol_type` 枚举为 `daily | weekly`。
+
 ## Problem Statement
 
 EMA 当前是完全被动的——用户发消息才动作，用户不发消息就静静等着。即使知识库已经积累了数百条记忆、连接器在持续接入外部事件、实体关系图谱已经形成，EMA 不会主动告诉团队任何事情。
 
-这导致三个盲区：一是**模式重复**——同样的故障模式可能在一段时间后重演，但直到有人手动搜索才会发现关联；二是**知识盲区**——团队不知道自己不知道什么，比如核心依赖 PostgreSQL 关联了 41 条记忆却没有一条关于备份恢复的；三是**知识腐化**——衰减的记忆没有人定期检查和清理，矛盾结论没有被发现和仲裁。
+这导致三个盲区：一是**模式重复**——同样的故障模式可能在一段时间后重演，但直到有人手动搜索才会发现关联；二是**知识盲区**——团队不知道自己不知道什么，比如核心依赖 PostgreSQL 关联了 41 条记忆却没有一条关于备份恢复的；三是**知识腐化**——过期（从未召回或久未召回）的记忆没有人定期检查和清理，矛盾结论没有被发现和仲裁。
 
 EMA 需要从"等你问"变成"主动告诉你"——在后台持续观察、关联、发现，在你还不知道有问题之前，告诉你哪里该看一眼。
 
@@ -26,7 +35,7 @@ EMA 需要从"等你问"变成"主动告诉你"——在后台持续观察、关
 
 5. As a team, I want a weekly deeper patrol that runs entity-level contradiction scanning — "Memory #47 and #89 about microservice splitting granularity have opposite conclusions and have never been flagged as a conflict" — so that unresolved disagreements surface without anyone manually comparing memories.
 
-6. As a team, I want the weekly patrol to include a decay health report — "23 memories have decayed to the retention floor (0.10), suggesting they are no longer relevant. 5 are candidates for archival" — so that the knowledge base stays healthy without manual curation.
+6. As a team, I want the weekly patrol to include a stale-memory report — "23 memories have never been recalled or not recalled for 90+ days, suggesting they are no longer relevant. 5 are candidates for archival" — so that the knowledge base stays healthy without manual curation.
 
 ### 事件驱动响应
 
@@ -42,7 +51,7 @@ EMA 需要从"等你问"变成"主动告诉你"——在后台持续观察、关
 
 11. As a team, I want patrol findings and event alerts pushed to a designated Slack channel, so that we receive insights without checking EMA's Web UI.
 
-12. As a team, I want the notification level to be configurable per finding type — pattern match = critical, knowledge gap = warning, decay cleanup = info — so that urgent findings don't get buried in low-priority noise.
+12. As a team, I want the notification level to be configurable per finding type — pattern match = critical, knowledge gap = warning, stale memory = info — so that urgent findings don't get buried in low-priority noise.
 
 13. As a team member, I want to be able to dismiss a finding — "I've seen this, don't notify again for this specific item" — so that acknowledged findings don't keep re-alerting.
 
@@ -70,7 +79,7 @@ EMA 需要从"等你问"变成"主动告诉你"——在后台持续观察、关
 |------|---------|-------------------|
 | 对话 | 用户发消息 | "回答用户问题，需要时搜索记忆" |
 | 每日巡检 | Cron 定时 | "扫描过去 24h 的新记忆，找出模式匹配、知识盲区、新实体" |
-| 每周巡检 | Cron 定时 | "扫描所有记忆的矛盾、衰减健康、实体覆盖度" |
+| 每周巡检 | Cron 定时 | "扫描所有记忆的矛盾、过期记忆（从未召回/久未召回）、实体覆盖度" |
 | 事件响应 | Webhook 触发 | "CI 构建失败，搜索相似历史故障，判断是否需要告警" |
 
 ### 调度器
@@ -132,7 +141,7 @@ notify_slack(channel: str, message: str, blocks: list[dict] | None)
 ```sql
 CREATE TABLE patrol_logs (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    patrol_type TEXT NOT NULL,        -- daily | weekly | event_driven | manual
+    patrol_type TEXT NOT NULL,        -- daily | weekly
     trigger TEXT NOT NULL,            -- cron | webhook | manual
     status TEXT NOT NULL DEFAULT 'running',  -- running | completed | failed
     findings JSONB,                   -- 结构化巡检结果
@@ -144,7 +153,7 @@ CREATE TABLE patrol_logs (
 
 ### API 新端点
 
-- `POST /api/patrol/trigger` — 手动触发巡检。body: `{"patrol_type": "daily" | "weekly" | "contradiction_scan", "scope": "all" | "entity:{name}"}`
+- `POST /api/patrol/trigger` — 手动触发巡检。body: `{"patrol_type": "daily" | "weekly", "scope": "all" | "entity:{name}"}`
 - `GET /api/patrol/logs` — 巡检历史记录列表（分页，最近 50 条）
 - `GET /api/patrol/logs/{id}` — 单次巡检详情（findings 全文）
 - `POST /api/patrol/findings/{id}/dismiss` — 忽略某个 finding

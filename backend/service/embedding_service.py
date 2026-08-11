@@ -408,9 +408,8 @@ def _get_or_create_provider() -> EmbeddingProvider:
                 "Embedding provider reports dimension %d but config/schema "
                 "assumes %d (model=%r) — the pgvector columns were built as "
                 "vector(%d), so embedding writes will fail. Align "
-                "EMBEDDING_MODEL with the schema, or switch models and let "
-                "init_db resize the columns, then re-embed with "
-                "`python -m scripts.reembed_embeddings`.",
+                "EMBEDDING_MODEL with the schema, or recreate the database "
+                "with `python -m scripts.recreate_db` and re-ingest.",
                 provider.dimension,
                 embedding.dimension,
                 embedding.model,

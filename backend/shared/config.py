@@ -299,25 +299,13 @@ class AppConfig:
     )
     # Auto-memory frequency control — each capture costs 3 LLM extractions
     # (summary + entities + relations) plus embedding and a similarity scan,
-    # so capture is throttled: a per-thread minimum interval, a per-thread
-    # lifetime cap, and a process-wide rolling-window cap (see the throttle
-    # helpers in ``backend.agent.nodes``).
+    # so capture is throttled by a per-thread minimum interval.  The per-thread
+    # lifetime cap and process-wide window cap this once had were cut: the
+    # interval alone bounds the steady-state rate, and ``write_memory``'s
+    # content-hash idempotency already makes exact repeats a no-op (see
+    # ``backend.agent.nodes``).
     auto_memory_min_interval: int = field(
         default_factory=lambda: int(os.getenv("AUTO_MEMORY_MIN_INTERVAL", "60"))
-    )
-    auto_memory_max_per_thread: int = field(
-        default_factory=lambda: int(os.getenv("AUTO_MEMORY_MAX_PER_THREAD", "10"))
-    )
-    auto_memory_max_per_window: int = field(
-        default_factory=lambda: int(os.getenv("AUTO_MEMORY_MAX_PER_WINDOW", "30"))
-    )
-    # When enabled (default), a turn that passes the cheap fast-path is judged
-    # by one cheap LLM call ("is this durable knowledge?") before extraction
-    # runs — replacing the keyword heuristic as the arbiter for borderline
-    # turns.  Set AUTO_MEMORY_LLM_GATE=false to fall back to the free keyword
-    # heuristic (zero LLM cost per turn, coarser).
-    auto_memory_llm_gate: bool = field(
-        default_factory=lambda: os.getenv("AUTO_MEMORY_LLM_GATE", "true").lower() == "true"
     )
     # When enabled, messages older than the context window are folded into a
     # running-summary SystemMessage instead of being dropped.  Enabled by
@@ -338,8 +326,7 @@ class AppConfig:
     # ── LLM usage tracing / cost persistence ────────────────────────
     # Every LLM call is recorded (in-memory buffer → batch INSERT into the
     # ``llm_usage`` table by a background flusher).  ``usage_enabled=false``
-    # disables persistence entirely (the buffer stops recording); the
-    # in-memory counters behind ``/api/agent/usage`` are unaffected.
+    # disables persistence entirely (the buffer stops recording).
     usage_enabled: bool = field(
         default_factory=lambda: os.getenv("USAGE_ENABLED", "true").lower() == "true"
     )
@@ -396,24 +383,6 @@ class AppConfig:
     )
     rate_limit_general_window_seconds: int = field(
         default_factory=lambda: int(os.getenv("RATE_LIMIT_GENERAL_WINDOW_SECONDS", "60"))
-    )
-    # ── LLM health alerting ──────────────────────────────────────────
-    # A periodic loop inspects a recent window of llm_usage for a high error
-    # rate, the in-memory structured-failure counters, and the primary LLM
-    # circuit breaker.  Crossing a threshold logs a WARNING; sending the alert
-    # to the team's 飞书 group is opt-in (ALERT_FEISHU_ENABLED=true reuses
-    # FEISHU_WEBHOOK_URL) — external notifications are never on by default.
-    alerts_enabled: bool = field(
-        default_factory=lambda: os.getenv("ALERTS_ENABLED", "true").lower() == "true"
-    )
-    alert_error_rate_threshold: float = field(
-        default_factory=lambda: float(os.getenv("ALERT_ERROR_RATE_THRESHOLD", "0.3"))
-    )
-    alert_check_interval_seconds: int = field(
-        default_factory=lambda: int(os.getenv("ALERT_CHECK_INTERVAL_SECONDS", "30"))
-    )
-    alert_feishu_enabled: bool = field(
-        default_factory=lambda: os.getenv("ALERT_FEISHU_ENABLED", "false").lower() == "true"
     )
     # ── Phase 3: proactive agent ───────────────────────────────────
     patrol_enabled: bool = field(
@@ -600,14 +569,6 @@ def validate_config() -> list[str]:
     if config.usage_buffer_max < 1:
         problems.append(
             f"USAGE_BUFFER_MAX={config.usage_buffer_max} must be >= 1"
-        )
-    if not 0 <= config.alert_error_rate_threshold <= 1:
-        problems.append(
-            f"ALERT_ERROR_RATE_THRESHOLD={config.alert_error_rate_threshold} must be in 0..1"
-        )
-    if config.alert_check_interval_seconds < 1:
-        problems.append(
-            f"ALERT_CHECK_INTERVAL_SECONDS={config.alert_check_interval_seconds} must be >= 1"
         )
 
     # LLM failover: an incomplete fallback config only fails on the first

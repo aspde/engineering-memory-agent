@@ -39,7 +39,7 @@
 
 **Chroma** — 未采用。Chroma 的开发者体验好（几行代码启动），但设计目标是原型验证而非生产持久化。EMA 从设计之初就以生产使用为目标，Chroma 的持久化机制和数据完整性保障不及 PostgreSQL。
 
-**Pinecone** — 未采用。SaaS 托管零运维，但有三个硬伤：(1) 数据在外部——EMA 的记忆是团队的私有知识资产，保存在外部服务上有合规风险；(2) 成本不可控——向量存储按 pod 计费，长期运行成本远高于自托管 PG；(3) 与业务数据分离——EMA 的记忆需要结构化字段（source_type、decay_factor、entities）和向量在同一个查询中，Pinecone 只能存向量+metadata，结构化查询能力弱。
+**Pinecone** — 未采用。SaaS 托管零运维，但有三个硬伤：(1) 数据在外部——EMA 的记忆是团队的私有知识资产，保存在外部服务上有合规风险；(2) 成本不可控——向量存储按 pod 计费，长期运行成本远高于自托管 PG；(3) 与业务数据分离——EMA 的记忆需要结构化字段（source_type、recall_count、entities）和向量在同一个查询中，Pinecone 只能存向量+metadata，结构化查询能力弱。
 
 **pgvector + Neo4j** — 已拒绝。详见 [ADR-005](./ADR-005-no-neo4j.md)。双写一致性负担、两套部署运维、两套查询语法，换不来可验证的用户价值。
 
@@ -79,7 +79,7 @@ ORDER BY embedding <=> :vec ::vector
 LIMIT :limit;
 ```
 
-**演进说明**：早期实施用 IVFFlat（lists=100），小语料上暴露了聚类依赖问题——数据量 < 千条时 lists 把探针散布到大量空聚类，召回率下降（见 seed-010 的教训）。已迁移到 HNSW（pgvector ≥ 0.5）：HNSW 无聚类质心依赖，小库也稳，且建索引用默认参数。迁移由 `init_db()` 启动时幂等执行：检测到旧 ivfflat 索引则一次性替换为 HNSW，之后为 no-op。`search_memories` 用两阶段召回——先按 HNSW 索引顺序取 `top_k × 8`（至少 50）候选窗口，再在 Python 侧按 `similarity × decay_factor` 重排——让索引扫描保持 `ORDER BY embedding <=> :vec` 的形式以命中 HNSW。
+**演进说明**：早期实施用 IVFFlat（lists=100），小语料上暴露了聚类依赖问题——数据量 < 千条时 lists 把探针散布到大量空聚类，召回率下降（见 seed-010 的教训）。已迁移到 HNSW（pgvector ≥ 0.5）：HNSW 无聚类质心依赖，小库也稳，且建索引用默认参数。基线迁移直接用 HNSW 建索引；历史 ivfflat 库开发期重建即可（`init_db` 不做运行时索引替换）。`search_memories` 单段按 HNSW 索引顺序取 `top_k`（索引只服务 `ORDER BY embedding <=> :vec` 的扫描），不再需要两段候选窗 + Python 重排——早期两段重排是配合「相似度 × decay_factor」加权排序，decay 已移除（见 decision-faq 第 7 节）。
 
 ### 检索模式
 
@@ -88,9 +88,9 @@ LIMIT :limit;
 | 管道 | 入口 | 流程 |
 |------|------|------|
 | Chunk 检索 | `retrieve(query)` | embed → vector_search(HNSW) → （可选 rerank） → 返回 |
-| Memory 检索 | `query_memories(query)` | embed → search_memories(decay_weighted) → （可选 rerank） → update_decay_batch → 返回 |
+| Memory 检索 | `query_memories(query)` | embed → search_memories(相似度) → （可选 rerank） → record_recalls → 返回 |
 
-两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../../tests/eval/reports/eval-report.md)。衰减更新为 `update_decay_batch`（单条 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数）。
+两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../../tests/eval/reports/eval-report.md)。召回统计为 `record_recalls`（单条 `UPDATE ... WHERE id = ANY(:ids)` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数），只作元数据、不参与排序。
 
 ### 写入时的向量操作
 
@@ -119,7 +119,7 @@ LIMIT 1;
 | HNSW 在极端高维大数据量下的内存占用 | 百万级向量时索引内存开销上升 | EMA 数据量（数千记忆 + 数万 chunks）远未触及；`search_memories` 两阶段召回（先 HNSW 取 `top_k×8` 候选再 Python 重排）兼顾质量与内存 |
 | 向量 + 结构化字段在同一行的存储压力 | memories 表行宽较大（summary + entities JSONB + relations JSONB + embedding + meta） | 当前行宽仍在 PG 合理范围内（单行 < 10KB）。未来若膨胀，entities/relations 移到独立表（Phase 1 已做） |
 | 无 GPU 加速 | BGE-M3 嵌入计算在 CPU 上运行 | BGE-M3 1024 维的单条嵌入耗时 150-230ms（CPU，locust 实测），批量嵌入合并降低开销 |
-| 向量维度假定为 1024 | 切换到不同维度的 embedding 模型需要 ALTER TABLE + 重建索引 | 1024 是 BGE-M3 的维度，由配置映射（见 `backend/shared/config.py`）。切换模型时 `init_db()` 检测维度不一致会自动迁移（清空向量列 + 重建 HNSW 索引，需重嵌） |
+| 向量维度假定为 1024 | 切换到不同维度的 embedding 模型需要重建数据库 | 1024 是 BGE-M3 的维度，由配置映射（见 `backend/shared/config.py`）。切换模型时 `init_db()` 检测维度不一致会启动失败，需 `python -m scripts.recreate_db` 重建后重摄取（自动迁移会清空向量列，故明确不做） |
 
 ### 不会做的事
 

@@ -12,7 +12,7 @@ Write Path:
 
 Read Path:
   Query → embed_query() → vector_search() → rerank() → assemble() → LLM
-  Query → query_memories() → decay_weighted_search → update_decay_batch() → rerank
+  Query → query_memories() → record_recalls() → rerank
 ```
 
 每步一个函数，没有 class wrapper，没有 LangChain retriever/chain。
@@ -77,27 +77,19 @@ extract_entities(content) ─┘
 
 检测到矛盾时，两种路径都进入人工处理（HITL），绝不静默丢弃：**agent 路径**通过 `interrupt()` 暂停对话等待选择；**webhook/连接器路径**没有交互会话，冲突内容落入 `pending_conflicts` 队列（保存 `_deferred` 载荷），由人通过 `GET/POST /api/conflicts` 用相同的四种选项（keep_existing / overwrite / merge / keep_both）经同一个 `resolve_conflict()` 解决。队列对同一冲突（同一 `existing_id` + 同一内容哈希）只保留一条 pending 记录——webhook 至少一次投递的重放不会堆叠重复行；已解决的行离开去重范围，同类内容再次出现会正常重新入队。
 
-**巡检矛盾**是第三条来源（`conflict_type='patrol'`）：每周巡检的全量矛盾扫描发现两条**都已在库**的记忆（A、B）结论相反，但写入时检测没拦住（embedding 距离远、或检测上线前就存在的旧矛盾）。这类矛盾由 Patrol 页手动逐条「转入仲裁」（入队成功自动忽略该 finding），入队到同一个 `pending_conflicts` 队列，`peer_id` 列记录被放弃方（B），`_deferred` 载荷把 B 的完整内容作为"新侧"。解析走独立的 `resolve_patrol_conflict()`——四选项语义重解释为「保留侧 A + 被放弃方 B」：keep_existing / overwrite / merge 都软删 B（`memories.deleted_at`），B 从检索与巡检中消失，矛盾不再重报；keep_both 不改任何记忆行，靠队列里已 resolved 的记录抑制重复入队。`resolve_pending_conflict` 按 `conflict_type` 分派两条流水线，仍是同一个裁决出口。
+**巡检矛盾**是第三条来源（`conflict_type='patrol'`）：每周巡检的全量矛盾扫描发现两条**都已在库**的记忆（A、B）结论相反，但写入时检测没拦住（embedding 距离远、或检测上线前就存在的旧矛盾）。这类矛盾由 Patrol 页手动逐条「转入仲裁」（入队成功自动忽略该 finding），入队到同一个 `pending_conflicts` 队列，`peer_id` 列记录被放弃方（B），`_deferred` 载荷把 B 的完整内容作为"新侧"。解析走与 ingestion 相同的 `resolve_conflict()`（以 `peer_id=B` 传入）——四选项语义重解释为「保留侧 A + 被放弃方 B」：keep_existing / overwrite / merge 都软删 B（`memories.deleted_at`），B 从检索与巡检中消失，矛盾不再重报；keep_both 不改任何记忆行，靠队列里已 resolved 的记录抑制重复入队。`resolve_pending_conflict` 按 `peer_id` 是否有值进入同一流水线的两个语义，仍是同一个裁决出口。
 
 已仲裁的巡检对子（`status='resolved'`）可通过 `GET /api/conflicts?status=resolved&conflict_type=patrol` 查看台账，误选的 keep_both 可用 `POST /api/conflicts/{id}/reopen` 重置回待处理重新仲裁——仅 patrol 冲突可重新打开，且被放弃方 B 仍存活时才允许（keep_existing / overwrite / merge 已软删 B，重开会在缺失记忆上仲裁，故拒绝）。
 
-### 4. 艾宾浩斯遗忘衰减
+### 4. 召回统计（替代原艾宾浩斯衰减）
 
-衰减因子是一条**时间连续曲线**，检索时实时计算，不依赖存储快照：
+记忆检索按**纯相似度**排序；每次检索会把命中的记忆记一次召回（`recall_count` + 1、`recalled_at = NOW()`），作为**元数据**而非排序信号。
 
-```
-R = e^(-t / S)
-t = 距上次召回的小时数（now() - recalled_at，实时）
-S = 1 + (recall_count + 1) × 2
-```
+原实现曾用艾宾浩斯遗忘曲线把 `decay_factor` 乘进相似度排序，但 decay A/B 实测（`tests/eval/reports/decay_ab_report.md`）显示衰减加权 recall@5 0.667、无衰减 0.900——唯一的测量数据表明衰减让检索变差，且其前提「近期/高频=相关」建立在合成老化分布上、没有真实语料支撑。调参三轮（S=2x→8x→12x）本质是把曲线调得越来越接近 no-op。故从排序路径移除衰减，保留召回计数作访问历史。
 
-> recall_count 是召回前的存储值，`+1` 得到召回后的计数（post-recall 约定，`compute_decay_factor` / `update_decay_batch` / `search_memories` 三处调用点统一）。
+`search_memories(query_vector)` 单段 HNSW 按 `embedding <=> :vec` 直接返回相似度排序，不再需要两段检索（候选窗 + Python 按 `similarity × decay_factor` 重排）。`query_memories(query)` 封装完整管道：embed → 纯相似度搜索 →（默认无 rerank，cross-encoder/LLM 为 opt-in）→ `record_recalls()`（单条 `UPDATE ... WHERE id = ANY(:ids)` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；从未召回的记忆记首次召回）→ 返回。
 
-- 新记忆 `decay_factor = 1.0`
-- 频繁召回的记忆衰减慢
-- 长期未召回的记忆自然沉底
-
-`search_memories(query_vector)` 在 SQL 里用 `recalled_at`/`recall_count` 实时算 `decay_factor`，乘以相似度加权排序——排名用的是「当前时刻」的衰减，而非上次召回时的快照值（快照会在两次召回之间冻结记忆的排名）。存储列 `decay_factor` 仍保留（由 `update_decay_batch` 写入，供展示/兼容），排序与返回都用实时值。`query_memories(query)` 封装完整管道：embed → 衰减加权搜索 →（默认无 rerank，cross-encoder/LLM 为 opt-in）→ `update_decay_batch()`（单条原子 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；`recalled_at IS NULL` 的从未召回记忆也会记首次召回，因子为 1.0）→ 返回。
+记忆「是否过期」由人/LLM 基于召回历史判断：`search_memories_tool` 的展示行带 `recalls` 与 `last_recalled`，每周 patrol 的过期记忆扫描让 LLM 直接读这两个字段（从未召回或久未召回 → 归档候选），不再依赖机器算出的衰减因子。
 
 ### 5. Chunk 策略
 
@@ -139,17 +131,23 @@ S = 1 + (recall_count + 1) × 2
 | entities | JSONB | `[{name, type}]` |
 | relations | JSONB | `[{from, to, type}]` |
 | embedding | vector(N) | 摘要向量，维度同 embedding 配置 |
-| decay_factor | FLOAT | 艾宾浩斯衰减因子缓存快照（检索时实时计算，见 §4） |
+| decay_factor | FLOAT | 历史遗留列（默认 1.0）：原衰减因子快照，现已无任何代码维护，保留仅为不迁移历史行 |
 | recalled_at | TIMESTAMPTZ | 最后一次被检索的时间 |
 | recall_count | INT | 累计检索次数，默认 0 |
 | meta | JSONB | 冲突标记、补充关联等 |
 | created_at | TIMESTAMPTZ | now() |
 
-### 维度迁移（切换 embedding 模型）
+### 维度（切换 embedding 模型）
 
-`embedding` 列维度由 `config.embedding.dimension` 决定（模型名 → 已知维度映射，见 `backend/shared/config.py`），不再硬编码 1024。启动时 `init_db()` 会检测列的实际维度；与配置不一致时自动迁移：清空 `embedding` 列 → `ALTER COLUMN ... TYPE vector(N)` → 重建 hnsw 索引。旧库的 ivfflat 索引也会在 `init_db()` 里被一次性替换为 hnsw。
+`embedding` 列维度由 `config.embedding.dimension` 决定（模型名 → 已知维度映射，见 `backend/shared/config.py`），不再硬编码 1024。schema 由 Alembic 迁移统一管理（baseline 用 1024 作占位维度），`init_db()` 启动时**校验**实时列维度与配置维度是否一致：不一致直接启动失败（错误信息给出对齐 `EMBEDDING_MODEL` 或重建库两条出路），绝不自动清空。
 
-pgvector 的向量只能放进「维度 ≤ 自身」的列，改大改小都要求列先为空；填充/截断会产生与文本不符的垃圾向量，所以迁移选择清空。向量是派生数据，清空后需从存储文本重嵌：
+选择「校验而非自动迁移」：pgvector 的向量只能放进「维度 ≤ 自身」的列，改大改小都要求列先为空，所以自动迁移的本质是清空整个向量列——破坏性操作不该在每次启动的静默路径上发生。对开发工具，换模型 = 重建库（数据可重摄取）：
+
+```bash
+python -m scripts.recreate_db        # 清空 public schema + alembic upgrade head
+```
+
+若出现 `embedding IS NULL` 的行（写入中断或手动清空后），可用重嵌脚本补齐：
 
 ```bash
 python -m scripts.reembed_embeddings --dry-run   # 先查看有多少行待重嵌
@@ -171,9 +169,9 @@ backend/
     chunk.py          ← chunk_text(), chunk_code()
     extraction.py     ← extract_summary(), extract_entities(), extract_relations(), extract_memory()
     rerank.py         ← rerank_cross_encoder(), rerank_llm()
-    retrieval.py      ← write_chunks(), vector_search(), retrieve(), query_memories(), assemble()
+    recall.py         ← record_recalls() 批量记召回（N+1 修复）
+    retrieval.py      ← write_chunks(), vector_search(), search_memories(), query_memories(), assemble()
     memory.py         ← write_memory() + 四级相似度判断 + merge/conflict/supplement
-    decay.py          ← compute_decay_factor(), update_decay_batch(), search_memories()
     ingestion.py      ← ingest_repo() via pygit2
 ```
 
