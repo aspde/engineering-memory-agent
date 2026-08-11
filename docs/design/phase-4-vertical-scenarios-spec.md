@@ -28,7 +28,7 @@ Phase 4 的目标不是增加新能力，而是**为高频场景预组装解决�
 
 6. As a developer reviewing a PR, I want EMA to analyze the changed files and tell me what I should watch out for, based on historical faults and decisions associated with those files, so that I don't miss a known risk that the author and I may have both forgotten.
 7. As a developer reviewing a PR, I want EMA to flag when the changed file has been involved in past incidents — "⚠️ DBConfig.java: changed the connection pool config — this file was involved in 2 production incidents in the last 6 months" — so that high-risk changes get extra scrutiny.
-8. As a PR author, I want EMA to check whether the PR's stated goal (from the PR description) aligns with the historical decision record — "this PR proposes a microservice split, but we have ADR-007 documenting a decision to consolidate" — so that contradictions with past decisions are surfaced before merge.
+8. As a PR author, I want EMA to check whether the PR's stated goal (from the PR description) aligns with the historical decision record — "this PR proposes extracting the patrol scheduler into a separate service, but ADR-007 documents keeping it embedded in the main process" — so that contradictions with past decisions are surfaced before merge.
 9. As a developer, I want the review context to be delivered as a comment on the PR (via GitHub/GitLab API) or as a Slack message, so that I get it in my existing workflow without switching to EMA's Web UI.
 
 ### 新人 Onboarding 向导

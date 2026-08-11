@@ -158,19 +158,19 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 | 相似度 | 行为 | 实现 |
 |--------|------|------|
-| ≥ 0.92 | LLM 合并摘要 + 合并实体关系 | `_merge_memory()` |
-| 0.75–0.92 | LLM 检测矛盾 → 矛盾走 HITL 仲裁，不矛盾补充关联 | `_detect_conflict()` + `_mark_conflict()` |
-| 0.60–0.75 | 插入新记忆，meta 标记 `supplements` 关联到旧记忆 | `_supplement_memory()` |
+| ≥ 0.85 | LLM 合并摘要 + 合并实体关系 | `_merge_memory()` |
+| 0.72–0.85 | LLM 检测矛盾 → 矛盾走 HITL 仲裁，不矛盾补充关联 | `_detect_conflict()` + `_mark_conflict()` |
+| 0.60–0.72 | 插入新记忆，meta 标记 `supplements` 关联到旧记忆 | `_supplement_memory()` |
 | < 0.60 | 全新插入 | `_insert_memory()` |
 
 **关键工程细节**：
-- **阈值调参**：0.92 是实测"几乎是同一条"的边界，0.75 是"可能相关"的边界，0.60 是"勉强沾边"的边界
+- **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `tests/eval/reports/threshold_calibration_report.md`）
 - **容错降级**：LLM 合并失败保留原摘要，冲突检测失败假定无冲突——不阻塞写入
 - **冲突解决 4 选项**：keep_existing / overwrite / merge / keep_both，由 `resolve_conflict()` 实现
 - **冲突走 HITL**：`check_conflict_node` 检测到 conflict action 后 `interrupt()`，等用户选
 
 **追问预案**：
-- Q：为什么不用 LLM 直接判断要不要合并？→ A：LLM 判断成本高且不稳定。先用向量相似度做粗筛（便宜、稳定），只在边界区间（0.75-0.92）才调 LLM 做精细判断。这样 90% 的写入只需要一次向量搜索，不用调 LLM。
+- Q：为什么不用 LLM 直接判断要不要合并？→ A：LLM 判断成本高且不稳定。先用向量相似度做粗筛（便宜、稳定），只在边界区间（0.72-0.85）才调 LLM 做精细判断。这样 90% 的写入只需要一次向量搜索，不用调 LLM。
 - Q：冲突检测的 prompt 长什么样？→ A：很简洁——给 LLM 两个 summary，让它返回 `{"conflict": true/false}` 的 JSON。强制 JSON 输出便于解析，失败时假定无冲突。
 
 ### 难点 2：艾宾浩斯衰减加权检索
@@ -201,7 +201,7 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 
 **追问预案**：
 - Q：衰减会不会让重要但少问的记忆消失？→ A：不会删除，只是排序靠后。生产入口 `query_memories` 默认 `threshold=0.3` 作为垃圾过滤门槛（作用于原始相似度、衰减加权之前）——低于 0.3 的记忆不进候选池，衰减救不回；但 0.3 以上、只是排序靠后的记忆，精确查询时向量相似度高仍能召回。decay 层 `search_memories` 自身默认 `threshold=0.0`
-- Q：S 的公式怎么来的？→ A：参考艾宾浩斯原始强度模型，简化为 `1 + (recall_count + 1) × 2`（`recall_count` 是召回前的存储值，`+1` 得到召回后的计数）。系数 2 是调出来的——让"被召回过 5 次"的记忆强度变成 13（下次召回时 `S = 1 + 6×2`），衰减速度与新记忆差一个数量级，这个梯度比较合理。
+- Q：S 的公式怎么来的？→ A：参考艾宾浩斯原始强度模型，简化为 `1 + (recall_count + 1) × 12`（`recall_count` 是召回前的存储值，`+1` 得到召回后的计数）。系数最初是 2，但 decay A/B 显示 `×2` 半衰期太短、把低频相关旧记忆整体埋掉（合成老化分布下 recall@5 只有 0.367）；调大到 12 并加 0.10 保留下限后同分布重测 recall 回升到 0.667，保留"过时沉底"偏好的同时不埋掉旧知识（见 decay_ab_report.md）。
 - Q：召回时同步更新 decay 会不会拖慢检索？→ A：会有一点。`update_decay_batch` 是一条原子 `UPDATE ... RETURNING`，对召回的 top_k 条批量更新（替代了早期逐条 UPDATE 的 N+1 写法）。实测 top_k=5 时增加约 20ms，可接受。未来可以改成异步队列。
 
 ### 难点 3：双 HITL 卡点的 LangGraph 实现
@@ -250,12 +250,13 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 | 检索延迟（稳态） | ~190ms（hybrid 无 rerank：embed + sparse + sort） | tests/eval 实测（hybrid:norank@k5 190ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
 | cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | tests/eval 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
 | 代码量 | backend 13916 行 + agent 2497 行（纯 Python，无前端） | wc -l |
-| 测试覆盖 | 1293 测试用例 | pytest --collect-only |
+| 测试覆盖 | 1416 测试用例 | pytest --collect-only |
 | Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875 | run_task_eval 8 任务实测（DeepSeek，deterministic judge，2026-08-09） |
 | Agent 任务轨迹质量 | groundedness 1.000 / citation 0.875 / **0 执行错误**；unexpected_rate 0.375 暴露过度调用 | 同上次运行，详见 [llm-eval.md](llm-eval.md) |
 | 日均检索次数 | [待生产部署后统计] | — |
 | Agent 单轮平均 tool 调用 | 2.6 次（任务级实测，task 轨迹均值） | run_task_eval 8 任务 n_steps 均值 |
-| 对话 P95 延迟 | [待生产部署后统计] | — |
+| 对话 P95 延迟 | **73.6s（10 轮真实对话实测，P50 43.2s / mean 35.9s）** | tests/perf/measure_chat_p95.py（2026-08-11，DeepSeek deepseek-v4-flash + 本地 BGE-M3；主要耗时在每轮约 19 次 rerank_llm 约 40s） |
+| 单轮对话 token / 成本 | **≈28.6k tokens/轮 ≈¥0.06**（10 轮合计 285.9k tokens / 估 $0.081） | 同上；成本大头 rerank_llm 75.6k + agent_chat 165.8k（含 144k cache_read 折扣价，见 [usage.py](../../backend/service/usage.py) `estimate_cost`） |
 | 项目周期 | [需要你补充：如 3 个月，端到端主导] | — |
 
 **任务级评估设计**（面试加分点，Agent 岗位对口）：8 个真实多步任务驱动**完整 Agent 图**（ReAct 循环 + 真实工具执行 + HITL 自动放行），测的不是单次决策而是整条轨迹——`completed`（调齐必备工具 + 实质答案）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）。HITL 自动放行是为了隔离"人的决策"与"Agent 能力"。**实测最有价值的不是分数，而是它暴露了组件级评测看不到的轨迹级问题**：DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了 4 次），概念查询甚至撞 max_steps——`unexpected_rate 0.375` 是 completed 掉到 0.5 的主因，改进方向是强化工具描述边界与轨迹节流。这套评估还顺带抓出并修复了一个生产 HITL 正确性 bug（拒绝审批后写操作仍被静态边路由执行），见 [llm-eval.md](llm-eval.md) 末尾。
@@ -312,7 +313,7 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 │  记忆层 (自实现 service 函数, 非 LangChain)          │
 │  写: extract → embed → 四级相似度 → merge/conflict/insert │
 │  读: embed → 衰减加权搜索 → rerank(cross-encoder/LLM 默认关) │
-│  衰减: R=e^(-t/S), S=1+(recall+1)×2                        │
+│  衰减: R=max(e^(-t/S),0.1), S=1+(recall+1)×12                │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
@@ -333,8 +334,8 @@ S = 1 + (recall_count + 1) × 2   (相对强度)
 
 | 高危追问 | 准备要点 |
 |---------|---------|
-| "四级相似度阈值怎么定的？" | 诚实口径：0.92/0.75/0.60 是初始拍板值，"实测调参"的说法不成立——我没有做过相似度分布统计来校准它，测试覆盖了分级逻辑但没覆盖阈值在真实 embedding 分布下的合理性。改进方案是收集真实摘要对画相似度直方图重新标定（见 adversarial-review-evidence P0-6） |
-| "衰减公式为什么是这个？" | 艾宾浩斯原始模型简化，`S=1+(recall+1)×2`（post-recall 约定，三处调用点统一）；系数 2 是拍板值。补充说明"从未召回的记忆按 created_at 衰减"的设计（否则从不使用的旧记忆永不沉底） |
+| "四级相似度阈值怎么定的？" | 已标定：收集三类摘要对的相似度分布（同义改写 0.84-0.97 / 同类 ≤0.79 / 异类 ≤0.72），发现旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测；0.85 是分离点，已改 MERGE 0.85 / CONFLICT 0.72（见 threshold_calibration_report.md）。诚实边界：8 对改写样本小，真实生产分布待部署后确认 |
+| "衰减公式为什么是这个？" | 艾宾浩斯简化 `R = max(e^(-t/S), 0.10)`，`S=1+(recall+1)×12`（post-recall 约定，三处调用点统一）。**参数经 decay A/B 校准**：原 `×2` 半衰期太短，合成老化分布下 recall 0.367；调 `×12` + 0.10 floor 后 0.667，保留"过时沉底"偏好（见 decay_ab_report.md）。另说明"从未召回按 created_at 衰减"（否则旧记忆永不沉底） |
 | "评估数字 1.0 是自证吧？" | 主动认 + 给诚实口径：主评估集 30 条**默认是确定性纯子串基线**（recall 0.90 / MRR 0.84，无自证）；语义通道是显式 opt-in（救回 3/30 → 1.00/0.94，用被评测模型自评故非默认）；真实判别力看 27 条陷阱集——纯向量综合通过仅 59.3%、11 条陷阱压过目标。**已用这个集落地改进**：bounded cross-encoder top-3 重排提至 81.5%（默认关、显式启用），排除 query 重写/hybrid（会放大表层词问题） |
 | "为什么不用 LangChain Agent？" | 黑盒 + HITL 控制弱 + 调试代价 |
 | "pgvector 性能不行吧？" | 万级数据 hnsw 够用，讲拐点 |

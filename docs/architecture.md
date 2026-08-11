@@ -147,6 +147,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 - **Agent 层**：交互式并发槽位占用 gauge + 超 `MAX_AGENT_CONCURRENCY` 的 503 拒绝计数（`agent_service.py`）；每次 chat 完成记录 ReAct 步数分布（`agent_routes.py`）——**task eval 测到的过度调用信号在产线持续可见**。
 - 所有记录函数在 `config.metrics_enabled` 关闭时 no-op、异常吞掉，绝不阻塞/拖垮热路径；测试用 `reset_runtime_metrics()` 隔离。
 - 与 `llm_usage` 的分工：**usage 表回答"花了多少钱、哪次调用贵"（历史查询）；Prometheus 回答"现在健不健康、慢在哪、并发满没满"（实时时序）**。二者由同一批 provider 打点驱动，互不依赖。
+- **采集闭环已落地**（compose）：`prometheus` 服务每 15s 抓取 `/metrics`，`grafana` 服务渲染 "EMA — Runtime Health" 看板（9 面板，见 [deployment.md](./deployment.md) Monitoring）。当前为观测/可视化，Prometheus 告警规则 / Alertmanager 尚未配置。
 
 ### Embedding
 
@@ -169,8 +170,8 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 - **文档索引与检索**：分块 → 嵌入 → pgvector，双 reranker（cross-encoder / LLM）
 - **三阶段记忆提取**：摘要 + 实体并行提取 → 关系提取
-- **四级相似度去重**：≥0.92 合并，0.75–0.92 冲突检测，0.60–0.75 补充关联，<0.60 新插入
-- **艾宾浩斯遗忘衰减**：`R = e^(-t/S)`，召回时自动更新
+- **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `tests/eval/reports/threshold_calibration_report.md`）
+- **艾宾浩斯遗忘衰减**：`R = max(e^(-t/S), 0.10)`，`S = 1 + (recall+1)·12`，召回时自动更新（参数经 decay A/B 校准，见 `tests/eval/reports/decay_ab_report.md`）
 
 ### Agent
 

@@ -201,7 +201,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 
 **追问预案**：
 - Q：LLM 不按格式输出怎么办？→ A：`json.loads` 失败走 except，假定无冲突。这是"fails safe"原则——宁可漏报冲突也不要阻塞写入
-- Q：为什么不用 function calling 强制结构化？→ A：可以，但冲突检测频率不高（只在 0.75-0.92 区间），简单 prompt + JSON 解析够用
+- Q：为什么不用 function calling 强制结构化？→ A：提取侧的 entity/relation 已经用函数调用通道（enum 生成期约束 + 降级 chat_structured）；冲突检测频率不高（只在 0.72-0.85 区间），走结构化 JSON 够用
 
 ### Q4.2 三阶段提取的 prompt 怎么设计的？
 
@@ -261,7 +261,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 ### Q5.4 LLM 成本怎么控制？
 
 **答题要点**：
-1. **粗筛省 LLM**：90% 写入只走向量搜索（便宜），只在 0.75-0.92 边界区间才调 LLM 做冲突检测
+1. **粗筛省 LLM**：90% 写入只走向量搜索（便宜），只在 0.72-0.85 边界区间才调 LLM 做冲突检测
 2. **双 reranker**：默认关闭（opt-in）——小语料下 cross-encoder rerank 实测掉 recall 且慢 ~90 倍；启用时优先本地 cross-encoder（零 API 成本），需要精细语义判断才走 LLM rerank
 3. **Provider 切换**：DeepSeek 便宜，Claude 贵但质量高，按场景配
 4. **max_steps 限制**：防止 Agent 无限调 tool 烧 token
@@ -352,8 +352,8 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 |------|---------|
 | BGE-M3 维度？ | 1024 |
 | pgvector 索引？ | hnsw + cosine_ops |
-| 衰减公式？ | R=e^(-t/S), S=1+(recall+1)×2 |
-| 四级阈值？ | 0.92合并 / 0.75冲突 / 0.60关联 / <0.60新增 |
+| 衰减公式？ | R=max(e^(-t/S),0.1), S=1+(recall+1)×12 |
+| 四级阈值？ | 0.85合并 / 0.72冲突 / 0.60关联 / <0.60新增 |
 | Agent 几个节点？ | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |
 | 几个 HITL 卡点？ | 2 个：写前审批 + 冲突仲裁 |
 | Agent 任务级指标？ | 8 任务 completed 0.5 / tool_recall 0.94 / grounded 1.0（过度调用是短板） |

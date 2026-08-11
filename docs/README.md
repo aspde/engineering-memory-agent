@@ -12,6 +12,7 @@
 | [deployment.md](deployment.md) | Docker Compose 部署与运行配置 |
 | [design/domain-model.md](design/domain-model.md) | 领域模型：核心概念、实体关系、演进路线 |
 | [decisions/ADR-006-extension-roadmap.md](decisions/ADR-006-extension-roadmap.md) | 四阶段扩展路线图 |
+| [decisions/ADR-007-patrol-in-process-scheduler.md](decisions/ADR-007-patrol-in-process-scheduler.md) | 巡检调度器内嵌主进程，不引入任务队列 |
 | [design/phase-1-entity-graph-spec.md](design/phase-1-entity-graph-spec.md) | Phase 1 Spec: 知识图谱化 |
 | [design/phase-2-connectors-spec.md](design/phase-2-connectors-spec.md) | Phase 2 Spec: 多源连接器 |
 | [design/phase-3-proactive-agent-spec.md](design/phase-3-proactive-agent-spec.md) | Phase 3 Spec: 主动 Agent |

@@ -56,26 +56,26 @@
 
 **现状**：已补跑生产 memory 路径报告（[memory_path_report.md](../../tests/eval/reports/memory_path_report.md)），ema-deep-dive 成果表注明路径口径。
 
-### 🗣 P0-6 "四级阈值 0.92/0.75/0.60 实测调参"无任何证据
+### ✅ P0-6 "四级阈值 0.92/0.75/0.60 实测调参"无任何证据
 
 **证据**：全仓库（docs/tests/eval）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
 
-**诚实评估**：阈值是拍板定的初始值，非实测调参——未校准是已知边界，改进方案是收集真实摘要对画相似度直方图重新标定。**不要硬辩**，诚实承认 + 三段式（诚实承认 + 改进方案 + 未做的边界）。
+**现状（已标定）**：`tests/eval/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**诚实边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 1（四级相似度阈值怎么定的？）
+→ 应答口径见 [script-cards.md](./script-cards.md)：必背 1（已更新为标定口径）。
 
 ### ✅ P0-7 核心卖点与实现失配（4 处，深挖必露馅）
 
 | # | 文档宣称 | 代码实际（证据） |
 |---|---------|---------|
-| 7a | 衰减公式 `S=1+recall×2` | 实际 `S=1+(recall+1)×2`（`decay.py:70,103-111`），排序用 post-recall 强度（`decay.py:190-192`） |
+| 7a | 衰减公式 `S=1+recall×2` | 实际 `S=1+(recall+1)×2`（`decay.py:70,103-111`），排序用 post-recall 强度（`decay.py:190-192`）。**2026-08-11 再改**：A/B 校准后 `S=1+(recall+1)×12` + 0.10 floor（`decay.py` 常量），文档已同步 |
 | 7b | "从未召回的记忆自然沉底" | **从未召回的记忆 `decay_factor` 恒为 1.0 永不衰减**（`decay.py:56-57` 在 `recalled_at is None` 时早退）——真设计漏洞 |
 | 7c | "默认 cross-encoder rerank" | 生产 `retrieve()/query_memories()` 全默认 `use_cross_encoder=False`，568M rerank 模型生产零调用（`retrieval.py:395-430,744-778`） |
 | 7d | "threshold 0.0 全部进候选池" | 默认 `threshold=0.3` 且作用于**原始相似度、衰减之前**（`retrieval.py:686`；`decay.py:172`） |
 
-**现状**：文档已与代码一致（公式/rerank/threshold 改口）；7b 的"从未召回永不衰减"已修（时间基准 `COALESCE(recalled_at, created_at)`，见 `decay.py`）。
+**现状**：文档已与代码一致（公式/rerank/threshold 改口）；7b 的"从未召回永不衰减"已修（时间基准 `COALESCE(recalled_at, created_at)`，见 `decay.py`）；7a 公式参数已随 A/B 校准同步。
 
-→ 通用口径见 [script-cards.md](./script-cards.md)：补充 17（衰减公式和"沉底"卖点对得上吗？）——主动分级：哪些是有意取舍（rerank 关闭有 A/B 数字）、哪些没校准（阈值）、哪些文档没同步（公式）。
+→ 通用口径见 [script-cards.md](./script-cards.md)：补充 17（衰减公式和"沉底"卖点对得上吗？）——主动分级：哪些是有意取舍（rerank 关闭有 A/B 数字）、哪些已标定（四级阈值 0.85/0.72 有数据）、哪些文档同步过（公式）。
 
 ### ✅ P0-8 分块对中文无感知，"不截断语义单元"对中文是假的
 
@@ -215,7 +215,7 @@
 
 ### 🗣 P2-13 无团队协作背书 + 无真实用户
 
-**证据/策略**（README.md 和 self-introduction.md 已备）：不强调"独立完成"，改讲"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1293 测试）。**必须补**：每个数字要有真实来源（QPS 4.8、记忆条数、token 成本），并准备好"1293 个测试没有 code review 怎么保证质量"的答案。
+**证据/策略**（README.md 和 self-introduction.md 已备）：不强调"独立完成"，改讲"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1416 测试）。**必须补**：每个数字要有真实来源（QPS 4.8、记忆条数、token 成本），并准备好"1416 个测试没有 code review 怎么保证质量"的答案。
 
 → 应答口径见 [script-cards.md](./script-cards.md)：必背 10。
 

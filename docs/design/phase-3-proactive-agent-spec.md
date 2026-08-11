@@ -26,7 +26,7 @@ EMA 需要从"等你问"变成"主动告诉你"——在后台持续观察、关
 
 5. As a team, I want a weekly deeper patrol that runs entity-level contradiction scanning — "Memory #47 and #89 about microservice splitting granularity have opposite conclusions and have never been flagged as a conflict" — so that unresolved disagreements surface without anyone manually comparing memories.
 
-6. As a team, I want the weekly patrol to include a decay health report — "23 memories have decayed below 0.01, suggesting they are no longer relevant. 5 are candidates for archival" — so that the knowledge base stays healthy without manual curation.
+6. As a team, I want the weekly patrol to include a decay health report — "23 memories have decayed to the retention floor (0.10), suggesting they are no longer relevant. 5 are candidates for archival" — so that the knowledge base stays healthy without manual curation.
 
 ### 事件驱动响应
 
@@ -210,7 +210,8 @@ CREATE TABLE patrol_logs (
 
 ## Further Notes
 
-- 本 spec 对应 [ADR-006](./decisions/ADR-006-extension-roadmap.md) 的 Phase 3
+- 本 spec 对应 [ADR-006](../decisions/ADR-006-extension-roadmap.md) 的 Phase 3
+- 调度器实现决策（内嵌主进程、不引入 APScheduler / Celery）见 [ADR-007](../decisions/ADR-007-patrol-in-process-scheduler.md)
 - 主动 Agent 的价值严重依赖 Phase 1（实体归一化）和 Phase 2（多源数据持续输入）。没有前两个 Phase，主动 Agent 的眼界太窄，发现不了有价值的东西
 - 巡检频率初始设置为：每日（早 8:00 扫前 24h）+ 每周（周一早 9:00 全量扫描）。这些是默认值，通过环境变量覆盖
 - 巡检结果中的"模式匹配"阈值 (0.85) 是起点——上线后根据误报率调整

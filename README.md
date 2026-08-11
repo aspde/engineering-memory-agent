@@ -60,7 +60,7 @@ ema/
 ├── tests/              # unit / integration / api
 ├── docs/               # 设计文档 & ADR
 ├── .claude/rules/      # Claude Code 规则
-├── docker-compose.yml  # PostgreSQL + pgvector
+├── docker-compose.yml  # PostgreSQL + pgvector + 备份 + Prometheus/Grafana
 ├── .env                # 环境变量
 └── requirements.txt
 ```

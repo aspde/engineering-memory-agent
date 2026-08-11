@@ -108,6 +108,8 @@ LIMIT 1;
 
 四级阈值：≥0.92 合并、0.75-0.92 冲突检测、0.60-0.75 补充关联、<0.60 新插入。全部在 SQL 层面完成，不需要应用层后处理。
 
+> **2026-08-11 更正**：阈值已标定调整（[threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)）——0.92 高到同义改写对一半漏 merge，改后为 ≥0.85 合并、0.72-0.85 冲突检测、0.60-0.72 补充关联、<0.60 新插入（`backend/service/memory.py`）。本条保留原始决策值供追溯。
+
 ## Trade-offs & Limitations
 
 ### 已知限制

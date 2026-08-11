@@ -277,6 +277,24 @@ python -m tests.eval.run_task_eval --validate-only
 ② 轨迹级节流——检索结果已覆盖提问就停手；③ max_steps 已兜底，但 5 步对概念
 查询仍偏松。
 
+### 锁死 LLM rerank 后的复测（2026-08-11）
+
+对话 P95 分析（`measure_chat_p95.py`）发现每轮 ~19 次 `rerank_llm`（模型自主把
+`use_llm_rerank=True` 传给检索工具，占约 40s/轮）。把三个检索工具 schema 里的
+`use_llm_rerank` 参数移除后复测（`tests/eval/reports/task_eval_norerank_report.md`）：
+
+| 指标 | 2026-08-09 baseline | 锁死 rerank 后 | Δ |
+|------|--------------------|----------------|-----|
+| `completed` | 0.500 | **0.500** | 持平 |
+| `tool_recall` | 0.938 | 0.812 | -0.13（1 个任务波动，8 任务小样本） |
+| `within_budget` | 0.875 | **1.000** | +0.13（概念查询更少撞 max_steps） |
+| `groundedness` | 1.000 | **1.000** | 不变（答案仍全接地） |
+| `citation_rate` | 0.875 | 0.750 | -0.13（同上，噪声范围） |
+
+结论：移除 LLM rerank 不伤害任务完成率与答案忠实度（`completed` 持平、
+`groundedness` 1.000），且 `within_budget` 改善——与检索侧 eval 的结论一致
+（rerank 不改变 recall@5，只微调排序）。对话 P95 的 rerank 大头由此消除。
+
 ### 顺带修掉的一个生产 bug
 
 为 task_eval 写拒绝路径单测时发现：**拒绝审批后写操作仍然执行**。根因是
