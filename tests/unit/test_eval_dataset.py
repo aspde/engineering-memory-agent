@@ -37,16 +37,16 @@ class TestGroundTruthStructure:
         # Should not raise — catches duplicate IDs, empty categories, etc.
         assert_complete()
 
-    def test_has_30_queries(self) -> None:
-        assert len(GROUND_TRUTH) == 30
+    def test_has_70_queries(self) -> None:
+        assert len(GROUND_TRUTH) == 70
 
-    def test_five_categories_six_each(self) -> None:
+    def test_five_categories_fourteen_each(self) -> None:
         from collections import Counter
 
         counts = Counter(it.category for it in GROUND_TRUTH)
         assert set(counts) == set(CATEGORIES)
         for cat in CATEGORIES:
-            assert counts[cat] == 6, f"{cat}: expected 6, got {counts[cat]}"
+            assert counts[cat] == 14, f"{cat}: expected 14, got {counts[cat]}"
 
     def test_every_item_has_fingerprint_and_seed(self) -> None:
         for it in GROUND_TRUTH:
@@ -57,7 +57,7 @@ class TestGroundTruthStructure:
         from tests.eval.ground_truth import difficulty_distribution
 
         dist = difficulty_distribution(GROUND_TRUTH)
-        assert dist["easy"] + dist["medium"] + dist["hard"] == 30
+        assert dist["easy"] + dist["medium"] + dist["hard"] == 70
         # At least one of each — otherwise per-difficulty breakdown is useless
         for d in ("easy", "medium", "hard"):
             assert dist[d] >= 1, f"no {d} queries"
@@ -74,9 +74,9 @@ class TestSeedLoading:
     def test_seed_file_exists(self) -> None:
         assert SEED_FILE.exists(), f"missing seed file: {SEED_FILE}"
 
-    def test_loads_30_seeds(self) -> None:
+    def test_loads_70_seeds(self) -> None:
         seeds = load_seed_memories()
-        assert len(seeds) == 30
+        assert len(seeds) == 70
 
     def test_seed_ids_match_ground_truth(self) -> None:
         seeds = load_seed_memories()
@@ -381,6 +381,31 @@ class TestBuildAdapter:
         # Default threshold for memory path is 0.3 — just ensure it builds.
         adapter = build_adapter("memory")
         assert isinstance(adapter, RetrieverAdapter)
+
+    def test_memory_adapter_no_decay_label(self) -> None:
+        """use_decay=False (the decay A/B control) is visible in the label so
+        the A/B arms are distinct in reports."""
+        adapter = build_adapter("memory", use_decay=False)
+        assert adapter.name == "memory:norank:nodecay"
+
+    def test_memory_adapter_no_decay_passes_flag(self, monkeypatch) -> None:
+        """The no-decay adapter must forward use_decay=False to query_memories
+        — otherwise the control arm would rank decay-weighted anyway."""
+        import asyncio
+        from unittest.mock import AsyncMock
+
+        from backend.service import retrieval as mod
+
+        qm = AsyncMock(return_value=[])
+        monkeypatch.setattr(mod, "query_memories", qm)
+        asyncio.run(build_adapter("memory", use_decay=False).fn("q", 5))
+        assert qm.await_args.kwargs["use_decay"] is False
+
+        # The default memory adapter forwards use_decay=True.
+        qm2 = AsyncMock(return_value=[])
+        monkeypatch.setattr(mod, "query_memories", qm2)
+        asyncio.run(build_adapter("memory").fn("q", 5))
+        assert qm2.await_args.kwargs["use_decay"] is True
 
     def test_vector_adapter_name_and_field(self) -> None:
         adapter = build_adapter("vector")

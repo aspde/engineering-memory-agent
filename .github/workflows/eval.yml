@@ -84,17 +84,16 @@ jobs:
           # below the thresholds.  Manually dispatched non-memory retrievers
           # (experiments/baselines) are not gated.
           #
-          # Calibrated 2026-08-10 on the seeded 30-query memory corpus with
-          # the semantic channel OFF (the default): recall@5=0.900 / mrr=0.844
+          # Calibrated 2026-08-11 on the seeded 70-query memory corpus with
+          # the semantic channel OFF (the default): recall@5=0.886 / mrr=0.767
           # (measured with --no-semantic-relevance; the semantic channel
-          # rescues 3/30 to 1.000/0.944 but is a self-scored opt-in, so the
-          # gate rests on the deterministic lexical baseline).  recall@5 0.85
-          # allows at most ~4 misses (30 × 0.15) with room for single-run
-          # noise; mrr 0.80 leaves headroom while tripping on a real ranking
-          # regression.
+          # rescues the misses but is a self-scored opt-in, so the gate rests
+          # on the deterministic lexical baseline).  recall@5 0.83 allows up
+          # to ~12 misses (70 × 0.17) with room for single-run noise; mrr 0.70
+          # leaves headroom while tripping on a real ranking regression.
           GATE_ARGS=""
           if [ "$RETRIEVER" = "memory" ]; then
-            GATE_ARGS="--min-recall@5 0.85 --min-mrr 0.80"
+            GATE_ARGS="--min-recall@5 0.83 --min-mrr 0.70"
           fi
           python -m tests.eval.run_eval --retriever "$RETRIEVER" \
             --report-md docs/interview/eval-report.md \

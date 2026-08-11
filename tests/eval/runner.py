@@ -62,6 +62,9 @@ class EvalConfig:
     use_cross_encoder: bool = False
     threshold: float | None = None
     categories: list[str] | None = None
+    # Memory-path decay: False ranks by raw similarity and skips the decay
+    # write — the decay A/B control.  Defaults True (production behavior).
+    use_decay: bool = True
 
     def adapter(self) -> RetrieverAdapter:
         return build_adapter(
@@ -69,6 +72,7 @@ class EvalConfig:
             use_llm_rerank=self.use_llm_rerank,
             use_cross_encoder=self.use_cross_encoder,
             threshold=self.threshold,
+            use_decay=self.use_decay,
         )
 
     @property
@@ -76,9 +80,13 @@ class EvalConfig:
         """Short human label, e.g. ``memory:norank@k5``.
 
         ``norank`` is the default read path (no cross-encoder); ``ce`` and
-        ``llm`` label the explicit opt-in rerankers.
+        ``llm`` label the explicit opt-in rerankers.  A memory run without
+        decay weighting appends ``:nodecay`` so the A/B arms are distinct.
         """
-        return f"{self.retriever}:{rerank_tag(self.use_llm_rerank, self.use_cross_encoder)}@k{self.top_k}"
+        base = f"{self.retriever}:{rerank_tag(self.use_llm_rerank, self.use_cross_encoder)}"
+        if not self.use_decay:
+            base = f"{base}:nodecay"
+        return f"{base}@k{self.top_k}"
 
 
 @dataclass
@@ -301,6 +309,7 @@ def config_from_dict(d: dict[str, Any]) -> EvalConfig:
         use_cross_encoder=bool(d.get("use_cross_encoder", False)),
         threshold=d.get("threshold"),
         categories=list(d["categories"]) if d.get("categories") else None,
+        use_decay=bool(d.get("use_decay", True)),
     )
 
 
