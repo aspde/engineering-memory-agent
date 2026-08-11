@@ -49,7 +49,7 @@ _RERANK_FLOOR = 0.15
 # hard-negative eval: pass@5 59.3%→81.5% with only 3 pairs scored (vs 77.8%
 # and 20 pairs for full rerank), and it keeps every candidate in the ranked
 # list (no floor-dropping, which had falsely evicted a relevant memory).  See
-# tests/eval/reports/hard_negative_report.md for the A/B numbers.
+# tests/eval/reports/archive/hard_negative_report.md for the A/B numbers.
 _MEMORY_BOUNDED_RERANK_N = 3
 
 # Recall-stage floor for the vector recall in ``retrieve`` / ``retrieve_hybrid``:

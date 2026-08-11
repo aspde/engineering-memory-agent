@@ -19,7 +19,7 @@ Judge is deterministic (substring/normalized matching) — no LLM judge, so
 the numbers are reproducible and cheap (~24 LLM calls per arm).
 
 Usage:
-    python -m tests.eval.experiments.extraction_ab --report-md tests/eval/reports/extraction_ab_report.md
+    python -m tests.eval.experiments.extraction_ab --report-md tests/eval/reports/archive/extraction_ab_report.md
 """
 
 from __future__ import annotations

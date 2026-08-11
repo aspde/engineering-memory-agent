@@ -25,7 +25,7 @@ regenerates ``threshold_calibration_report.md`` under the current
 classification.
 
 Usage:
-    python -m tests.eval.experiments.threshold_calibration --report-md tests/eval/reports/threshold_calibration_report.md
+    python -m tests.eval.experiments.threshold_calibration --report-md tests/eval/reports/archive/threshold_calibration_report.md
 """
 
 from __future__ import annotations

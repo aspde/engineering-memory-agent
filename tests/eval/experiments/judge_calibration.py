@@ -35,8 +35,8 @@ Examples:
 
     # Full calibration with Markdown + JSON reports
     python -m tests.eval.experiments.judge_calibration \
-        --report-md tests/eval/reports/judge_calibration_report.md \
-        --report-json tests/eval/reports/judge_calibration_report.json
+        --report-md tests/eval/reports/archive/judge_calibration_report.md \
+        --report-json tests/eval/reports/archive/judge_calibration_report.json
 """
 
 from __future__ import annotations

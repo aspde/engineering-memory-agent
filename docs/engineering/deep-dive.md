@@ -163,7 +163,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 | < 0.60 | 全新插入 | `_insert_memory()` |
 
 **关键工程细节**：
-- **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `tests/eval/reports/threshold_calibration_report.md`）
+- **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `tests/eval/reports/archive/threshold_calibration_report.md`）
 - **容错降级**：LLM 合并失败保留原摘要，冲突检测失败假定无冲突——不阻塞写入
 - **冲突解决 4 选项**：keep_existing / overwrite / merge / keep_both，由 `resolve_conflict()` 实现
 - **冲突走 HITL**：`check_conflict_node` 检测到 conflict action 后 `interrupt()`，等用户选
@@ -225,7 +225,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 | 检索 Recall@5 | **0.900（默认确定性基线）**；语义通道 opt-in 时 1.000 | tests/eval 实测（30 query，memory:norank@k5；默认纯子串匹配，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)） |
 | 检索 MRR | **0.844（默认确定性基线）**；语义通道 opt-in 时 0.944 | 同上；此前的 0.983 是 chunk:vector 路径，非生产默认路径 |
 | 语义通道贡献 | 30 条中 3 条（q018/q024/q026）仅靠 embedding 相似度判相关（0.900→1.000、0.844→0.944）；**语义通道是显式 opt-in，非默认** | 语义通道用被评测的 BGE-M3 自评（见 dataset.py），因自证故默认关闭、显式开启，贡献已如实披露 |
-| 检索判别力（hard-negative） | **纯向量 27 条陷阱集：综合通过仅 59.3%、MRR 0.790、11 条陷阱压过目标 → bounded cross-encoder top-3 重排后 81.5%、MRR 0.889、5 条** | [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md) 实测；纯向量对表层词重合高度宽容（陷阱与目标共享关键词时排序靠词面而非意图）；已实现 bounded-CE 重排修复（`query_memories(use_cross_encoder=True)`，默认关） |
+| 检索判别力（hard-negative） | **纯向量 27 条陷阱集：综合通过仅 59.3%、MRR 0.790、11 条陷阱压过目标 → bounded cross-encoder top-3 重排后 81.5%、MRR 0.889、5 条** | [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md) 实测；纯向量对表层词重合高度宽容（陷阱与目标共享关键词时排序靠词面而非意图）；已实现 bounded-CE 重排修复（`query_memories(use_cross_encoder=True)`，默认关） |
 | 检索 NDCG@5 | 0.959 | tests/eval 实测（memory:norank@k5） |
 | 检索延迟（稳态） | ~190ms（hybrid 无 rerank：embed + sparse + sort） | tests/eval 实测（hybrid:norank@k5 190ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
 | cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | tests/eval 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
@@ -244,7 +244,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 **评估集设计**：30 条标注 query，5 类 × 6 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard。**三个如实披露的点**：
 1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5=1.0 只能证明"找得到"，不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
 2. **语义通道已改为显式 opt-in（非默认）**：30 条里 3 条靠"被评测的 BGE-M3 给自己打分"（embedding 相似度 ≥0.80）判为相关（0.900→1.000、0.844→0.944）。这部分是模型"认出自已"，不是独立判据——所以默认评估是**确定性纯子串基线**（recall 0.90/MRR 0.84，无自证），语义通道显式开启才启用，贡献已在报告里如实披露。
-3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/hard_negative_report.md)。
+3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md)。
 
 **设计选择**：对抗性审查要求"hard negative 跑一遍还 1.0 吗"必须能回答——与其让 1.0 被当自证拆穿，不如主动把真实判别力数字摆出来：1.0 的局限是什么、用 27 条陷阱集量化了真实判别力、下一步怎么改进。诚实暴露比完美数字可信。
 

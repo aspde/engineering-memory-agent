@@ -28,7 +28,7 @@ rerank) and measure:
     worse_than_random      # queries where the distractor beat the target
                             (or the target missed while the distractor hit).
 
-Reports are written to ``tests/eval/reports/hard_negative_report.{json,md}``.
+Reports are written to ``tests/eval/reports/archive/hard_negative_report.{json,md}``.
 
 Run:
     DATABASE_URL=postgresql://ema:ema123@localhost:5432/ema_eval_hn \\

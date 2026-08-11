@@ -249,7 +249,7 @@ Auto-memory 在评测进程中关闭，避免后台抽取/写入污染语料、�
 # 1. 灌 e2e 语料（记忆 + 分块）
 python -m tests.eval.e2e_seed --clear
 # 2. 全量跑（真实 LLM，默认 --judge llm）
-python -m tests.eval.run_task_eval --report-md tests/eval/reports/task-eval-report.md
+python -m tests.eval.run_task_eval --report-md tests/eval/reports/task_eval_report.md
 # 3. 免 judge 通道（CI 用，更便宜）
 python -m tests.eval.run_task_eval --judge deterministic
 # 4. 零成本校验（ci.yml 每 push 跑）
