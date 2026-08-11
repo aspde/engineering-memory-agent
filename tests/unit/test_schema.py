@@ -144,7 +144,14 @@ class TestResizeMigration:
 
 
 class TestInitDbDimensionFlow:
-    """init_db() wires the dimension into the generated DDL."""
+    """init_db() applies Alembic migrations, then runtime adaptations.
+
+    Schema *structure* is owned by Alembic now (``upgrade head`` — covered by
+    tests/unit/test_migrations.py); what init_db itself executes is only the
+    runtime embedding-dimension alignment.  These tests assert that alignment
+    uses the configured dimension and that init_db no longer runs the full
+    CREATE TABLE DDL itself (that would bypass the versioned migrations).
+    """
 
     class _FakeConn:
         def __init__(self) -> None:
@@ -160,31 +167,43 @@ class TestInitDbDimensionFlow:
         def begin(self):
             return _AsyncCM(self.conn)
 
+        async def dispose(self) -> None:
+            pass
+
     @pytest.mark.asyncio
-    async def test_defaults_to_config_dimension(self, monkeypatch) -> None:
+    async def test_runtime_adaptations_use_config_dimension(self, monkeypatch) -> None:
         from backend.db import schema as schema_mod
 
+        monkeypatch.setattr(schema_mod, "run_alembic_upgrade", lambda: None)
         engine = TestInitDbDimensionFlow._FakeEngine()
-        monkeypatch.setattr(schema_mod, "get_engine", lambda: engine)
+        monkeypatch.setattr(schema_mod, "create_async_engine", lambda *a, **k: engine)
 
         await schema_mod.init_db()
 
-        chunks = [s for s in engine.conn.executed if "CREATE TABLE IF NOT EXISTS chunks" in s]
-        assert chunks
-        assert f"vector({config.embedding.dimension})" in chunks[0]
+        # init_db no longer emits CREATE TABLE — that is Alembic's job now.
+        assert not any("CREATE TABLE IF NOT EXISTS chunks" in s for s in engine.conn.executed)
+        # The runtime resize runs at the configured dimension.
+        assert any(
+            f"ALTER TABLE memories ALTER COLUMN embedding TYPE vector({config.embedding.dimension})"
+            in s
+            for s in engine.conn.executed
+        )
 
     @pytest.mark.asyncio
     async def test_explicit_dimension_overrides_config(self, monkeypatch) -> None:
         from backend.db import schema as schema_mod
 
+        monkeypatch.setattr(schema_mod, "run_alembic_upgrade", lambda: None)
         engine = TestInitDbDimensionFlow._FakeEngine()
-        monkeypatch.setattr(schema_mod, "get_engine", lambda: engine)
+        monkeypatch.setattr(schema_mod, "create_async_engine", lambda *a, **k: engine)
 
         await schema_mod.init_db(dimension=3072)
 
-        chunks = [s for s in engine.conn.executed if "CREATE TABLE IF NOT EXISTS chunks" in s]
-        assert chunks
-        assert "vector(3072)" in chunks[0]
+        assert any(
+            "ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(3072)" in s
+            for s in engine.conn.executed
+        )
+        assert not any("vector(1024)" in s for s in engine.conn.executed)
 
 
 class _AsyncCM:

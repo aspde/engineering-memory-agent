@@ -1,23 +1,43 @@
-"""Database schema — tables created via raw SQL to keep things simple.
+"""Database schema — raw SQL built by a versioned Alembic migration.
 
 Tables:
   - chunks:  document fragments with pgvector embeddings
   - memories: structured long-term memories with entities, relations, decay
+  - …plus entities / memory_entities / conversations / webhook_logs /
+    patrol_logs / pending_conflicts / llm_usage (full list in
+    ``migrations/versions/0001_baseline.py``).
 
-Embedding columns are ``vector(<dimension>)`` where *dimension* comes from
-``config.embedding.dimension`` (:func:`build_schema_statements`).  When the
-configured embedding model changes dimension, :func:`init_db` migrates the
-existing columns instead of failing every write: embeddings are derived data,
-so the column is emptied, resized, and re-embedded from the stored text via
-``python -m scripts.reembed_embeddings``.
+Schema evolution is versioned with Alembic (``alembic_version`` table, one
+migration per change, upgrade/downgrade pairs).  ``init_db()`` is the single
+entry point every caller uses (FastAPI lifespan, tests, eval scripts): it
+runs ``alembic upgrade head`` — creating missing tables on a fresh database,
+skipping already-present tables on an existing one, and stamping the version
+table either way.
+
+What stays *outside* Alembic — because it depends on runtime configuration,
+not schema history — is the embedding-column dimension resize.  The
+configured embedding model's dimension (``config.embedding.dimension``)
+cannot live in a static migration; the baseline migration uses the default
+1024 as a placeholder, and :func:`init_db` aligns the live columns to the
+configured dimension afterwards (emptied and rebuilt, then re-embedded via
+``python -m scripts.reembed_embeddings``).  The same runtime layer swaps any
+legacy ivfflat indexes to HNSW.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import text
+import asyncio
+from pathlib import Path
 
-from backend.db import get_engine
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.pool import NullPool
+
 from backend.shared.config import config
+
+# Project root = backend/db/schema.py → backend/db → backend → root.
+_ALEMBIC_INI = Path(__file__).resolve().parent.parent.parent / "alembic.ini"
+_MIGRATIONS_DIR = _ALEMBIC_INI.parent / "migrations"
 
 
 def _resize_statement(table: str, index: str, dimension: int) -> str:
@@ -454,17 +474,70 @@ def build_schema_statements(dimension: int) -> list[str]:
     return statements
 
 
+def run_alembic_upgrade() -> None:
+    """Apply all pending Alembic migrations (``upgrade head``).
+
+    Runs with a *synchronous* engine (psycopg) on a plain thread — Alembic
+    needs a sync connection, and calling it from an async context would fight
+    the running event loop.  The URL comes from ``env.py``, which reads the
+    app's own ``config.database_url``.
+    """
+    from alembic import command
+    from alembic.config import Config as AlembicConfig
+
+    cfg = AlembicConfig(str(_ALEMBIC_INI))
+    # Absolute path so the ini's relative script_location resolves regardless
+    # of the caller's working directory.
+    cfg.set_main_option("script_location", str(_MIGRATIONS_DIR))
+    command.upgrade(cfg, "head")
+
+
+def _runtime_adaptations(dimension: int) -> list[str]:
+    """The parts of the schema that depend on *runtime* configuration and so
+    stay out of Alembic migrations: the embedding-column dimension resize and
+    the ivfflat→HNSW index swap.  Everything else (tables, indexes, columns)
+    is owned by the migrations under ``migrations/versions/``."""
+    return [
+        stmt
+        for stmt in build_schema_statements(dimension)
+        if "a.attrelid = " in stmt or "indexdef LIKE '%ivfflat%'" in stmt
+    ]
+
+
+def _config_async_url() -> str:
+    """The configured database URL in asyncpg form (``postgresql+asyncpg://``)."""
+    url = config.database_url
+    if url.startswith("postgresql://"):
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
 async def init_db(dimension: int | None = None) -> None:
-    """Create tables and indexes if they don't exist.
+    """Bring the database schema up to date.
+
+    Applies all Alembic migrations (``upgrade head``) — creating tables on a
+    fresh database, skipping already-present ones on an existing database —
+    then applies the runtime embedding-dimension alignment.
 
     *dimension* defaults to ``config.embedding.dimension`` — tests may pass an
     explicit value to exercise other dimensions without touching config.
+
+    The alignment runs on a short-lived engine built from the *current*
+    ``config.database_url`` rather than the module-level ``get_engine()``
+    singleton (which is bound to the URL at import time).  Alembic's ``env.py``
+    reads ``config.database_url`` live, so both halves of ``init_db`` must
+    target the same database even when the URL is switched at runtime — the
+    migration tests point it at a scratch database.
     """
-    statements = build_schema_statements(
-        dimension if dimension is not None else config.embedding.dimension
-    )
-    async with get_engine().begin() as conn:
-        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
-        for stmt in statements:
-            await conn.execute(text(stmt))
-    print("Database initialized (chunks + memories + conversations tables ready)")
+    await asyncio.to_thread(run_alembic_upgrade)
+    dimension = dimension if dimension is not None else config.embedding.dimension
+    statements = _runtime_adaptations(dimension)
+    if statements:
+        engine = create_async_engine(_config_async_url(), poolclass=NullPool)
+        try:
+            async with engine.begin() as conn:
+                for stmt in statements:
+                    await conn.execute(text(stmt))
+        finally:
+            await engine.dispose()
+    print("Database initialized (schema via alembic upgrade head)")
