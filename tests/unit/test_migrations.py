@@ -108,7 +108,7 @@ class TestBaselineMigration:
             version = conn.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()
-            assert version == ("0001_baseline",)
+            assert version == ("0002_drop_decay_factor",)
         finally:
             conn.close()
 
@@ -275,7 +275,7 @@ class TestInitDbIntegration:
         finally:
             conn.close()
         assert EXPECTED_TABLES <= tables
-        assert version[0] == "0001_baseline"
+        assert version[0] == "0002_drop_decay_factor"
 
     @pytest.mark.asyncio
     async def test_init_db_rejects_dimension_mismatch(self, temp_migration_db) -> None:

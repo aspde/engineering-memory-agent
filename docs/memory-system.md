@@ -71,7 +71,7 @@ extract_entities(content) ─┘
 | 0.60–0.72 | 插入为新记忆，关联到最相似记忆 |
 | < 0.60 | 作为全新记忆插入 |
 
-阈值经标定（`tests/eval/reports/threshold_calibration_report.md`）：同义改写对的相似度 p25 为 0.878、同类不同记忆上限 0.792，0.85 是自然分离点。旧值 0.92 高到「同一知识被不同来源写出来」的 merge 一半不触发。
+阈值经标定（`tests/eval/reports/archive/threshold_calibration_report.md`）：同义改写对的相似度 p25 为 0.878、同类不同记忆上限 0.792，0.85 是自然分离点。旧值 0.92 高到「同一知识被不同来源写出来」的 merge 一半不触发。
 
 合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本）；矛盾检测失败则**传播失败**——写入不落库，绝不把可能矛盾的记忆静默写入。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数，写入继续。
 
@@ -82,6 +82,8 @@ extract_entities(content) ─┘
 已仲裁的巡检对子（`status='resolved'`）可通过 `GET /api/conflicts?status=resolved&conflict_type=patrol` 查看台账，误选的 keep_both 可用 `POST /api/conflicts/{id}/reopen` 重置回待处理重新仲裁——仅 patrol 冲突可重新打开，且被放弃方 B 仍存活时才允许（keep_existing / overwrite / merge 已软删 B，重开会在缺失记忆上仲裁，故拒绝）。
 
 ### 4. 召回统计（替代原艾宾浩斯衰减）
+
+> 衰减加权的移除决策见 [ADR-009](./decisions/ADR-009-decay-weighting-removed.md)，A/B 数据见 `tests/eval/reports/decay_ab_report.md`。
 
 记忆检索按**纯相似度**排序；每次检索会把命中的记忆记一次召回（`recall_count` + 1、`recalled_at = NOW()`），作为**元数据**而非排序信号。
 
@@ -131,7 +133,6 @@ extract_entities(content) ─┘
 | entities | JSONB | `[{name, type}]` |
 | relations | JSONB | `[{from, to, type}]` |
 | embedding | vector(N) | 摘要向量，维度同 embedding 配置 |
-| decay_factor | FLOAT | 历史遗留列（默认 1.0）：原衰减因子快照，现已无任何代码维护，保留仅为不迁移历史行 |
 | recalled_at | TIMESTAMPTZ | 最后一次被检索的时间 |
 | recall_count | INT | 累计检索次数，默认 0 |
 | meta | JSONB | 冲突标记、补充关联等 |

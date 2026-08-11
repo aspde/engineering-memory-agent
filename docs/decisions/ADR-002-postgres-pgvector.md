@@ -79,7 +79,7 @@ ORDER BY embedding <=> :vec ::vector
 LIMIT :limit;
 ```
 
-**演进说明**：早期实施用 IVFFlat（lists=100），小语料上暴露了聚类依赖问题——数据量 < 千条时 lists 把探针散布到大量空聚类，召回率下降（见 seed-010 的教训）。已迁移到 HNSW（pgvector ≥ 0.5）：HNSW 无聚类质心依赖，小库也稳，且建索引用默认参数。基线迁移直接用 HNSW 建索引；历史 ivfflat 库开发期重建即可（`init_db` 不做运行时索引替换）。`search_memories` 单段按 HNSW 索引顺序取 `top_k`（索引只服务 `ORDER BY embedding <=> :vec` 的扫描），不再需要两段候选窗 + Python 重排——早期两段重排是配合「相似度 × decay_factor」加权排序，decay 已移除（见 decision-faq 第 7 节）。
+**演进说明**：早期实施用 IVFFlat（lists=100），小语料上暴露了聚类依赖问题——数据量 < 千条时 lists 把探针散布到大量空聚类，召回率下降（见 seed-010 的教训）。已迁移到 HNSW（pgvector ≥ 0.5）：HNSW 无聚类质心依赖，小库也稳，且建索引用默认参数。基线迁移直接用 HNSW 建索引；历史 ivfflat 库开发期重建即可（`init_db` 不做运行时索引替换）。`search_memories` 单段按 HNSW 索引顺序取 `top_k`（索引只服务 `ORDER BY embedding <=> :vec` 的扫描），不再需要两段候选窗 + Python 重排——早期两段重排是配合「相似度 × decay_factor」加权排序，decay 已移除（见 [ADR-009](./ADR-009-decay-weighting-removed.md) 与 decision-faq 第 7 节）。
 
 ### 检索模式
 
@@ -108,7 +108,7 @@ LIMIT 1;
 
 四级阈值：≥0.92 合并、0.75-0.92 冲突检测、0.60-0.75 补充关联、<0.60 新插入。全部在 SQL 层面完成，不需要应用层后处理。
 
-> **2026-08-11 更正**：阈值已标定调整（[threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)）——0.92 高到同义改写对一半漏 merge，改后为 ≥0.85 合并、0.72-0.85 冲突检测、0.60-0.72 补充关联、<0.60 新插入（`backend/service/memory.py`）。本条保留原始决策值供追溯。
+> **2026-08-11 更正**：阈值已标定调整（[threshold_calibration_report.md](../../tests/eval/reports/archive/threshold_calibration_report.md)）——0.92 高到同义改写对一半漏 merge，改后为 ≥0.85 合并、0.72-0.85 冲突检测、0.60-0.72 补充关联、<0.60 新插入（`backend/service/memory.py`）。本条保留原始决策值供追溯。
 
 ## Trade-offs & Limitations
 

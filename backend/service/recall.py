@@ -12,9 +12,8 @@ real-corpus support.  Archival decisions are a human/LLM judgement over the
 raw access history (surfaced to the patrol "stale memories" prompt via
 ``search_memories_tool``), not a machine-computed decay factor.
 
-The historical ``decay_factor`` column stays in the schema as a frozen
-snapshot for rows written before this change; new writes default it to 1.0
-and nothing maintains it.  No migration was needed.
+The ``decay_factor`` column was dropped in migration 0002 — nothing wrote
+or read it since the decay weighting was removed.
 """
 
 from __future__ import annotations
