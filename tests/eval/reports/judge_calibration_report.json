@@ -1,0 +1,298 @@
+{
+  "schema_version": 1,
+  "note": "LLM-as-judge vs human verdict calibration (P0-3). grounded_agreement = fraction of judged samples where the judge's grounded flag matches the human label; coverage_precision/recall/f1 = P/R/F1 of the judge's covered_facts vs the human's, averaged across judged samples; false_negative = human grounded but judge ungrounded (the ans-006 class of error); false_positive = human ungrounded but judge grounded. Judge failures are recorded in judge_errors and excluded from every denominator.",
+  "generated_at": "2026-08-11T00:09:59.510579+00:00",
+  "judge_provider": "openai",
+  "judge_model": "mimo-v2.5-free",
+  "n_samples": 12,
+  "n_judged": 12,
+  "n_judge_errors": 0,
+  "overall": {
+    "n_judged": 12,
+    "grounded_agreement": 1.0,
+    "coverage_precision": 1.0,
+    "coverage_recall": 0.8333333333333334,
+    "coverage_f1": 0.8333333333333334,
+    "false_negative": 0.0,
+    "false_positive": 0.0,
+    "n_samples": 12
+  },
+  "per_sample": [
+    {
+      "id": "cal-001",
+      "base_id": "ans-001",
+      "query": "我们向量检索后端最终选型是什么？为什么？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "pgvector",
+        "Elasticsearch",
+        "cosine"
+      ],
+      "judge_covered_facts": [
+        "pgvector",
+        "Elasticsearch",
+        "cosine"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "最终选用 PostgreSQL 的 pgvector 扩展，而不是 Elasticsearch。原因：pgvector 与业务库同库，事务一致性有保障；原生支持 cosine 距离；还省去了独立 ES 集群的运维成本。"
+    },
+    {
+      "id": "cal-002",
+      "base_id": "ans-001",
+      "query": "我们向量检索后端最终选型是什么？为什么？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "pgvector",
+        "Elasticsearch",
+        "cosine"
+      ],
+      "judge_covered_facts": [
+        "pgvector",
+        "Elasticsearch",
+        "cosine"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "我们定的是 PostgreSQL 生态里的向量检索扩展方案，彻底放弃了 Elasticsearch。理由是同库部署、事务一致性有保证、原生支持余弦距离计算，也省掉了单独运维一套检索集群的成本。"
+    },
+    {
+      "id": "cal-003",
+      "base_id": "ans-002",
+      "query": "为什么线上会突然 502？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "连接池",
+        "占满",
+        "超时"
+      ],
+      "judge_covered_facts": [
+        "连接池",
+        "占满",
+        "超时"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "线上 502 的根因是数据库连接池被占满。链路是：流量上涨 → 连接池没有空闲连接 → 新请求排队超时 → 网关返回 502。修复方式是重启连接池并增加连接泄漏监控。"
+    },
+    {
+      "id": "cal-004",
+      "base_id": "ans-006",
+      "query": "为什么开发环境要用 InMemorySaver？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "psycopg3",
+        "事件循环",
+        "InMemorySaver"
+      ],
+      "judge_covered_facts": [
+        "psycopg3",
+        "事件循环",
+        "InMemorySaver"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "开发环境用 InMemorySaver 是因为 psycopg3 的异步驱动和 Windows 的 ProactorEventLoop 存在兼容性冲突，AsyncPostgresSaver 因此在 Windows 下不可用；生产目标是 Linux，可以正常用 PostgresSaver。"
+    },
+    {
+      "id": "cal-005",
+      "base_id": "ans-003",
+      "query": "Windows 下 Agent 的对话状态能跨重启保存吗？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "InMemorySaver",
+        "丢失"
+      ],
+      "judge_covered_facts": [
+        "InMemorySaver",
+        "丢失"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "在 Windows 开发环境下不行，重启后对话状态会丢失。AsyncPostgresSaver 因为 psycopg3 异步实现的兼容性问题在 Windows 下不可用，所以降级成了 InMemorySaver；生产 Linux 环境用 PostgresSaver，可以跨会话恢复。"
+    },
+    {
+      "id": "cal-006",
+      "base_id": "ans-005",
+      "query": "嵌入模型选的是什么？为什么不用 OpenAI 的？",
+      "human_grounded": true,
+      "judge_grounded": true,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "BGE-M3",
+        "1024",
+        "本地推理"
+      ],
+      "judge_covered_facts": [
+        "BGE-M3",
+        "1024",
+        "本地推理"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [],
+      "answer": "嵌入模型选的是 BGE-M3，1024 维，支持中英双语，本地推理零 API 成本；对比 OpenAI 的 text-embedding-3-large，准确率相当但成本和延迟更优。"
+    },
+    {
+      "id": "cal-007",
+      "base_id": "ans-001",
+      "query": "我们向量检索后端最终选型是什么？为什么？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "Elasticsearch",
+        "cosine"
+      ],
+      "judge_covered_facts": [
+        "Elasticsearch",
+        "cosine"
+      ],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [
+        "最终选型是 Qdrant",
+        "理由是同库部署"
+      ],
+      "answer": "最终选型是 Qdrant，而不是 Elasticsearch。[UNGROUNDED: 声称使用了 Qdrant，但 context 只提到 pgvector 与 Elasticsearch，从未提及 Qdrant] 理由是同库部署、原生支持 cosine 距离。"
+    },
+    {
+      "id": "cal-008",
+      "base_id": "ans-002",
+      "query": "为什么线上会突然 502？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "超时"
+      ],
+      "judge_covered_facts": [],
+      "coverage_precision": 1.0,
+      "coverage_recall": 0.0,
+      "coverage_f1": 0.0,
+      "ungrounded_claims": [
+        "线上 502 的根因是内存泄漏。",
+        "流量上涨后内存持续增长"
+      ],
+      "answer": "线上 502 的根因是内存泄漏。[UNGROUNDED: 声称根因是内存泄漏，context 明确记载根因是数据库连接池被占满，且禁止编造「内存泄漏」这个根因] 流量上涨后内存持续增长，最终请求超时返回 502。"
+    },
+    {
+      "id": "cal-009",
+      "base_id": "ans-003",
+      "query": "Windows 下 Agent 的对话状态能跨重启保存吗？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [],
+      "judge_covered_facts": [],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [
+        "Windows 开发环境下重启后对话状态不会丢，状态会被完整保存下来"
+      ],
+      "answer": "Windows 开发环境下重启后对话状态不会丢，状态会被完整保存下来。[UNGROUNDED: 声称 Windows 下状态不会丢失，context 明确说降级为 InMemorySaver 后重启状态会丢失]"
+    },
+    {
+      "id": "cal-010",
+      "base_id": "ans-005",
+      "query": "嵌入模型选的是什么？为什么不用 OpenAI 的？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [],
+      "judge_covered_facts": [],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [
+        "声称选用了 OpenAI 的 text-embedding-3-large",
+        "声称因为它的准确率更高"
+      ],
+      "answer": "嵌入模型最终选了 OpenAI 的 text-embedding-3-large。[UNGROUNDED: 声称选用了 OpenAI 的 text-embedding-3-large，context 明确说选用的是 BGE-M3，OpenAI 只是对比项] 因为它的准确率更高。"
+    },
+    {
+      "id": "cal-011",
+      "base_id": "ans-004",
+      "query": "怎样把本地仓库的提交历史导入 EMA？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [],
+      "judge_covered_facts": [],
+      "coverage_precision": 1.0,
+      "coverage_recall": 1.0,
+      "coverage_f1": 1.0,
+      "ungrounded_claims": [
+        "声称通过网页上传导入，但上下文只说明要用 ingest_git_repo_tool 并传入 repo_path 参数，从未提到网页上传"
+      ],
+      "answer": "导入本地仓库提交历史很简单，把仓库文件夹拖到网页上传即可，系统会自动解析提交历史。[UNGROUNDED: 声称通过网页上传导入，context 只说明要用 ingest_git_repo_tool 并传入 repo_path 参数，从未提到网页上传]"
+    },
+    {
+      "id": "cal-012",
+      "base_id": "ans-006",
+      "query": "为什么开发环境要用 InMemorySaver？",
+      "human_grounded": false,
+      "judge_grounded": false,
+      "grounded_agree": true,
+      "false_negative": false,
+      "false_positive": false,
+      "human_covered_facts": [
+        "InMemorySaver"
+      ],
+      "judge_covered_facts": [],
+      "coverage_precision": 1.0,
+      "coverage_recall": 0.0,
+      "coverage_f1": 0.0,
+      "ungrounded_claims": [
+        "声称选 InMemorySaver 是出于性能优势"
+      ],
+      "answer": "开发环境用 InMemorySaver 是因为它比 PostgresSaver 性能更好、启动更快。[UNGROUNDED: 声称选 InMemorySaver 是出于性能优势，context 给出的真实原因是 psycopg3 异步实现与 Windows 事件循环冲突导致 AsyncPostgresSaver 不可用]"
+    }
+  ],
+  "judge_errors": []
+}
