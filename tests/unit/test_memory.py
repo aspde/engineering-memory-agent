@@ -510,7 +510,7 @@ class TestWriteMemoryConflictFailSafe:
             "id": "11111111-1111-1111-1111-111111111111",
             "summary": "Existing summary.",
         }
-        similar = [(0.9, existing)]  # CONFLICT_CHECK range
+        similar = [(0.8, existing)]  # CONFLICT_CHECK range [0.72, 0.85)
 
         async def _fake_find_similar(embedding, session_factory):
             return similar
@@ -645,7 +645,7 @@ class TestWriteMemoryFanOut:
 
         a = {"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "summary": "A"}
         b = {"id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "summary": "B"}
-        similar = [(0.70, a), (0.80, b)]  # closest below band; b in [0.75, 0.92)
+        similar = [(0.70, a), (0.80, b)]  # closest below band; b in [0.72, 0.85)
 
         async def _fake_find_similar(embedding, session_factory):
             return similar

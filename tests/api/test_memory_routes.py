@@ -69,7 +69,7 @@ def embedding_near(stored: list, cos_sim: float) -> list:
     ``cos_sim * v_hat + sqrt(1 - cos_sim**2) * w_hat`` has unit length and dot
     product ``cos_sim`` with ``v_hat``, so its cosine similarity to *stored* is
     exactly ``cos_sim`` — letting the test pin a new-content embedding into a
-    chosen similarity band (e.g. the conflict band [0.75, 0.92)).
+    chosen similarity band (e.g. the conflict band [0.72, 0.85)).
     """
     v = [float(x) for x in stored]
     norm = sum(x * x for x in v) ** 0.5
@@ -208,9 +208,9 @@ class TestWriteConflict:
             embedding=stored_embedding,
         )
 
-        # New-content embedding pinned at ~0.85 cosine-similarity to the stored
-        # one — inside the conflict band [0.75, 0.92), below the merge 0.92.
-        new_embedding = embedding_near(stored_embedding, 0.85)
+        # New-content embedding pinned at ~0.80 cosine-similarity to the stored
+        # one — inside the conflict band [0.72, 0.85), below the merge 0.85.
+        new_embedding = embedding_near(stored_embedding, 0.80)
 
         provider = AsyncMock()
         provider.embed.return_value = [new_embedding]

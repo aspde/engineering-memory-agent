@@ -730,8 +730,8 @@ async def get_token_usage_endpoint() -> dict[str, Any]:
       - ``agent_chat`` — ReAct LLM calls (with tools)
       - ``agent_final`` — final answer generation
       - ``extraction_summary`` / ``extraction_entities`` / ``extraction_relations``
-      - ``conflict_detection`` — memory conflict check (0.75-0.92 band)
-      - ``memory_merge`` — summary merge (≥0.92 band)
+      - ``conflict_detection`` — memory conflict check (0.72-0.85 band)
+      - ``memory_merge`` — summary merge (≥0.85 band)
       - ``entity_normalization`` — LLM entity-match judgement
       - ``rerank_llm`` — LLM-based rerank (when ``use_llm_rerank=True``)
 

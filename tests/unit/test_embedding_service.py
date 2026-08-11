@@ -466,3 +466,68 @@ class TestEmbeddingProviderLoadingPath:
         assert all(p is providers[0] for p in providers)
         assert len(heartbeat) > 0  # the event loop stayed responsive
 
+
+# ── Semaphore permit safety under cancellation ───────────────────────
+# Regression: ``_encode_with_semaphore`` used to ``await to_thread(acquire)``
+# *outside* the try/finally.  A coroutine cancelled exactly there let the
+# background thread take a ``BoundedSemaphore`` permit that nobody ever
+# released — after enough cancellations the semaphore drained and every
+# embed blocked forever (memory writes and searches both depend on it).
+# The acquire and the encode now share one thread-pool task, so the ``with``
+# block always pairs the release with the permit.
+
+
+class TestSemaphoreCancellationSafety:
+    @pytest.mark.asyncio
+    async def test_cancellation_does_not_leak_semaphore_permit(self) -> None:
+        import time
+        import threading
+
+        import backend.service.embedding_service as mod
+
+        class _SlowSemaphore:
+            """A semaphore whose acquire sleeps, opening a cancellation window
+            while the thread-pool task is between acquiring and releasing."""
+
+            def __init__(self) -> None:
+                self._inner = threading.BoundedSemaphore(1)
+                self.acquire_calls = 0
+                self.releases = 0
+
+            def acquire(self, blocking: bool = True) -> bool:
+                self.acquire_calls += 1
+                time.sleep(0.2)  # leave the await cancellable mid-acquire
+                return self._inner.acquire(blocking)
+
+            def release(self) -> None:
+                self.releases += 1
+                self._inner.release()
+
+            def __enter__(self) -> "_SlowSemaphore":
+                self.acquire()
+                return self
+
+            def __exit__(self, *exc) -> None:
+                self.release()
+
+        provider = object.__new__(mod.BGEEmbeddingProvider)
+        provider._embed_semaphore = _SlowSemaphore()
+        provider._normalize = True
+        provider._batch_size = 32
+        provider._model = MagicMock()
+        provider._model.encode.return_value = [[0.1, 0.2]]
+
+        task = asyncio.create_task(provider._encode_with_semaphore(["x"]))
+        await asyncio.sleep(0.05)  # the thread is inside the slow acquire
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The thread-pool task is not cancellable: it finishes the critical
+        # section and the ``with`` block releases the permit.
+        await asyncio.sleep(0.3)
+        assert provider._embed_semaphore.acquire_calls == 1
+        assert provider._embed_semaphore.releases == 1, (
+            "cancellation leaked the semaphore permit"
+        )
+

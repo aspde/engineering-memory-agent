@@ -12,12 +12,12 @@
     "sha256": "fe84c4860dd9c2572c6993f05123f724e7bf737818ef0c40e9b35583e49b7c68"
   },
   "extraction.entities": {
-    "version": "2",
-    "sha256": "c6a222c4cd82cf3e35260fb49b66256e876cbbc555c1dde901a77881f215f705"
+    "version": "4",
+    "sha256": "c7babcd2a564d6fac3fd295b5911205d56be868f4e538056c087ea1278a29c6e"
   },
   "extraction.relations": {
-    "version": "2",
-    "sha256": "bbde209fc94be5aef79066c826fbdba3e084d6f6054132f25690ce34a9d2f0e4"
+    "version": "4",
+    "sha256": "d7dafe263afc15f8d636c8a9bde781f6a9ae2538debba86206b8ee97158c20b0"
   },
   "extraction.summary": {
     "version": "2",
@@ -48,8 +48,8 @@
     "sha256": "699ef0454585e207b29fcd1c25b27d6c3e00dc9ae03103c40c54c3e245f7c88d"
   },
   "patrol.weekly": {
-    "version": "3",
-    "sha256": "2c3b3b60295ceb938bb5b0239ec3b96c8debfe766423c1f955a80aa562a3bf84"
+    "version": "4",
+    "sha256": "d8a4abbdafe50f79477ea592c32a17836ed78dca5379c243bea8aeaaf61b9bc8"
   },
   "query_rewrite": {
     "version": "3",

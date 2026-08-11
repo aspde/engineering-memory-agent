@@ -4,17 +4,31 @@ On each recall, the decay factor is updated based on time elapsed since the
 last recall.  More frequent recalls slow the decay; long gaps accelerate it.
 
 Formula (simplified Ebbinghaus):
-    R = e^(-t / S)
+    R = max(e^(-t / S), FLOOR)
 where:
     t = hours since the time base
         = now() - recalled_at if the memory was ever recalled
           else now() - created_at (never-recalled memories decay by age,
           so stale-but-unused entries sink instead of keeping 1.0 forever)
-    S = relative strength = 1 + (recall_count + 1) * 2
+    S = relative strength = 1 + (recall_count + 1) * 12
+        The 12x multiplier (was 2x) was tuned against the decay A/B
+        (``tests/eval/decay_ab.py``): the old curve's half-life ≈ 0.69·S
+        hours sank every cold memory to factor ≈ 0 (recall@5 fell 0.900 →
+        0.367 on the synthetic aging profile), burying relevant old memories
+        wholesale.  12x slows the curve so a cold memory decays over ~9+ hours
+        instead of ~2, and FLOOR (0.10) keeps a fully-decayed memory
+        retrievable when its similarity is high — the curve still biases
+        ranking toward fresh+well-recalled memories without making
+        old-but-relevant ones unrecoverable.  A/B after tuning: recall@5
+        0.367 → 0.667, MRR 0.367 → 0.622 (S=8+floor 0.05 gave 0.633/0.559;
+        the further step to 12/0.10 bought MRR at little recall cost).
     recall_count = the stored count BEFORE this recall; the ``+ 1`` yields
                    the count AFTER the recall — all three call sites
                    (compute_decay_factor / update_decay_batch /
                    search_memories) share this post-recall convention.
+
+FLOOR is duplicated in the ``update_decay_batch`` SQL (GREATEST … 0.10) —
+keep the two in sync.
 """
 
 from __future__ import annotations
@@ -27,6 +41,15 @@ from typing import Any
 from sqlalchemy import text
 
 from backend.db import get_session_factory
+
+# Retention floor — a fully-decayed memory keeps at least this much weight
+# so a high-similarity match can still surface it.  Mirrored in the
+# update_decay_batch SQL (GREATEST … 0.05); keep the two in sync.
+_DECAY_FLOOR = 0.10
+
+# Strength multiplier for the Ebbinghaus curve — see the module docstring for
+# the A/B tuning rationale.
+_STRENGTH_MULTIPLIER = 12.0
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +103,9 @@ def compute_decay_factor(
     # "just now" (factor 1.0), never above full retention.  This clamps the
     # elapsed *input* only; the decay formula itself is unchanged.
     hours_elapsed = max(0.0, hours_elapsed)
-    strength = 1.0 + recall_count * 2.0
+    strength = 1.0 + recall_count * _STRENGTH_MULTIPLIER
     decay = math.exp(-hours_elapsed / strength)
+    decay = max(decay, _DECAY_FLOOR)
     return round(decay, 4)
 
 
@@ -93,12 +117,14 @@ async def update_decay_batch(memory_ids: list[Any]) -> dict[str, float]:
     read-modify-write that lost increments under concurrent recalls.  The
     whole update is one ``UPDATE ... RETURNING`` where the new factor is
     computed in SQL from the stored ``recalled_at`` — same formula as
-    :func:`compute_decay_factor` (strength = 1 + (recall_count + 1) * 2,
-    rounded to 4 dp).  ``recall_count`` on the RHS is the *stored* pre-recall
-    value, so ``+ 1`` yields the post-recall count that the statement is
-    writing back — the three call sites share this post-recall convention.
-    ``NOW()`` is the transaction timestamp, constant within the statement,
-    so the factor is consistent across all updated rows.
+    :func:`compute_decay_factor` (strength = 1 + (recall_count + 1) *
+    _STRENGTH_MULTIPLIER, floored at _DECAY_FLOOR, rounded to 4 dp).  The
+    multiplier and floor are passed as bound parameters so the SQL can never
+    drift from the Python constants.  ``recall_count`` on the RHS is the
+    *stored* pre-recall value, so ``+ 1`` yields the post-recall count that
+    the statement is writing back — the three call sites share this
+    post-recall convention.  ``NOW()`` is the transaction timestamp, constant
+    within the statement, so the factor is consistent across all updated rows.
 
     Returns ``{str(memory_id): new_decay_factor}``.  Ids whose row is missing
     are absent from the result — callers fall back to the factor they already
@@ -120,16 +146,23 @@ async def update_decay_batch(memory_ids: list[Any]) -> dict[str, float]:
                 SET recall_count = recall_count + 1,
                     recalled_at = NOW(),
                     decay_factor = round(
-                        exp(-EXTRACT(EPOCH FROM (NOW() - COALESCE(recalled_at, created_at)))
-                            / 3600.0
-                            / (1.0 + (recall_count + 1) * 2.0)
+                        GREATEST(
+                            exp(-EXTRACT(EPOCH FROM (NOW() - COALESCE(recalled_at, created_at)))
+                                / 3600.0
+                                / (1.0 + (recall_count + 1) * :strength_multiplier)
+                            ),
+                            :floor
                         )::numeric, 4
                     )::float8
                 WHERE id = ANY(:ids)
                 RETURNING id, decay_factor
                 """
             ),
-            {"ids": memory_ids},
+            {
+                "ids": memory_ids,
+                "strength_multiplier": _STRENGTH_MULTIPLIER,
+                "floor": _DECAY_FLOOR,
+            },
         )
         await session.commit()
         return {str(row[0]): float(row[1]) for row in result.fetchall()}
@@ -139,11 +172,15 @@ async def search_memories(
     query_vector: list[float],
     top_k: int = 20,
     threshold: float = 0.0,
+    use_decay: bool = True,
 ) -> list[dict]:
     """Vector search against memories table, weighted by live decay.
 
     The decay factor is computed live from ``recalled_at`` and
     ``recall_count`` at query time — not read from the stored snapshot.
+    Pass ``use_decay=False`` to rank by raw similarity instead — the decay
+    A/B measures whether Ebbinghaus weighting changes retrieval at all
+    (``tests/eval/decay_ab.py``).
     Ebbinghaus decay is a continuous curve in *time*; ranking by a stale
     stored factor would freeze a memory's rank at its last recall (a memory
     recalled a month ago and one recalled yesterday would both sort by their
@@ -160,9 +197,10 @@ async def search_memories(
     SQL expression without a full-table scan + in-memory sort.
 
     The live factor uses the same post-recall strength convention as
-    :func:`update_decay_batch` — ``1 + (recall_count + 1) * 2`` — so the
-    factor computed right after this search agrees with the snapshot the
-    next UPDATE writes.
+    :func:`update_decay_batch` — ``1 + (recall_count + 1) *
+    _STRENGTH_MULTIPLIER``, floored at ``_DECAY_FLOOR`` — so the factor
+    computed right after this search agrees with the snapshot the next
+    UPDATE writes.
 
     Clock assumption: the application clock is assumed to be consistent with
     the database clock (``recalled_at`` is written by the DB's ``NOW()``).
@@ -198,17 +236,23 @@ async def search_memories(
         rows = [dict(r._mapping) for r in result]
 
     now = datetime.now(timezone.utc)
-    for r in rows:
-        recalled_at = r.pop("recalled_at")
-        created_at = r.pop("created_at")
-        # Post-recall convention: the count is about to be bumped by this
-        # search's downstream update_decay_batch, so add 1 before mirroring.
-        # Time base falls back to created_at for never-recalled memories, so
-        # an old-but-never-searched memory decays instead of keeping 1.0.
-        r["decay_factor"] = compute_decay_factor(
-            recalled_at, r["recall_count"] + 1, now=now, created_at=created_at
-        )
-        r["weighted_score"] = r.pop("similarity") * r["decay_factor"]
-
-    rows.sort(key=lambda r: r["weighted_score"], reverse=True)
+    if use_decay:
+        for r in rows:
+            recalled_at = r.pop("recalled_at")
+            created_at = r.pop("created_at")
+            # Post-recall convention: the count is about to be bumped by this
+            # search's downstream update_decay_batch, so add 1 before mirroring.
+            # Time base falls back to created_at for never-recalled memories, so
+            # an old-but-never-searched memory decays instead of keeping 1.0.
+            r["decay_factor"] = compute_decay_factor(
+                recalled_at, r["recall_count"] + 1, now=now, created_at=created_at
+            )
+            r["weighted_score"] = r.pop("similarity") * r["decay_factor"]
+        rows.sort(key=lambda r: r["weighted_score"], reverse=True)
+    else:
+        # Raw-similarity ranking: no decay computation, no decay_factor key.
+        # The A/B needs this as the "no decay" control — otherwise a memory
+        # that happens to be old or cold would rank below an unrelated fresh
+        # one, and the comparison couldn't isolate the decay effect.
+        rows.sort(key=lambda r: r["similarity"], reverse=True)
     return rows[:top_k]

@@ -35,7 +35,6 @@ from backend.service.retrieval import query_memories, retrieve_hybrid, write_chu
 async def search_memories_tool(
     query: str,
     top_k: int = Field(default=5, ge=1, le=20),
-    use_llm_rerank: bool = False,
 ) -> str:
     """Search long-term engineering memories for knowledge, decisions,
     lessons learned, and past context.
@@ -53,11 +52,8 @@ async def search_memories_tool(
     Args:
         query: Natural-language search query.
         top_k: Number of results (1-20).
-        use_llm_rerank: Set to True for LLM-based relevance scoring.
     """
-    results = await query_memories(
-        query, top_k=min(top_k, 20), use_llm_rerank=use_llm_rerank
-    )
+    results = await query_memories(query, top_k=min(top_k, 20))
     if not results:
         return "No relevant memories found."
 
@@ -105,7 +101,6 @@ async def search_memories_tool(
 async def retrieve_chunks_tool(
     query: str,
     top_k: int = Field(default=5, ge=1, le=20),
-    use_llm_rerank: bool = False,
 ) -> str:
     """Hybrid search over ingested document chunks (dense vector + BM25 keyword).
 
@@ -116,11 +111,8 @@ async def retrieve_chunks_tool(
     Args:
         query: Natural-language search query.
         top_k: Number of results (1-20).
-        use_llm_rerank: Set to True for LLM-based relevance scoring.
     """
-    results = await retrieve_hybrid(
-        query, top_k=min(top_k, 20), use_llm_rerank=use_llm_rerank
-    )
+    results = await retrieve_hybrid(query, top_k=min(top_k, 20))
     if not results:
         return "No relevant document chunks found."
 
@@ -148,7 +140,6 @@ async def retrieve_chunks_tool(
 async def query_rewrite_and_search_tool(
     query: str,
     top_k: int = Field(default=5, ge=1, le=20),
-    use_llm_rerank: bool = False,
 ) -> str:
     """Multi-query retrieval: LLM rewrites the query into variations,
     then unions and reranks results from all variations.
@@ -166,13 +157,10 @@ async def query_rewrite_and_search_tool(
     Args:
         query: Natural-language search query (especially conceptual ones).
         top_k: Number of results (1-20).
-        use_llm_rerank: Set to True for LLM-based relevance scoring.
     """
     from backend.service.retrieval import retrieve_multi_query
 
-    results = await retrieve_multi_query(
-        query, top_k=min(top_k, 20), use_llm_rerank=use_llm_rerank
-    )
+    results = await retrieve_multi_query(query, top_k=min(top_k, 20))
     if not results:
         return "No relevant document chunks found (even after query rewriting)."
 

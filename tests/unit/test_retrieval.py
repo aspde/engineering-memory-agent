@@ -847,6 +847,33 @@ class TestQueryMemoriesDecayBatch:
         decay_mod.update_decay_batch.assert_awaited_once_with([])
 
     @pytest.mark.asyncio
+    async def test_use_decay_false_skips_decay_write(self, monkeypatch) -> None:
+        """The decay A/B control: ``use_decay=False`` must not write decay
+        state (``update_decay_batch`` never runs) and ranks by raw similarity
+        — not the decay-weighted score."""
+        from backend.service import retrieval as mod
+        from backend.service import decay as decay_mod
+
+        cands = [
+            {"id": "m1", "summary": "s1", "similarity": 0.9},
+            {"id": "m2", "summary": "s2", "similarity": 0.5},
+        ]
+        self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
+        monkeypatch.setattr(
+            decay_mod,
+            "update_decay_batch",
+            AsyncMock(side_effect=AssertionError("decay write must not run")),
+        )
+
+        results = await mod.query_memories("q", top_k=5, use_decay=False)
+
+        assert [r["id"] for r in results] == ["m1", "m2"]
+        # rerank_score carries the raw similarity, not a decay-weighted score.
+        assert results[0]["rerank_score"] == pytest.approx(0.9)
+        assert results[1]["rerank_score"] == pytest.approx(0.5)
+        decay_mod.update_decay_batch.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_repeat_query_hits_embed_query_cache(self, monkeypatch) -> None:
         """query_memories must embed through ``embed_query``'s LRU cache — a
         repeat query (SSE reconnect / re-ask / eval re-run) skips the provider

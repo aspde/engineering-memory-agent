@@ -20,7 +20,7 @@ class TestComputeDecay:
         # keep full rank forever ("never recalled" ≠ "never forgets").
         old = datetime.now(timezone.utc) - timedelta(hours=240)
         factor = compute_decay_factor(None, 0, created_at=old)
-        assert factor < 0.1
+        assert factor <= 0.1  # floored at _DECAY_FLOOR — decayed, not zero
 
     def test_recent_recall_near_one(self) -> None:
         just_now = datetime.now(timezone.utc) - timedelta(minutes=5)
@@ -31,8 +31,9 @@ class TestComputeDecay:
     def test_long_gap_decays(self) -> None:
         two_days_ago = datetime.now(timezone.utc) - timedelta(hours=240)
         factor = compute_decay_factor(two_days_ago, 0)
-        # Long gap, first recall — should be heavily decayed
-        assert factor < 0.1
+        # Long gap, first recall — should be heavily decayed (floored at
+        # _DECAY_FLOOR, not zeroed, so the memory stays retrievable).
+        assert factor <= 0.1
 
     def test_more_recalls_slows_decay(self) -> None:
         # Same elapsed time, different recall counts
@@ -179,7 +180,44 @@ class TestSearchMemoriesLiveDecay:
         results = await search_memories(self._QUERY, top_k=1, threshold=0.5)
 
         assert results and results[0]["summary"] == "old-null-recall"
-        assert results[0]["decay_factor"] < 0.1
+        assert results[0]["decay_factor"] <= 0.1  # floored, not zeroed
+
+
+    @pytest.mark.asyncio
+    async def test_use_decay_false_ranks_by_similarity(self) -> None:
+        """use_decay=False ranks by raw similarity: a stale-but-identical
+        memory still ranks first, and no decay_factor/weighted_score keys are
+        computed (the decay A/B control)."""
+        from sqlalchemy import text
+
+        from backend.db import get_session_factory
+        from backend.db.schema import init_db
+        from backend.service.decay import search_memories
+
+        await init_db()
+        async with get_session_factory()() as session:
+            await session.execute(text("DELETE FROM memories WHERE content_hash LIKE 'h-%'"))
+            # 30 days old, never recalled — decay-on would rank it ~0.
+            await session.execute(
+                text(
+                    "INSERT INTO memories (source_type, summary, embedding, "
+                    "recalled_at, recall_count, content_hash, created_at) "
+                    "VALUES ('test', 'stale-similar', CAST(:vec AS vector), "
+                    "NULL, 0, 'h-decay-off', now() - interval '30 days')"
+                ),
+                {"vec": self._VEC},
+            )
+            await session.commit()
+
+        results = await search_memories(
+            self._QUERY, top_k=1, threshold=0.5, use_decay=False
+        )
+
+        assert results and results[0]["summary"] == "stale-similar"
+        assert results[0]["similarity"] == pytest.approx(1.0)
+        # No decay artifacts on the no-decay path.
+        assert "decay_factor" not in results[0]
+        assert "weighted_score" not in results[0]
 
 
 class TestUpdateDecayBatchLive:

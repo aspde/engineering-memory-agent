@@ -698,11 +698,17 @@ async def query_memories(
     threshold: float = 0.3,
     use_llm_rerank: bool = False,
     use_cross_encoder: bool = False,
+    use_decay: bool = True,
 ) -> list[dict]:
     """Search memories with decay-weighted ranking.
 
     Full pipeline: embed → decay-weighted vector search → (optional rerank)
     → update_decay_batch → return as-ranked list of memory dicts.
+
+    Pass ``use_decay=False`` to rank by raw similarity and skip the decay
+    write — the decay A/B (``tests/eval/decay_ab.py``) uses this as the
+    "no decay" control.  The decay write is a read-path side effect that
+    must not fire in a pure measurement.
 
     Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
     report (``docs/interview/eval-report.md``) shows it costs ~90x latency
@@ -721,7 +727,9 @@ async def query_memories(
     query_vec = await embed_query(query)
     t_embed = time.perf_counter()
 
-    candidates = await search_memories(query_vec, top_k=max(top_k * 4, 20), threshold=threshold)
+    candidates = await search_memories(
+        query_vec, top_k=max(top_k * 4, 20), threshold=threshold, use_decay=use_decay
+    )
     t_search = time.perf_counter()
 
     if not candidates:
@@ -733,23 +741,26 @@ async def query_memories(
         )
         return []
 
-    def _decay_ranking() -> list[tuple[int, float]]:
-        """Decay-weighted surviving list — the default path and the
-        rerank-channel-failure fallback.  ``search_memories`` already returns
-        rows ordered by decay-weighted similarity (weighted_score DESC), so the
-        top-k candidates *are* the rank order.  The reported score is the
-        weighted_score the retriever produced (falling back to the stored
-        decay_factor for rows without one, e.g. legacy mocks)."""
-        return [
-            (
-                idx,
-                float(
-                    candidates[idx].get(
-                        "weighted_score",
-                        candidates[idx].get("decay_factor", 0.0),
-                    )
-                ),
+    def _score(row: dict) -> float:
+        """The ranking score a candidate carries: decay-weighted similarity on
+        the default path (weighted_score), raw similarity when
+        ``use_decay=False``; legacy mocks with neither fall back to the stored
+        decay_factor."""
+        return float(
+            row.get(
+                "weighted_score",
+                row.get("similarity", row.get("decay_factor", 0.0)),
             )
+        )
+
+    def _default_ranking() -> list[tuple[int, float]]:
+        """Surviving list on the no-rerank path — the default and the
+        rerank-channel-failure fallback.  ``search_memories`` already returns
+        rows in the desired rank order (decay-weighted or raw similarity), so
+        the top-k candidates *are* the rank order; the reported score is the
+        candidate's own ranking score."""
+        return [
+            (idx, _score(candidates[idx]))
             for idx in range(min(len(candidates), top_k))
         ]
 
@@ -787,7 +798,7 @@ async def query_memories(
                 query[:60],
             )
             t_rerank = t_search
-            surviving = _decay_ranking()
+            surviving = _default_ranking()
         elif use_cross_encoder:
             # Bounded cross-encoder rerank: candidates arrive from
             # search_memories already ordered by decay-weighted similarity,
@@ -806,7 +817,7 @@ async def query_memories(
             ]
             # The rest keep their decay-weighted order.
             surviving.extend(
-                (idx, float(candidates[idx]["weighted_score"]))
+                (idx, _score(candidates[idx]))
                 for idx in range(_MEMORY_BOUNDED_RERANK_N, len(candidates))
             )
             # Truncate to top_k: the zone's cross-encoder scores sort first,
@@ -823,23 +834,27 @@ async def query_memories(
     else:
         # Default path: no rerank.
         t_rerank = t_search
-        surviving = _decay_ranking()
+        surviving = _default_ranking()
 
     # Re-attach full memory rows in ranked order, and update decay in a
     # single batch (one UPDATE ... RETURNING) instead of N sequential
     # commits.  A decay-write failure must not fail the search — stale
-    # factors are returned instead.
-    from backend.service.decay import update_decay_batch
+    # factors are returned instead.  When ``use_decay=False`` (the decay
+    # A/B control) the read path is pure: no decay state is written.
+    if use_decay:
+        from backend.service.decay import update_decay_batch
 
-    try:
-        decay_by_id = await update_decay_batch(
-            [candidates[idx]["id"] for idx, _ in surviving]
-        )
-    except Exception:
-        logger.warning(
-            "Batch decay update failed — returning results with stale decay factors",
-            exc_info=True,
-        )
+        try:
+            decay_by_id = await update_decay_batch(
+                [candidates[idx]["id"] for idx, _ in surviving]
+            )
+        except Exception:
+            logger.warning(
+                "Batch decay update failed — returning results with stale decay factors",
+                exc_info=True,
+            )
+            decay_by_id = {}
+    else:
         decay_by_id = {}
 
     result: list[dict] = []
@@ -858,10 +873,10 @@ async def query_memories(
     logger.info(
         "query_memories latency: total=%.0fms embed=%.0fms search=%.0fms "
         "rerank=%.0fms decay=%.0fms top_k=%d candidates=%d results=%d "
-        "llm_rerank=%s query=%r",
+        "llm_rerank=%s decay=%s query=%r",
         (t_end - t0) * 1000, (t_embed - t0) * 1000,
         (t_search - t_embed) * 1000, (t_rerank - t_search) * 1000,
         (t_end - t_rerank) * 1000, top_k, len(candidates), len(result),
-        use_llm_rerank, query[:60],
+        use_llm_rerank, use_decay, query[:60],
     )
     return result

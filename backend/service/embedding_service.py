@@ -76,10 +76,32 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         normalize: bool = True,
         batch_size: int = 32,
         hf_endpoint: str = "https://hf-mirror.com",
+        *,
+        max_concurrency: int | None = None,
+        torch_threads: int | None = None,
     ) -> None:
         from sentence_transformers import SentenceTransformer
 
+        import torch
+
         os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
+
+        emb = config.embedding
+        self._max_concurrency = (
+            max_concurrency if max_concurrency is not None else emb.max_concurrency
+        )
+        self._torch_threads = torch_threads if torch_threads is not None else emb.torch_threads
+
+        # CPU 并发控制：BGE-M3 推理是 CPU 密集，torch/OpenMP 默认抢占全部核。
+        # 不限制时，并发请求的 embed 调用同时涌入互相抢核，导致延迟长尾
+        # （冷路径压测实测 10 并发 P95 19s，单条 embed 366→1120ms）。
+        # 用线程信号量把同时进行的推理限制在 (torch_threads × concurrency) ≈
+        # 核数以内，超卖消失、延迟平稳。threading 而非 asyncio 信号量：
+        # provider 是进程单例，会被多个事件循环访问（pytest 逐测试 loop、
+        # agent 后台任务），threading 原语跨事件循环安全。``torch.set_num_threads``
+        # 是进程级全局，限制单任务的内部线程，避免任务间互相饿死。
+        self._embed_semaphore = threading.BoundedSemaphore(self._max_concurrency)
+        torch.set_num_threads(self._torch_threads)
 
         logger.info("Loading embedding model: %s (offline)", model_name)
         self._model = SentenceTransformer(model_name, local_files_only=True)
@@ -88,12 +110,7 @@ class BGEEmbeddingProvider(EmbeddingProvider):
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
         t0 = time.perf_counter()
-        embeddings = await asyncio.to_thread(
-            self._model.encode,
-            texts,
-            normalize_embeddings=self._normalize,
-            batch_size=self._batch_size,
-        )
+        embeddings = await self._encode_with_semaphore(texts)
         t1 = time.perf_counter()
         n = len(texts)
         logger.info(
@@ -103,13 +120,37 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         )
         return embeddings.tolist()
 
+    async def _encode_with_semaphore(self, texts: list[str]):
+        """Run ``self._model.encode`` under the concurrency semaphore.
+
+        The acquire and the encode share one ``asyncio.to_thread`` call so a
+        saturated provider queues without blocking the event loop.  Both must
+        stay in a single thread-pool task: ``to_thread`` tasks are not
+        cancellable, so if the acquire sat on its own await it could be
+        cancelled with the background thread still holding the permit —
+        ``BoundedSemaphore`` would permanently lose a slot and the embed
+        subsystem would deadlock after enough cancellations.  Running the
+        whole critical section in one task makes the ``with`` block release
+        the permit even if the surrounding coroutine is cancelled.
+        """
+        return await asyncio.to_thread(self._encode_locked, texts)
+
+    def _encode_locked(self, texts: list[str]):
+        with self._embed_semaphore:
+            return self._model.encode(
+                texts,
+                normalize_embeddings=self._normalize,
+                batch_size=self._batch_size,
+            )
+
     def embed_sync(self, texts: list[str]) -> list[list[float]]:
-        embeddings = self._model.encode(
-            texts,
-            normalize_embeddings=self._normalize,
-            batch_size=self._batch_size,
-        )
-        return embeddings.tolist()
+        with self._embed_semaphore:
+            embeddings = self._model.encode(
+                texts,
+                normalize_embeddings=self._normalize,
+                batch_size=self._batch_size,
+            )
+            return embeddings.tolist()
 
     @property
     def dimension(self) -> int:

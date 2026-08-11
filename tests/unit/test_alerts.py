@@ -41,15 +41,20 @@ async def _clean_llm_usage_table():
         await session.commit()
 
 
-async def _insert_calls(statuses: list[str]) -> None:
-    """Insert llm_usage rows with the given statuses (window: now)."""
+async def _insert_calls(statuses: list[str], attempts: list[int] | None = None) -> None:
+    """Insert llm_usage rows with the given statuses (window: now).
+
+    ``attempts`` mirrors the attempts column (provider hits before outcome);
+    when given, rows carry it (``attempts > 1`` = retried before succeeding).
+    """
+    attempts = attempts or [1] * len(statuses)
     values = ", ".join(
-        f"('agent_chat', 'p', 'm', '{s}')" for s in statuses
+        f"('agent_chat', 'p', 'm', '{s}', {a})" for s, a in zip(statuses, attempts)
     )
     async with get_session_factory()() as session:
         await session.execute(
             text(
-                "INSERT INTO llm_usage (scenario, provider, model, status) "
+                "INSERT INTO llm_usage (scenario, provider, model, status, attempts) "
                 f"VALUES {values}"
             )
         )
@@ -96,6 +101,45 @@ class TestErrorRateAlert:
     async def test_empty_table_silent(self, monkeypatch) -> None:
         monkeypatch.setattr(alerts.config, "alert_error_rate_threshold", 0.0)
         fired = await alerts.check_alerts()
+        assert not any(a["key"] == "llm_error_rate" for a in fired)
+
+
+class TestRetryJitterAlert:
+    """attempts>1 successes — the "provider was unstable but recovered" signal
+    the error-rate check cannot see (no error status was ever recorded)."""
+
+    @pytest.mark.asyncio
+    async def test_high_retry_share_fires(self, monkeypatch) -> None:
+        monkeypatch.setattr(alerts.config, "alert_error_rate_threshold", 0.9)
+        # 4/6 calls retried before succeeding (attempts=3), 2 clean.
+        await _insert_calls(
+            ["success"] * 6, attempts=[3, 3, 3, 3, 1, 1]
+        )
+
+        fired = await alerts.check_alerts()
+        assert any(a["key"] == "llm_retry_jitter" for a in fired)
+
+    @pytest.mark.asyncio
+    async def test_low_retry_share_silent(self, monkeypatch) -> None:
+        monkeypatch.setattr(alerts.config, "alert_error_rate_threshold", 0.9)
+        # Only 1 retried call of 10 — below _MIN_RETRY_CALLS and the ratio.
+        await _insert_calls(["success"] * 10, attempts=[3] + [1] * 9)
+
+        fired = await alerts.check_alerts()
+        assert not any(a["key"] == "llm_retry_jitter" for a in fired)
+
+    @pytest.mark.asyncio
+    async def test_final_failures_not_counted_as_jitter(self, monkeypatch) -> None:
+        """A call that retried but ultimately failed is an error row, not a
+        jitter row — the error-rate check owns it."""
+        monkeypatch.setattr(alerts.config, "alert_error_rate_threshold", 0.9)
+        # 4 failures with attempts=3, 4 clean successes: 0 jitter, low error.
+        await _insert_calls(
+            ["error"] * 4 + ["success"] * 4, attempts=[3] * 4 + [1] * 4
+        )
+
+        fired = await alerts.check_alerts()
+        assert not any(a["key"] == "llm_retry_jitter" for a in fired)
         assert not any(a["key"] == "llm_error_rate" for a in fired)
 
 

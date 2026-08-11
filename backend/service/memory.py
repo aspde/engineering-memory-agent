@@ -27,11 +27,19 @@ from backend.shared.resilience import CircuitOpenError
 
 logger = logging.getLogger(__name__)
 
-# Similarity thresholds for grading
-MERGE_THRESHOLD = 0.92       # near-duplicate → merge into existing
-CONFLICT_CHECK = 0.75        # close enough to check for contradiction
+# Similarity thresholds for grading.
+# Calibrated 2026-08-11 against seed-corpus similarity distributions
+# (tests/eval/threshold_calibration.py): LLM-paraphrase pairs of the same
+# knowledge (should MERGE) land at cosine 0.842-0.965 (p25 0.878); distinct
+# same-category memories (should NOT merge) top out at 0.792.  The old
+# MERGE=0.92 sat above the paraphrase p25, so "the same knowledge written by
+# a different source" mostly fell into the conflict band and merge rarely
+# fired.  0.85 is the natural separation point (above the same-category max,
+# below the duplicate p25).  CONFLICT follows down to keep the band.
+# Below SUPPLEMENT → unrelated, insert as new.
+MERGE_THRESHOLD = 0.85       # near-duplicate → merge into existing
+CONFLICT_CHECK = 0.72        # close enough to check for contradiction
 SUPPLEMENT_THRESHOLD = 0.60  # loosely related → mark as supplement
-# below 0.60 → unrelated, insert as new
 
 
 def _content_hash(content: str) -> str:

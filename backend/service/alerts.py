@@ -13,10 +13,17 @@ Checks (independent):
    tiny sample (e.g. 1/2) from firing.  When the ``llm_usage`` DB query itself
    fails, an explicit ``observability_degraded`` alert fires instead of a
    silent zero — a blind error-rate signal is itself an incident.
-2. **Structured-output failures** — the in-memory failure counters in
+2. **Retry jitter** — successful calls that still needed retries
+   (``attempts > 1``: the provider 429/5xx'd then recovered) as a share of
+   the window's calls.  This is the *early* instability signal the error rate
+   cannot see: a provider that 500s once and recovers never records an
+   ``error`` status, so only the attempts column catches it.  Fires when at
+   least ``_MIN_RETRY_CALLS`` calls retried and their share ≥
+   ``_RETRY_JITTER_THRESHOLD``.
+3. **Structured-output failures** — the in-memory failure counters in
    ``metrics.py`` grew by 5+ since the previous check.  These are extraction
    degradations that ``chat_structured`` logged as failures.
-3. **Circuit breakers** — the primary LLM provider's breaker is open, plus the
+4. **Circuit breakers** — the primary LLM provider's breaker is open, plus the
    fallback and judge providers' breakers when those are configured (an open
    fallback breaker means the last-ditch route is failing fast; an open judge
    breaker silently degrades eval verdicts).
@@ -52,6 +59,8 @@ logger = logging.getLogger(__name__)
 # user-facing knobs (error-rate threshold, check interval, 飞书 on/off).
 _ERROR_WINDOW_SECONDS = 600  # look-back window for the error-rate check
 _MIN_CALLS = 5               # below this many calls in the window, no alert
+_MIN_RETRY_CALLS = 3         # retry-jitter needs this many retried calls
+_RETRY_JITTER_THRESHOLD = 0.15  # share of calls that retried → "provider is unstable"
 _STRUCTURED_FAILURE_THRESHOLD = 5  # per-scenario growth between checks
 _ALERT_COOLDOWN_SECONDS = 3600     # min gap between notifications per kind
 
@@ -85,13 +94,22 @@ def _cooldown_ok(key: str) -> bool:
 
 
 async def _error_window_stats() -> dict[str, Any]:
-    """Calls / errors / error_rate in the last ``_ERROR_WINDOW_SECONDS``."""
+    """Calls / errors / retried-successes in the last window.
+
+    ``retried`` counts calls whose ``attempts > 1`` *and* that ultimately
+    succeeded — the "provider was unstable but recovered" signal.  A final
+    failure that retried is already an ``error`` row, so it is not double
+    counted here (the error-rate check owns it).
+    """
     async with get_session_factory()() as session:
         result = await session.execute(
             text(
                 """\
                 SELECT COUNT(*) AS calls,
-                       COUNT(*) FILTER (WHERE status = 'error') AS errors
+                       COUNT(*) FILTER (WHERE status = 'error') AS errors,
+                       COUNT(*) FILTER (
+                           WHERE attempts > 1 AND status = 'success'
+                       ) AS retried
                 FROM llm_usage
                 WHERE created_at >= now() - make_interval(secs => :window)
                 """
@@ -101,10 +119,13 @@ async def _error_window_stats() -> dict[str, Any]:
         row = result.fetchone()
     calls = int(row.calls or 0)
     errors = int(row.errors or 0)
+    retried = int(row.retried or 0)
     return {
         "calls": calls,
         "errors": errors,
+        "retried": retried,
         "error_rate": errors / calls if calls else 0.0,
+        "retry_ratio": retried / calls if calls else 0.0,
     }
 
 
@@ -173,6 +194,31 @@ async def check_alerts() -> list[dict[str, Any]]:
             }
             if _cooldown_ok(alert["key"]):
                 fired.append(alert)
+
+        # 2. Retry jitter — successful calls that needed retries (attempts>1).
+        #    Inside the same try: it shares the window stats, and a DB failure
+        #    is handled once above (observability_degraded covers both).
+        #    Distinct from the error-rate check: a provider that 429/500s once
+        #    and recovers records no error status, so only the attempts column
+        #    sees the instability.  Warns when the retried share of a
+        #    meaningful window is high — "provider is unstable" before it
+        #    starts actually failing.
+        if (
+            stats["calls"] >= _MIN_CALLS
+            and stats["retried"] >= _MIN_RETRY_CALLS
+            and stats["retry_ratio"] >= _RETRY_JITTER_THRESHOLD
+        ):
+            alert = {
+                "key": "llm_retry_jitter",
+                "severity": "warning",
+                "detail": (
+                    f"LLM retry jitter: {stats['retried']}/{stats['calls']} calls "
+                    f"retried before succeeding ({stats['retry_ratio']:.0%}) in the "
+                    f"last {_ERROR_WINDOW_SECONDS // 60} min — provider is unstable"
+                ),
+            }
+            if _cooldown_ok(alert["key"]):
+                fired.append(alert)
     except Exception:
         logger.exception("Error-rate alert check failed")
         # The DB is down — the error-rate signal is blind, which is exactly
@@ -189,7 +235,7 @@ async def check_alerts() -> list[dict[str, Any]]:
         if _cooldown_ok(alert["key"]):
             fired.append(alert)
 
-    # 2. Structured-output failures (in-memory counters, growth since last).
+    # 3. Structured-output failures (in-memory counters, growth since last).
     try:
         for scenario, growth in _structured_failure_growth():
             alert = {
@@ -205,7 +251,7 @@ async def check_alerts() -> list[dict[str, Any]]:
     except Exception:
         logger.exception("Structured-failure alert check failed")
 
-    # 3. LLM circuit breakers open — primary, plus fallback/judge when
+    # 4. LLM circuit breakers open — primary, plus fallback/judge when
     # configured.  Each breaker gets its own alert key + cooldown, so an open
     # fallback (last-ditch route failing fast) or judge (silently degraded
     # eval verdicts) is visible rather than hidden behind the primary's state.
