@@ -10,7 +10,7 @@
 
 | 区间 | 状态 | 说明 |
 |------|------|------|
-| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 处理全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
+| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 处理全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/archive/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
 | P1 崩溃级缺陷 | **10 ✅ 全完成** | `0481dd5` 一次提交修完，全量回归通过 |
 | P2 生产/安全/定位 | **4 ✅ 代码项 + 12 🗣 待改进项** | 代码完成：P2-4 沙箱 / P2-5 tsc 门禁 / P2-8 attempts / P2-11 错误渲染。其余为待改进项（分析见 [decision-faq.md](./decision-faq.md)） |
 
@@ -22,7 +22,7 @@
 
 **证据**：`tests/eval/ground_truth.py` 的 query 由 30 条种子记忆反向生成（指纹即摘要逐字子串）；`tests/eval/seed.py` 把同一份 seed 灌进库；语料 30 条、每 query 仅 `n_relevant=1`（`tests/eval/reports/eval-report.json` 全部行），随机基线 recall@5=5/30≈0.167。因此 1.0 是"记住答案"而非"检索能力"。
 
-**现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../tests/eval/reports/hard_negative_report.md)）。
+**现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../tests/eval/reports/archive/hard_negative_report.md)）。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。
 
@@ -36,7 +36,7 @@
 
 **证据**：`tests/eval/llm_judge.py` judge 用 DeepSeek（免费档 mimo-v2.5-free）；committed 报告 `llm-eval-semantic-baseline.json:46-48` 自记 known_anomaly（ans-006 正确回答被判 grounded=false）；`.github/workflows/eval.yml` 曾承认 judge 限流导致"所有 LLM-judged 指标不可信"。
 
-**现状**：已加 judge 一致性小样本校准——12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**。ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)。
+**现状**：已加 judge 一致性小样本校准——12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**。ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../tests/eval/reports/archive/judge_calibration_report.md)。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 5 节（LLM judge 可信吗）。
 
@@ -58,7 +58,7 @@
 
 **证据**：全仓库（docs/tests/eval）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
 
-**现状（已标定）**：`tests/eval/experiments/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
+**现状（已标定）**：`tests/eval/experiments/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/archive/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 1 节（四级阈值怎么定的）。
 
@@ -219,7 +219,7 @@
 
 ### 🗣 P2-13 无团队协作背书 + 无真实用户
 
-**证据/策略**（README.md 和 [project-overview.md](./project-overview.md)）：定位为"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1450+ 测试）。每个数字要有真实来源（QPS 4.8、记忆条数、token 成本），并准备"1450+ 测试没有 code review 怎么保证质量"的答案。
+**证据**（README.md 和 [project-overview.md](./project-overview.md)）：定位为"端到端主导 + 工程纪律替代 review"——质量保证不依赖 code review，而以 ADR、CI 门禁、评估集与 1450+ 测试替代；无真实用户、生产库为空。该取舍的代价分析见 [decision-faq.md](./decision-faq.md) 第 18 节（没有团队怎么保证质量）。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 18 节（没有团队怎么保证质量）。
 
@@ -237,6 +237,6 @@
 
 ### 🗣 P2-16 生产可靠性是 Agent 工程的重点考查面
 
-**定位策略**：把"评估有水分"主动转为"我做过诚实评估"（P0-1/2/4 口径）；把"无限流"转为"我清楚生产安全基线"（P2-1）；把 task completed=0.5 和 unexpected_rate=0.375（DeepSeek 过度调工具）当成**最有价值的发现**主动讲——比任何完美数字都更能说明对 Agent 生产行为的理解。
+**证据**：本清单的 P0 项暴露了评估体系的自证与口径问题——已通过 hard-negative 判别集（P0-1）、语义通道 opt-in（P0-2）、多次均值门禁（P0-4）修正；P2-1 的无限流与前端 key 暴露已落地令牌桶限流 + 构建期注入；task completed=0.5 与 unexpected_rate=0.375 是组件级评测看不到的轨迹级过度调用信号，任务级端到端评测正是为此引入（见 [llm-eval.md](./llm-eval.md)）。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。

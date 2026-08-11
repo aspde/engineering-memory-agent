@@ -1,7 +1,27 @@
 """Retrieval pipeline — independent functions, not a black-box chain.
 
 Write path:  embed_query() → write_chunks()
-Read path:   embed_query() → vector_search() → rerank() → assemble()
+Read path:   embed_query() → vector_search() → rerank() → (envelope/context)
+
+Read paths, by role:
+
+- **Primitives** (single retriever, reused by the combinators):
+  ``vector_search`` (dense chunks), ``sparse_search`` (jieba/GIN keyword
+  chunks), ``search_memories`` (dense memories table).
+- **Production combinators** — the only read paths agent tools and the API
+  call: ``retrieve_hybrid`` (chunks, dense ∪ sparse via RRF — the default
+  document search), ``retrieve_multi_query`` (chunks, LLM-rewritten
+  multi-recall), ``query_memories`` (memories table, pure similarity +
+  recall bookkeeping).
+- **Eval-only / test shell**: ``retrieve`` — the pure-dense baseline for
+  ``run_eval``'s ``chunk:norank`` retriever and the drive-through for the
+  shared ``_rerank_and_filter`` tail.  No production caller; see its
+  docstring for the removal condition.
+
+The opt-in rerank / relevance-floor / channel-failure fallback semantics
+live in the shared rerank tail (``_rerank_and_filter`` and the memory
+path's own deliberately-different branch — bounded top-3, no floor, it
+already passed ``threshold=0.3``), not per combinator.
 
 ── LLM rerank is NOT exposed to the agent ────────────────────────────────
 Every ``use_llm_rerank`` parameter in this module is for *explicit callers
@@ -325,18 +345,6 @@ async def embed_query(query: str) -> list[float]:
     return list(vectors[0])
 
 
-def assemble(results: list[RetrievalResult], max_items: int = 5) -> str:
-    """Join top-N retrieval results into an LLM-ready context string."""
-    if not results:
-        return ""
-
-    lines: list[str] = []
-    for r in results[:max_items]:
-        lines.append(f"--- [relevance: {r.score:.2f}] ---\n{r.content}")
-
-    return "\n\n".join(lines)
-
-
 def _attach_document_id(row: dict[str, Any]) -> dict[str, Any]:
     """Merge the chunk's ``document_id`` column into result metadata.
 
@@ -443,7 +451,7 @@ async def retrieve(
     use_llm_rerank: bool = False,  # explicit callers / eval only — NOT exposed in tool schemas
     use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
-    """Full read pipeline: embed → vector search → (optional) rerank.
+    """Pure-dense read pipeline: embed → vector search → (optional) rerank.
 
     NOTE: no production callers — the agent's ``retrieve_chunks_tool`` uses
     ``retrieve_hybrid``, query rewriting uses ``retrieve_multi_query``, and

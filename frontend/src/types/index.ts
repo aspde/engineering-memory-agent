@@ -135,7 +135,6 @@ export interface IngestResponse {
 export interface SearchRequest {
   query: string;
   top_k: number;
-  use_llm_rerank?: boolean;
 }
 
 export interface SearchResult {
@@ -163,7 +162,6 @@ export interface MemoryWriteResponse {
 export interface MemorySearchRequest {
   query: string;
   top_k: number;
-  use_llm_rerank?: boolean;
 }
 
 export interface MemorySearchResponse {
