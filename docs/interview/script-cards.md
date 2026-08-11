@@ -2,7 +2,7 @@
 
 > 面试前只带这一份。全部话术基于真实代码与对抗性审查结论，可经得起追问。
 > **使用方式**：每段先记「触发问题」，再背「应答」。临场被问到时，按"诚实承认现状 → 讲决策/取舍依据 → 给改进方案"三段式展开。
-> 完整证据与出处见 [remediation-checklist.md](./remediation-checklist.md)。
+> 完整证据与出处见 [adversarial-review-evidence.md](./adversarial-review-evidence.md)。
 
 ---
 

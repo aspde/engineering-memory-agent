@@ -12,6 +12,7 @@
 | [behavioral-star.md](./behavioral-star.md) | 行为面试 STAR 案例库 | — |
 | [gap-remediation.md](./gap-remediation.md) | 已知短板诊断 + 评估体系补全方案 | — |
 | [script-cards.md](./script-cards.md) | **应答话术卡（13 段必背 + 补充高危口径），临场只带这一份** | 15 分钟/轮 |
+| [adversarial-review-evidence.md](./adversarial-review-evidence.md) | 对抗性审查证据档案（每条短板：代码证据 / 状态 / 应答入口），深挖时查这份 | — |
 
 ## 使用方式
 
