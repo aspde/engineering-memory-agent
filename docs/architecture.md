@@ -99,7 +99,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 - **认证模型**：请求须携带 `Authorization: Bearer <EMA_API_KEY>`，缺头 / 非 Bearer 方案 / key 不匹配均返回通用 401（`WWW-Authenticate: Bearer`），响应不携带任何可辅助攻击的细节。
 - **常量时间比较**：key 校验用 `secrets.compare_digest`，避免时序侧信道；`APP_ENV=test` 完全豁免该守卫（API 测试套件依赖 mock，不需 key）。
 - **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带该 Bearer。它与服务端 `EMA_API_KEY` 刻意不同——bundle 中的 key 任何人可提取，拆分后不是管理员凭据（后端同时接受两把 key）。未配置时前端不携带认证头（向后兼容，后端返回 401）。
-- **边界与 ADR-004 的关系**：当前是"共享 key、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限（两把 key 的 API 权限完全相同），这有意与 ADR 004 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-004 的拐点评估中覆盖。
+- **边界与 ADR-005 的关系**：当前是"共享 key、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限（两把 key 的 API 权限完全相同），这有意与 ADR 005 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-005 的拐点评估中覆盖。
 
 ### Agent Framework
 

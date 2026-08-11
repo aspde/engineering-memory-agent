@@ -32,11 +32,11 @@ judge 用独立 provider 是强制的（避免被测模型给自己打分），�
 
 ### 7. 衰减加权为什么被移除？
 
-衰减系统最初是"让常用知识浮上来、过时的沉下去"的卖点，但 decay A/B（合成老化分布上跑双臂）给出唯一测量：衰减加权 recall@5 0.667、纯相似度 0.900。更关键的是调参轨迹——S 乘数从 2 调到 8 再到 12、加 0.10 floor，recall 从 0.367 → 0.633 → 0.667 单调逼近无衰减的 0.900：这是在把一个该删的功能调成无害。且其前提「近期/高频=相关」只建立在合成分布上。所以移出排序路径：`search_memories` 纯相似度单段 HNSW，`record_recalls` 保留访问历史作元数据，过期归档交给 patrol LLM 读原始 `recalls`/`last_recalled` 判断。教训：能用测量否掉自己的功能，比维护测量证明有害的功能更有价值。
+衰减系统最初是"让常用知识浮上来、过时的沉下去"的卖点，但 decay A/B（合成老化分布上跑双臂）给出唯一测量：衰减加权 recall@5 0.667、纯相似度 0.900。更关键的是调参轨迹——S 乘数从 2 调到 8 再到 12、加 0.10 floor，recall 从 0.367 → 0.633 → 0.667 单调逼近无衰减的 0.900：这是在把一个该删的功能调成无害。且其前提「近期/高频=相关」只建立在合成分布上。所以移出排序路径：`search_memories` 纯相似度单段 HNSW，`record_recalls` 保留访问历史作元数据，过期归档交给 patrol LLM 读原始 `recalls`/`last_recalled` 判断。教训：能用测量否掉自己的功能，比维护测量证明有害的功能更有价值。决策记录见 [ADR-009](../decisions/ADR-009-decay-weighting-removed.md)。
 
 ### 8. 对话延迟和成本是多少？
 
-`measure_chat_p95.py` 跑了 10 轮真实对话（真实 DeepSeek + 本地 BGE-M3 + 完整检索路径），端到端 P95 73.6s、平均 35.9s。主要耗时在 LLM 重排：每轮对话约 19 次 `rerank_llm`、约 40s，这是模型被工具 schema 允许自主把 `use_llm_rerank=True` 传给检索工具导致的。已做三件事：① 从三个检索工具的 schema 移除 `use_llm_rerank` 参数；② 用 task_eval 验证移除后任务完成率 0.500 持平、答案 groundedness 1.000 不变；③ P95 预期降到大半。成本上 10 轮合计 285.9k tokens、估算 $0.081（约 ¥0.06/轮）。
+`measure_chat_p95.py` 跑了 10 轮真实对话（真实 DeepSeek + 本地 BGE-M3 + 完整检索路径），端到端 P95 73.6s、平均 35.9s。主要耗时在 LLM 重排：每轮对话约 19 次 `rerank_llm`、约 40s，这是模型被工具 schema 允许自主把 `use_llm_rerank=True` 传给检索工具导致的。已做三件事：① 从三个检索工具的 schema 移除 `use_llm_rerank` 参数；② 用 task_eval 验证移除后任务完成率 0.500 持平、答案 groundedness 1.000 不变；③ P95 预期降到大半。成本上 10 轮合计 285.9k tokens、估算 $0.081（约 ¥0.06/轮）。决策记录见 [ADR-010](../decisions/ADR-010-llm-rerank-locked-from-tools.md)。
 
 ### 9. 记忆召回统计和 LLM rerank vs CE 的结果是什么？
 
@@ -50,7 +50,7 @@ judge 用独立 provider 是强制的（避免被测模型给自己打分），�
 
 ### 10. 前端 bundle 里有 key，认证防谁？
 
-单 key 是 ADR-004 无多租户的推论，key 打进前端 bundle 等于公开，而且全站没有任何 API 限流，成本没有上限。生产上做三层：网关按 IP+key 做令牌桶限流、服务端签发短期凭证（前端不再持有静态 key）、把 `/api/memory/ingest` 这类重写入路径单独限流。
+单 key 是 ADR-005 无多租户的推论，key 打进前端 bundle 等于公开，而且全站没有任何 API 限流，成本没有上限。生产上做三层：网关按 IP+key 做令牌桶限流、服务端签发短期凭证（前端不再持有静态 key）、把 `/api/memory/ingest` 这类重写入路径单独限流。
 
 ### 11. 为什么测试环境绕过认证用环境变量，而不是依赖注入？
 

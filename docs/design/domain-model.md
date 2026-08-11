@@ -185,7 +185,7 @@ GET /api/entities/{entity_id}/relations
 |------|-------------|
 | Workspace / Team（团队空间） | EMA 的价值是打破知识孤岛，硬隔离反模式；用 metadata tag 满足基本分组需求 |
 | User / Role / Permission（用户权限） | 单团队场景下不需要；SaaS 化时再引入 |
-| Graph Database（图数据库） | 详见 ADR-005；一度关系用 SQL，复杂图遍历不是当前需求 |
+| Graph Database（图数据库） | 详见 ADR-004；一度关系用 SQL，复杂图遍历不是当前需求 |
 | Event Bus / Message Queue | Webhook 已在进程内异步处理（后台任务 + 并发上限），持久化消息队列等负载上来再加 |
 
 ## 与现有文档的关系

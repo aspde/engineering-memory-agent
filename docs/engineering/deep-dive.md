@@ -109,7 +109,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 - Q：pgvector 性能比 Milvus/Qdrant 差吧？→ A：在万级数据量下差距很小，hnsw 索引 + cosine ops 召回延迟在 10ms 级。专用向量库的优势在百万级以上，EMA 远没到那个量级。换库的运维成本（双写一致性、部署复杂度）远大于性能收益。
 - Q：HNSW 还是 ivfflat？→ A：当前用 hnsw（pgvector ≥ 0.5）。早期 ivfflat 的 lists 参数依赖数据量——小库（< 千条）时 lists=100 把探针散布到大量空聚类，召回差（记忆 seed-010 的教训）；hnsw 无聚类依赖，小库也稳，且建索引参数用默认。数据量到百万级才会重新评估专用向量库。
 
-### 决策 3：为什么不用 Neo4j 做实体关系（ADR-005）
+### 决策 3：为什么不用 Neo4j 做实体关系（ADR-004）
 
 **背景**：三阶段提取会产生实体和关系，需要跨记忆归一化和关系查询。
 
