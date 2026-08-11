@@ -78,36 +78,40 @@ async def lifespan(app: FastAPI):
 
     # Register connectors at startup.  Connectors missing required
     # configuration (API keys, etc.) are still registered but flagged
-    # as "pending" so the frontend can show their status.
-    try:
-        from backend.connectors.registry import register_connector
-        from backend.connectors.ci import CIConnector
-        from backend.connectors.feishu import FeishuConnector
-        from backend.connectors.pingcode import PingCodeConnector
+    # as "pending" so the frontend can show their status.  Gated on
+    # ``connectors_active`` (default off, ADR-011) — with the flag unset the
+    # connector/webhook routes are not mounted either, so this registration
+    # would be dead work.
+    if config.connectors_active:
+        try:
+            from backend.connectors.registry import register_connector
+            from backend.connectors.ci import CIConnector
+            from backend.connectors.feishu import FeishuConnector
+            from backend.connectors.pingcode import PingCodeConnector
 
-        _pingcode_secret = os.getenv("WEBHOOK_PINGCODE_SECRET", "")
-        register_connector(
-            "pingcode",
-            PingCodeConnector(),
-            status="active" if _pingcode_secret else "pending",
-        )
-        _ci_secret = os.getenv("WEBHOOK_CI_SECRET", "")
-        register_connector(
-            "ci",
-            CIConnector(),
-            status="active" if _ci_secret else "pending",
-        )
-        _feishu_secret = os.getenv("WEBHOOK_FEISHU_SECRET", "")
-        register_connector(
-            "feishu",
-            FeishuConnector(),
-            status="active" if _feishu_secret else "pending",
-        )
-    except Exception:
+            _pingcode_secret = os.getenv("WEBHOOK_PINGCODE_SECRET", "")
+            register_connector(
+                "pingcode",
+                PingCodeConnector(),
+                status="active" if _pingcode_secret else "pending",
+            )
+            _ci_secret = os.getenv("WEBHOOK_CI_SECRET", "")
+            register_connector(
+                "ci",
+                CIConnector(),
+                status="active" if _ci_secret else "pending",
+            )
+            _feishu_secret = os.getenv("WEBHOOK_FEISHU_SECRET", "")
+            register_connector(
+                "feishu",
+                FeishuConnector(),
+                status="active" if _feishu_secret else "pending",
+            )
+        except Exception:
 
-        logging.getLogger(__name__).warning(
-            "Failed to register connectors — webhook endpoints will be unavailable."
-        )
+            logging.getLogger(__name__).warning(
+                "Failed to register connectors — webhook endpoints will be unavailable."
+            )
 
     # Create checkpoint table for conversation persistence
     try:
@@ -152,7 +156,7 @@ async def lifespan(app: FastAPI):
     # was down) — tracked so shutdown can cancel them instead of leaving
     # detached tasks that warn on destruction.
     _catchup_tasks: list[asyncio.Task[None]] = []
-    if config.patrol_enabled:
+    if config.patrol_active:
         try:
             from backend.service.patrol import (
                 get_patrol_prompt,
@@ -420,7 +424,16 @@ async def favicon():
 
 @app.get("/{full_path:path}", include_in_schema=False)
 async def spa_fallback(full_path: str):
-    """Catch-all: serve index.html for any non-API route (SPA client-side routing)."""
+    """Catch-all: serve index.html for non-API paths (SPA client-side routing).
+
+    ``api/...`` paths are excluded: an unmounted or misspelled API route must
+    return 404 rather than the SPA index.  The breadth layers (connectors,
+    scenarios, patrol) are conditionally mounted under ``/api`` (ADR-011) and
+    the frontend probes them — a 200 HTML here would mask a disabled feature
+    as available.
+    """
+    if full_path == "api" or full_path.startswith("api/"):
+        return JSONResponse({"detail": "Not Found"}, status_code=404)
     index_path = _FRONTEND_DIST / "index.html"
     if index_path.is_file():
         return FileResponse(str(index_path))

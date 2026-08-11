@@ -56,7 +56,13 @@ services:
   # and just runs scripts/backup.sh — dump once on startup, then every
   # BACKUP_INTERVAL seconds, pruning to the newest BACKUP_KEEP files.
   # Restore procedure: docs/deployment.md → Backup & Restore.
+  #
+  # Part of the ``observability`` profile — NOT started by default.  A dev
+  # database has nothing worth backing up hourly (its data is re-ingestible
+  # seed material); enable with
+  # ``docker compose --profile observability up`` when there is real data.
   backup:
+    profiles: ["observability"]
     image: pgvector/pgvector:pg16
     container_name: ema-backup
     depends_on:
@@ -79,7 +85,12 @@ services:
   # Monitoring: Prometheus scrapes backend /metrics (ema_* series), Grafana
   # renders the EMA dashboard. Scrape config: docker/prometheus.yml; Grafana
   # provisioning + dashboard: docker/grafana/. Login: admin / GF_ADMIN_PASSWORD.
+  #
+  # Part of the ``observability`` profile — NOT started by default.  Enable
+  # when there is a deployment worth watching (real traffic / real data):
+  # ``docker compose --profile observability up``.
   prometheus:
+    profiles: ["observability"]
     image: prom/prometheus:v2.53.0
     container_name: ema-prometheus
     volumes:
@@ -91,6 +102,7 @@ services:
       - backend
 
   grafana:
+    profiles: ["observability"]
     image: grafana/grafana:11.1.0
     container_name: ema-grafana
     environment:

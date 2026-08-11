@@ -296,3 +296,39 @@ class TestValidateConfig:
 
         problems = config_mod.validate_config()
         assert any("EMBEDDING_PROVIDER" in p for p in problems)
+
+
+class TestBreadthLayerFlags:
+    """ADR-011: breadth layers (connectors/webhooks, scenarios, patrol) are
+    off by default and only active when explicitly enabled or in APP_ENV=test.
+    """
+
+    def _reset_flags(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pin the three raw flags to their off state, isolating from .env drift."""
+        monkeypatch.setattr(config_mod.config, "connectors_enabled", False)
+        monkeypatch.setattr(config_mod.config, "scenarios_enabled", False)
+        monkeypatch.setattr(config_mod.config, "patrol_enabled", False)
+
+    def test_all_off_in_development(self, monkeypatch) -> None:
+        self._reset_flags(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "development")
+
+        assert config_mod.config.connectors_active is False
+        assert config_mod.config.scenarios_active is False
+        assert config_mod.config.patrol_active is False
+
+    def test_all_active_in_test_env(self, monkeypatch) -> None:
+        self._reset_flags(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+
+        assert config_mod.config.connectors_active is True
+        assert config_mod.config.scenarios_active is True
+        assert config_mod.config.patrol_active is True
+
+    def test_explicit_enable_in_development(self, monkeypatch) -> None:
+        self._reset_flags(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "development")
+        monkeypatch.setattr(config_mod.config, "scenarios_enabled", True)
+
+        assert config_mod.config.scenarios_active is True
+        assert config_mod.config.connectors_active is False

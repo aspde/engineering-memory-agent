@@ -71,6 +71,33 @@ class TestRequireApiKeyUnit:
         # Bearer scheme is case-insensitive.
         assert require_api_key(authorization="bearer secret-key") is None
 
+    # The frontend key (VITE_EMA_API_KEY) is a distinct credential shipped in
+    # the client bundle; the guard must accept it alongside the admin key.
+    def test_accepts_frontend_key(self, monkeypatch) -> None:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("EMA_API_KEY", "admin-key")
+        monkeypatch.setenv("VITE_EMA_API_KEY", "frontend-key")
+        assert require_api_key(authorization="Bearer frontend-key") is None
+        # Admin key still accepted alongside the frontend key.
+        assert require_api_key(authorization="Bearer admin-key") is None
+
+    def test_rejects_frontend_key_when_not_configured(self, monkeypatch) -> None:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("EMA_API_KEY", "admin-key")
+        monkeypatch.delenv("VITE_EMA_API_KEY", raising=False)
+        with pytest.raises(HTTPException) as excinfo:
+            require_api_key(authorization="Bearer frontend-key")
+        assert excinfo.value.status_code == 401
+
+    def test_rejects_wrong_key_when_both_configured(self, monkeypatch) -> None:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("EMA_API_KEY", "admin-key")
+        monkeypatch.setenv("VITE_EMA_API_KEY", "frontend-key")
+        with pytest.raises(HTTPException) as excinfo:
+            require_api_key(authorization="Bearer wrong-key")
+        assert excinfo.value.status_code == 401
+        assert "wrong-key" not in excinfo.value.detail
+
 
 # ── Router wiring (integration through the ASGI app) ─────────────────
 
@@ -115,6 +142,19 @@ class TestRouterGuardIntegration:
         resp = await async_client.get(
             "/api/connectors",
             headers={"Authorization": "Bearer secret-key"},
+        )
+
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_frontend_key_accepted(self, monkeypatch, async_client) -> None:
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("EMA_API_KEY", "admin-key")
+        monkeypatch.setenv("VITE_EMA_API_KEY", "frontend-key")
+
+        resp = await async_client.get(
+            "/api/connectors",
+            headers={"Authorization": "Bearer frontend-key"},
         )
 
         assert resp.status_code == 200

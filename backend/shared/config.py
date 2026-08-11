@@ -384,9 +384,23 @@ class AppConfig:
     rate_limit_general_window_seconds: int = field(
         default_factory=lambda: int(os.getenv("RATE_LIMIT_GENERAL_WINDOW_SECONDS", "60"))
     )
+    # ── Phase 2/3 breadth layers — off by default (ADR-011) ────────
+    # Connectors/webhooks, vertical scenarios and the patrol scheduler all
+    # serve data sources EMA does not have yet (the production store is
+    # empty); their API routes and background work are compiled into the
+    # process but only activated when the corresponding flag is set.
+    # ``*_active`` folds in the ``APP_ENV=test`` exemption so the API suite
+    # keeps exercising the breadth routes (same convention as auth / rate
+    # limiting — see backend/api/router.py for the route mounting).
+    connectors_enabled: bool = field(
+        default_factory=lambda: os.getenv("CONNECTORS_ENABLED", "false").lower() == "true"
+    )
+    scenarios_enabled: bool = field(
+        default_factory=lambda: os.getenv("SCENARIOS_ENABLED", "false").lower() == "true"
+    )
     # ── Phase 3: proactive agent ───────────────────────────────────
     patrol_enabled: bool = field(
-        default_factory=lambda: os.getenv("PATROL_ENABLED", "true").lower() == "true"
+        default_factory=lambda: os.getenv("PATROL_ENABLED", "false").lower() == "true"
     )
     patrol_daily_hour: int = field(
         default_factory=lambda: int(os.getenv("PATROL_DAILY_HOUR", "8"))
@@ -414,6 +428,22 @@ class AppConfig:
     feishu_webhook_url: str = field(
         default_factory=lambda: os.getenv("FEISHU_WEBHOOK_URL", "")
     )
+
+    # ── Breadth-layer activation (route mounting / scheduler start) ──
+    # A layer is *active* when explicitly enabled or when running the API
+    # test suite (``APP_ENV=test``) — tests exercise every router regardless
+    # of the flags.  Production default: all three off (ADR-011).
+    @property
+    def connectors_active(self) -> bool:
+        return self.app_env == "test" or self.connectors_enabled
+
+    @property
+    def scenarios_active(self) -> bool:
+        return self.app_env == "test" or self.scenarios_enabled
+
+    @property
+    def patrol_active(self) -> bool:
+        return self.app_env == "test" or self.patrol_enabled
 
 
 config = AppConfig()

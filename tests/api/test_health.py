@@ -41,3 +41,22 @@ class TestHealthCheck:
         assert resp.json()["database"] == "unreachable"
         # Provider fields are still reported on the degraded path.
         assert "llm" in resp.json() and "embedding" in resp.json()
+
+
+class TestSpaFallbackApiBoundary:
+    """The SPA catch-all must not swallow API paths (ADR-011 depends on 404
+    signalling a disabled breadth layer; an API typo should never return the
+    SPA index as a 200 HTML)."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_api_path_returns_404(self, async_client) -> None:
+        resp = await async_client.get("/api/nonexistent")
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_spa_path_still_serves_frontend(self, async_client) -> None:
+        # /memories is a client-side route — the fallback must serve index.html
+        # (200) rather than 404, keeping SPA routing intact.
+        resp = await async_client.get("/memories")
+        assert resp.status_code == 200
+

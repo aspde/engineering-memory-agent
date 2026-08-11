@@ -1,17 +1,21 @@
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { probeCapability } from '../api/capabilities';
 
 interface NavItem {
   path: string;
   icon: string;
   label: string;
+  /** Breadth-layer probe path — the entry is hidden when it returns 404 (ADR-011). */
+  probe?: string;
 }
 
 const NAV_ITEMS: NavItem[] = [
   { path: '/', icon: '💬', label: '对话' },
   { path: '/memories', icon: '📚', label: '记忆库' },
   { path: '/graph', icon: '🔗', label: '实体图谱' },
-  { path: '/connectors', icon: '🔌', label: '连接器' },
-  { path: '/patrol', icon: '🔍', label: '巡检日志' },
+  { path: '/connectors', icon: '🔌', label: '连接器', probe: '/api/connectors' },
+  { path: '/patrol', icon: '🔍', label: '巡检日志', probe: '/api/patrol/logs' },
   { path: '/conflicts', icon: '⚖️', label: '冲突' },
 ];
 
@@ -21,14 +25,36 @@ const NAV_ITEMS: NavItem[] = [
  * Each entry renders a button with a tooltip that appears on hover.
  * The active route is highlighted with a left border accent and a
  * subtle background tint.
+ *
+ * Breadth-layer entries (connectors, patrol) probe their backend endpoint
+ * on mount and hide when it returns 404 — the route is not mounted because
+ * the feature is disabled (`*_ENABLED=false`, ADR-011).  A 404 is FastAPI's
+ * "route not registered" reply, which is served before the API-key check, so
+ * the probe works without a configured key; any other outcome keeps the item.
  */
 export default function NavBar() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    for (const item of NAV_ITEMS) {
+      if (!item.probe) continue;
+      probeCapability(item.probe).then((available) => {
+        if (!cancelled && !available) {
+          setHidden((prev) => new Set(prev).add(item.path));
+        }
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   return (
     <nav className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-gray-200 bg-gray-50 py-4">
-      {NAV_ITEMS.map((item) => {
+      {NAV_ITEMS.filter((item) => !hidden.has(item.path)).map((item) => {
         const active = item.path === '/'
           ? pathname === '/'
           : pathname.startsWith(item.path);

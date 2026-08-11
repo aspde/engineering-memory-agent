@@ -52,7 +52,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/agent/thread/{thread_id}` | 获取指定对话消息历史 |
 | DELETE | `/api/agent/thread/{thread_id}` | 删除对话及 checkpoint 数据 |
 | POST | `/api/memory/ingest` | 文档分块 → 嵌入 → 存入 chunks 表 |
-| POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索（+稀疏）→ 可选 rerank（hybrid 默认跳过） |
+| POST | `/api/memory/search` | 语义搜索：嵌入 → 向量检索（+稀疏）→ hybrid 默认跳过 rerank（rerank 仅服务层 opt-in，API 不暴露开关） |
 | POST | `/api/memory/memories/write` | 结构化记忆写入：提取 → 相似度分级 → 合并/冲突/新插入 |
 | POST | `/api/memory/memories/search` | 记忆搜索：相似度排序 → rerank → 记录召回 |
 | GET | `/api/memory/memories/{memory_id}` | 通过 ID 获取单条记忆 |
@@ -82,6 +82,8 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | GET | `/api/usage/samples` | LLM 调用原始样本 |
 | GET | `/health` | 存活探活：数据库连通性 + LLM/Embedding provider 配置与熔断器状态（DB 不可达返回 503 degraded） |
 
+> **广度层按 flag 挂载（ADR-011）**：上表中的 connectors / webhook / patrol / scenarios 路由并非默认全部挂载。核心闭环（agent chat、memory、entities、conflicts、usage）恒挂载；connectors+webhook（`CONNECTORS_ENABLED`）、scenarios（`SCENARIOS_ENABLED`）、patrol（`PATROL_ENABLED`）默认关闭，flag 置 `true` 才挂载对应路由（未挂载返回 404）。三个 flag 在 `APP_ENV=test` 下视为开启，API 测试套件完整驱动全部路由。
+
 ## Technology Stack
 
 ### Backend
@@ -92,12 +94,12 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 
 ### API Security (Authentication)
 
-所有 `/api` 路由（含 agent chat、memory 读写、ingest、connectors、patrol、webhooks）共享单一 API key 接入认证，实现于 `backend/api/auth.py`，作为全局依赖挂载在 `backend/api/router.py`：
+所有 `/api` 路由（含 agent chat、memory 读写、ingest、connectors、patrol、webhooks）共享单一 API key 接入认证，实现于 `backend/api/auth.py`，作为全局依赖挂载在 `backend/api/router.py`（connectors/patrol/webhooks/scenarios 路由另受 ADR-011 的 `*_ENABLED` flag 控制，见上方端点表注释）：
 
 - **认证模型**：请求须携带 `Authorization: Bearer <EMA_API_KEY>`，缺头 / 非 Bearer 方案 / key 不匹配均返回通用 401（`WWW-Authenticate: Bearer`），响应不携带任何可辅助攻击的细节。
 - **常量时间比较**：key 校验用 `secrets.compare_digest`，避免时序侧信道；`APP_ENV=test` 完全豁免该守卫（API 测试套件依赖 mock，不需 key）。
-- **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带同一 Bearer；未配置时前端不携带认证头（向后兼容，后端返回 401）。
-- **边界与 ADR-004 的关系**：当前是"单 key 共享、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限，这有意与 ADR 004 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-004 的拐点评估中覆盖。
+- **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带该 Bearer。它与服务端 `EMA_API_KEY` 刻意不同——bundle 中的 key 任何人可提取，拆分后不是管理员凭据（后端同时接受两把 key）。未配置时前端不携带认证头（向后兼容，后端返回 401）。
+- **边界与 ADR-004 的关系**：当前是"共享 key、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限（两把 key 的 API 权限完全相同），这有意与 ADR 004 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-004 的拐点评估中覆盖。
 
 ### Agent Framework
 
@@ -168,7 +170,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 - **文档索引与检索**：分块 → 嵌入 → pgvector，双 reranker（cross-encoder / LLM）
 - **三阶段记忆提取**：摘要 + 实体并行提取 → 关系提取
-- **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `tests/eval/reports/threshold_calibration_report.md`）
+- **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `tests/eval/reports/archive/threshold_calibration_report.md`）
 - **召回统计**：检索按纯相似度排序，命中记忆记录 `recall_count`/`recalled_at` 作元数据；原艾宾浩斯衰减加权因 A/B 实测掉 recall（0.667 vs 无衰减 0.900，见 `tests/eval/reports/decay_ab_report.md`）已从排序路径移除，过期记忆归档改由 patrol LLM 读原始召回字段判断
 
 ### Agent

@@ -4,7 +4,11 @@ Security model
 --------------
 Every route under ``backend.api.router.api_router`` (memory write/search,
 ingest, connectors, patrol, agent chat, webhooks, ...) requires a valid
-``Authorization: Bearer <key>`` header where ``<key>`` equals ``EMA_API_KEY``.
+``Authorization: Bearer <key>`` header where ``<key>`` matches either
+``EMA_API_KEY`` (the admin / server-side key) or ``VITE_EMA_API_KEY`` (the
+frontend key baked into the client bundle at build time).  The two keys are
+deliberately distinct so the value shipped in the static JS bundle is not the
+same credential an operator uses to call the API directly.
 Unauthenticated or mismatched requests receive a generic 401 with no detail
 that could help an attacker: the supplied key is never echoed back and the
 message gives no hint about *why* the check failed.
@@ -33,9 +37,9 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
 
     Bypassed when ``APP_ENV=test`` (tests rely on mocks).  In every other
     environment a missing/empty ``EMA_API_KEY``, a missing header, a non
-    ``Bearer`` scheme, or a key that does not match the configured one all
-    raise a 401.  The comparison is constant-time (``secrets.compare_digest``)
-    to avoid timing side-channels on the key.
+    ``Bearer`` scheme, or a key matching neither ``EMA_API_KEY`` nor
+    ``VITE_EMA_API_KEY`` all raise a 401.  The comparison is constant-time
+    (``secrets.compare_digest``) to avoid timing side-channels on the key.
     """
     if os.environ.get("APP_ENV") == "test":
         return
@@ -51,8 +55,13 @@ def require_api_key(authorization: str | None = Header(default=None)) -> None:
     if scheme.lower() != "bearer" or not token.strip():
         raise _UNAUTHORIZED
 
-    if not secrets.compare_digest(
-        token.strip().encode("utf-8"),
-        expected.encode("utf-8"),
-    ):
+    # The frontend key (VITE_EMA_API_KEY) is exposed in the client bundle, so
+    # it is a different credential than the admin EMA_API_KEY.  Accept both.
+    accepted = [expected.encode("utf-8")]
+    frontend_key = os.environ.get("VITE_EMA_API_KEY")
+    if frontend_key:
+        accepted.append(frontend_key.encode("utf-8"))
+
+    supplied = token.strip().encode("utf-8")
+    if not any(secrets.compare_digest(supplied, k) for k in accepted):
         raise _UNAUTHORIZED

@@ -2,15 +2,16 @@
 
 ## Container
 
-`docker compose up -d` 一键启动完整栈（PostgreSQL + pgvector + EMA 后端 + 前端 + 备份 + Prometheus/Grafana 监控）：
+`docker compose up -d` 一键启动核心栈（PostgreSQL + pgvector + EMA 后端 + 前端 + Caddy 反代）。备份与监控（backup / prometheus / grafana）属于 `observability` profile——开发/演示默认**不启动**（空库没有值得备份或观测的数据），有真实数据与流量时用 `docker compose --profile observability up -d` 一并拉起：
 
 ```yaml
 services:
   postgres:      # PostgreSQL + pgvector（含健康检查）
   backend:       # EMA 单镜像（后端 + 构建产物 frontend/dist，见 Dockerfile）
-  backup:        # 每小时 pg_dump 全库到 ./backups（见下文 Backup & Restore）
-  prometheus:    # 抓取 backend /metrics 的 ema_* 时序（见下文 Monitoring）
-  grafana:       # 渲染 EMA 运行健康看板（登录 admin / GF_ADMIN_PASSWORD）
+  caddy:         # TLS 终止 + 反代（见下文 HTTPS (TLS) 与反向代理）
+  backup:        # [observability] 每小时 pg_dump 全库到 ./backups（见下文 Backup & Restore）
+  prometheus:    # [observability] 抓取 backend /metrics 的 ema_* 时序（见下文 Monitoring）
+  grafana:       # [observability] 渲染 EMA 运行健康看板（登录 admin / GF_ADMIN_PASSWORD）
 ```
 
 `backend` 使用根目录 `Dockerfile` 构建**单镜像**——FastAPI 同时托管前端构建产物（`backend/main.py` 挂载 `frontend/dist` 并对非 API 路由回退到 index.html），因此不需要单独的 frontend 服务。构建流程：
@@ -54,9 +55,9 @@ services:
 |---------|-------|--------|
 | postgres | pgvector/pgvector:pg16 | 已就绪 |
 | backend | `Dockerfile` 构建（后端 + 前端产物单镜像） | 已容器化，`docker compose up -d` 一键启动 |
-| backup | pgvector/pgvector:pg16（复用 pg_dump） | 每小时 pg_dump -Fc 全库，保留最近 14 份 |
-| prometheus | prom/prometheus:v2.53.0 | 抓取 backend `/metrics`，15s 间隔 |
-| grafana | grafana/grafana:11.1.0 | EMA 运行健康看板（`http://localhost:3000`） |
+| backup | pgvector/pgvector:pg16（复用 pg_dump） | `observability` profile；每小时 pg_dump -Fc 全库，保留最近 14 份 |
+| prometheus | prom/prometheus:v2.53.0 | `observability` profile；抓取 backend `/metrics`，15s 间隔 |
+| grafana | grafana/grafana:11.1.0 | `observability` profile；EMA 运行健康看板（`http://localhost:3000`） |
 | caddy | caddy:2.8-alpine | TLS 终止 + 反代（默认 `http://localhost:8080`，公网配域名后自动 HTTPS） |
 
 > **pgvector 版本要求**：向量索引使用 HNSW（`USING hnsw`），需要 **pgvector ≥ 0.5**。上述 `pgvector/pgvector:pg16` 镜像满足要求；若使用发行版自带扩展或自建镜像，请先确认 `SELECT extversion FROM pg_extension WHERE extname = 'vector'` 不低于 0.5，否则建索引会失败。历史 ivfflat 库开发期重建即可（`init_db` 不做运行时索引替换）。
@@ -79,6 +80,8 @@ Schema 演进用 **Alembic 版本化**（`alembic_version` 表 + `migrations/ver
 - **首次引入的兼容性**（2026-08-11 已实测）：旧库（由历史 `init_db` 建成）首次 `upgrade head` 时 `CREATE TABLE IF NOT EXISTS` 跳过已有表、仅 stamp 到 head；全新库全量建 9 张业务表。embedding 列用占位维度 1024；若配置模型维度不同，`init_db` 启动校验失败，需 `python -m scripts.recreate_db` 重建后重摄取。
 
 ## Backup & Restore
+
+> **启用**：`backup` 服务属于 `observability` profile，默认不启动。有需要备份的真实数据时：`docker compose --profile observability up -d backup`。
 
 > **已实测**（2026-08-11）：备份容器启动即 dump 一次；恢复演练通过——pg_restore 到新库后 `memories` / `chunks` 计数与主库完全一致。
 
@@ -133,6 +136,8 @@ docker compose exec -T backup psql -h postgres -U ema -d ema_restore \
 
 ### 监控（Prometheus + Grafana）
 
+> **启用**：`prometheus` / `grafana` 属于 `observability` profile，默认不启动。有真实流量与数据时：`docker compose --profile observability up -d prometheus grafana`。
+
 `backend` 已暴露 `GET /metrics`（`ema_*` 时序，见 `backend/shared/runtime_metrics.py`）；compose 的 `prometheus` 服务每 15s 抓取一次，`grafana` 服务渲染 **"EMA — Runtime Health"** 看板（9 个面板：HTTP QPS / 延迟 P50·P95 / 5xx 错误率 / LLM 调用·token·延迟 / 熔断器状态 / Agent 并发槽位与 503 拒绝 / ReAct 步数均值）。
 
 - 访问：Grafana `http://localhost:3000`（登录 **admin** / `GF_ADMIN_PASSWORD`，默认 `admin`，首次登录请修改）；Prometheus `http://localhost:9090`（query 界面可手查 `ema_*`）。
@@ -180,15 +185,17 @@ EMA 日志统一走 **stdout**（容器 `docker compose logs`），格式由 `LO
 
 - `LLM_*` — LLM provider 配置（含传输韧性 `LLM_RETRY_*` / `LLM_CIRCUIT_BREAKER_*`、结构化重试 `LLM_STRUCTURED_*`、可选故障转移 `LLM_FALLBACK_*`——设置 `LLM_FALLBACK_PROVIDER` 后，主 provider 的可重试失败或熔断会在该次调用上改走备用 provider，留空则关闭）
 - `EMBEDDING_*` — Embedding 模型配置（含可选故障转移 `EMBEDDING_FALLBACK_*`——设置 `EMBEDDING_FALLBACK_PROVIDER` 后，主 provider 失败（重试耗尽/熔断/本地模型损坏）会在该次调用上改走备用 provider，留空则关闭；备用模型维度必须与主模型一致；另含 CPU 并发控制 `EMBEDDING_MAX_CONCURRENCY` / `EMBEDDING_TORCH_THREADS`——两者乘积≈核数时零超卖，消除并发 embed 延迟长尾，冷路径压测 10 并发 P95 19s→690ms，见 gap-remediation.md §5.3.2）
-- `EMA_API_KEY` — API 接入认证 key。设置后所有 `/api` 请求须携带 `Authorization: Bearer <EMA_API_KEY>`（见下文 Authentication）；不设置时服务仍可启动，但任何 `/api` 请求都会收到 401
-- `VITE_EMA_API_KEY` — 前端注入的同一 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）；未配置时前端请求不携带认证头（向后兼容）。应与 `EMA_API_KEY` 保持一致
+- `EMA_API_KEY` — API 接入认证的服务端 / 管理员 key。设置后所有 `/api` 请求须携带 `Authorization: Bearer <key>`，key 为 `EMA_API_KEY` 或 `VITE_EMA_API_KEY` 之一（见下文 Authentication）；不设置时服务仍可启动，但任何 `/api` 请求都会收到 401
+- `VITE_EMA_API_KEY` — 前端专用 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）。与 `EMA_API_KEY` 刻意不同——它被打进浏览器可读的 JS bundle，任何访问前端页面的人都能提取，因此不作为管理员凭据。未配置时前端请求不携带认证头（向后兼容）
 
   > **容器构建注意**：Vite 在 **build 阶段**（`docker build` Stage 1）读取该变量，而根 `.env` 被 `.dockerignore` 排除、`env_file` 只注入容器**运行时**，Vite 看不到。docker-compose 已通过 `build.args.VITE_EMA_API_KEY` 从根 `.env` 传入，直接 `docker compose build` 即可；修改 key 后须重新构建镜像，否则浏览器端仍携带旧 key 会收到 401。构建参数会留在镜像元数据（`docker history`）中，因该 key 本就是分发给前端的公开值，可接受；真正的服务端密钥（`EMA_API_KEY`）不要走 build-arg。
 - `DATABASE_URL` — PostgreSQL 连接串。本地直接运行用 localhost；compose 部署时默认由 `docker-compose.yml` 指向 `postgres` 服务名，此处设置会覆盖该默认值（改库/改口令见上方"改数据库口令"与恢复 runbook）
 - `MAX_AGENT_STEPS` — Agent 最大工具调用次数
 - `MAX_AGENT_CONCURRENCY` — 同时运行的交互式 Agent 会话上限（默认 4；超过的 chat 请求返回 503，防止并发 ReAct 循环一起打满 provider 限流）
 - `AGENT_TIMEOUT` — Agent 单回合总超时（秒）
-- `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` / `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
+- `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` **默认 false**（ADR-011，生产空库时避免巡检空跑）/ `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
+- `CONNECTORS_ENABLED` — 连接器 / webhook 模块总开关（**默认 false**，ADR-011）。false 时 `/api/webhook/*` 与 `/api/connectors*` 路由不挂载（404）、连接器不注册；有真实数据源时置 `true`。`WEBHOOK_*_SECRET` 仅在启用后生效
+- `SCENARIOS_ENABLED` — 垂直场景模块总开关（**默认 false**，ADR-011）。false 时 `/api/scenarios*` 路由不挂载（404）；场景有真实输入时置 `true`
 - `USAGE_*` — LLM 用量追踪（`USAGE_ENABLED` / `USAGE_FLUSH_INTERVAL_SECONDS` / `USAGE_BUFFER_MAX` / `USAGE_SAMPLE_RATE`——采样率决定多少成功调用把 prompt/response 文本存入 `llm_usage` 供事后质量分析，error 调用一律采样；`/api/usage/samples` 查询。`USAGE_SAMPLE_RETENTION_DAYS`——采样文本保留天数，到期由 flusher 清空文本列、元数据保留，默认 30）
 - `METRICS_ENABLED` — 运行健康指标（Prometheus，默认 true）。开启后 `GET /metrics` 暴露进程内时间序列：HTTP 请求数与延迟分位数、LLM 调用数/延迟/token、熔断器状态与打开/拒绝计数、Agent 并发槽位占用与 503 拒绝、ReAct 循环步数分布。与 `USAGE_ENABLED` 独立——这是进程本地健康观测，`llm_usage` 是持久化成本行。关闭则 `/metrics` 返回 404
 - `RATE_LIMIT_*` — API 限流（per-key 令牌桶，默认开启）：`RATE_LIMIT_ENABLED` / `RATE_LIMIT_CHAT_REQUESTS`（默认 30）/ `RATE_LIMIT_CHAT_WINDOW_SECONDS`（60，覆盖 `/api/agent/chat*` 与 `/api/scenarios*` 的 LLM 密集档）/ `RATE_LIMIT_GENERAL_REQUESTS`（120）/ `RATE_LIMIT_GENERAL_WINDOW_SECONDS`（60，其余 `/api` 路由）。按 `Authorization: Bearer` 的 token 分桶（无 token 归共享 `anonymous` 桶），超限返回 `429 + Retry-After`。实现见 `backend/api/ratelimit.py`；`APP_ENV=test` 豁免（与 auth 一致），`/health`、`/metrics`、静态资源不受限
@@ -199,20 +206,21 @@ EMA 日志统一走 **stdout**（容器 `docker compose logs`），格式由 `LO
 
 ## Authentication
 
-API 接入认证为共享 key（`Authorization: Bearer <EMA_API_KEY>`），实现见 `backend/api/auth.py`，作为全局依赖覆盖所有 `/api` 路由：
+API 接入认证为共享 key 机制，实现见 `backend/api/auth.py`，作为全局依赖覆盖所有 `/api` 路由。请求头 `Authorization: Bearer <key>` 的 key 可匹配 `EMA_API_KEY`（服务端 / 管理员）或 `VITE_EMA_API_KEY`（前端 bundle）中的任意一个：
 
 ```bash
 # 服务端：设置 key 后启动（未设置时所有 /api 请求返回 401）
 EMA_API_KEY=<your-key> uvicorn backend.main:app
 
-# 客户端：请求头携带同一 key
+# 客户端：请求头携带任一 key
 curl -H "Authorization: Bearer <your-key>" http://localhost:8000/api/memory/stats
 ```
 
 - `APP_ENV=test` 豁免该守卫（API 测试套件用 mock，不需 key）。
 - key 比较为常量时间（`secrets.compare_digest`），不匹配返回无细节的通用 401。
-- 前端构建期用 `VITE_EMA_API_KEY` 注入同一 key；开发模式未配置时前端请求不携带认证头（后端返回 401）。
-- 边界：单 key 共享、无用户身份与角色——这是有意取舍（与 ADR 004 不做多租户一致），非生产多用户场景的完整认证方案。
+- 两个 key 刻意分离：`VITE_EMA_API_KEY` 构建期打进前端 bundle，任何访问页面的人都能提取；拆分后它不是管理员凭据，真正的服务端密钥（`EMA_API_KEY`）只掌握在运维侧。注意两把 key 对 API 的权限目前完全相同（无 per-key 角色，见边界）——拆分隔离的是凭据而非权限。改动 `VITE_EMA_API_KEY` 后须重新构建前端镜像（见上文"容器构建注意"）。
+- 开发模式未配置 `VITE_EMA_API_KEY` 时前端请求不携带认证头（后端返回 401）。
+- 边界：共享 key、无用户身份与角色——这是有意取舍（与 ADR 004 不做多租户一致），非生产多用户场景的完整认证方案。
 
 ## Health & Startup
 
@@ -263,7 +271,7 @@ pytest
 # 1. 构建镜像（后端 + 前端产物单镜像，约 10-30 分钟，视网络）
 docker compose build
 
-# 2. 启动完整栈（postgres + backend，backend 依赖 postgres 健康检查通过）
+# 2. 启动核心栈（postgres + backend + caddy 反代；备份/监控见 observability profile）
 docker compose up -d
 
 # 3. 访问
