@@ -23,10 +23,10 @@ from backend.shared.runtime_metrics import (
     record_http_request,
     record_llm_call,
     render_metrics,
-    reset_runtime_metrics,
     set_agent_slots_in_use,
     set_circuit_breaker_state,
 )
+from tests.support.process_state import reset_runtime_metrics
 
 
 @pytest.fixture(autouse=True)
@@ -134,17 +134,18 @@ class TestCircuitBreakerMetrics:
             cb.before_call()
         assert 'ema_circuit_breaker_rejections_total{name="llm:test"} 1.0' in _sample_lines()
 
-        # A success from a call admitted before the trip (no probe token) must
-        # NOT close an OPEN breaker — a stale in-flight success re-closing
-        # would let a dead provider oscillate OPEN→CLOSED→OPEN.
+        # A success while OPEN must NOT close the breaker — only the
+        # cooldown-elapsed re-admission in before_call may.  Otherwise a
+        # stale in-flight success re-closing would let a dead provider
+        # oscillate OPEN→CLOSED→OPEN.
         cb.record_success()
         assert 'ema_circuit_breaker_state{name="llm:test"} 1.0' in _sample_lines()
 
-        # After the cooldown elapses the next call is admitted as the single
-        # recovery probe; its success (with the probe token) closes the breaker.
+        # After the cooldown elapses the next call is admitted (back to
+        # CLOSED); its success leaves the breaker closed.
         time.sleep(0.06)
-        token = cb.before_call()
-        cb.record_success(token)
+        cb.before_call()
+        cb.record_success()
         assert 'ema_circuit_breaker_state{name="llm:test"} 0.0' in _sample_lines()
 
     def test_direct_helpers(self) -> None:

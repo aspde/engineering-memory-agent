@@ -17,15 +17,16 @@ from backend.shared.metrics import (
     record_structured_failure,
     reset_structured_failures,
 )
+from tests.support.process_state import reset_alert_state
 
 
 @pytest.fixture(autouse=True)
 def _clean_alert_state():
     """Isolate alert cooldown + structured-failure baselines between tests."""
-    alerts.reset_alert_state()
+    reset_alert_state()
     reset_structured_failures()
     yield
-    alerts.reset_alert_state()
+    reset_alert_state()
     reset_structured_failures()
 
 

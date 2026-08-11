@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.api.ratelimit import reset_rate_limits
+from tests.support.process_state import reset_rate_limits
 from backend.shared.config import config
 
 

@@ -64,14 +64,6 @@ def pending_rows() -> list[dict[str, Any]]:
         return list(_pending)
 
 
-def reset_usage_buffer() -> None:
-    """Drop all buffered observations — tests use this to isolate state."""
-    global _consecutive_flush_failures
-    with _pending_lock:
-        _pending.clear()
-        _consecutive_flush_failures = 0
-
-
 # ── Call observation helpers (used by the provider layer) ─────────────
 
 # Prompt/response text is sampled (not always stored) for post-hoc quality

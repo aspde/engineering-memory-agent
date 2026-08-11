@@ -289,12 +289,6 @@ _query_embed_cache: OrderedDict[str, tuple[float, ...]] = OrderedDict()
 _query_embed_cache_lock = threading.Lock()
 
 
-def clear_embed_query_cache() -> None:
-    """Drop cached query embeddings — tests and config changes call this."""
-    with _query_embed_cache_lock:
-        _query_embed_cache.clear()
-
-
 async def embed_query(query: str) -> list[float]:
     """Embed a single query string, returning a flat vector.
 
@@ -385,7 +379,7 @@ async def _rerank_and_filter(
     — the rerank + floor + assemble tail was copy-pasted in all three.
 
     Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
-    report (``docs/interview/eval-report.md``) shows it costs ~90x latency
+    report (``tests/eval/reports/eval-report.md``) shows it costs ~90x latency
     while *lowering* recall@5 on the current corpus, so the default read
     path ranks candidates by their raw recall similarity and never loads the
     568M model.  ``use_llm_rerank=True`` selects the LLM pointwise variant
@@ -568,7 +562,7 @@ async def retrieve_hybrid(
 
     By default the union is ranked by reciprocal-rank fusion (RRF) of the
     dense and sparse lists (``skip_rerank=True``): the eval report
-    (``docs/interview/eval-report.md``) shows cross-encoder rerank costs
+    (``tests/eval/reports/eval-report.md``) shows cross-encoder rerank costs
     ~90x latency on the current corpus while *lowering* recall@5 (0.967 vs
     1.000), so reranking is opt-in.  Pass ``skip_rerank=False`` for the
     cross-encoder rerank path, or ``use_llm_rerank=True`` for the LLM
@@ -711,7 +705,7 @@ async def query_memories(
     must not fire in a pure measurement.
 
     Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
-    report (``docs/interview/eval-report.md``) shows it costs ~90x latency
+    report (``tests/eval/reports/eval-report.md``) shows it costs ~90x latency
     while lowering recall@5 on the current corpus, so the default path ranks
     candidates by ``search_memories``' decay-weighted similarity
     (``weighted_score``) and never loads the 568M model.  The memory layer's

@@ -71,14 +71,6 @@ _last_fired: dict[str, float] = {}  # alert key -> monotonic ts of last notify
 _prev_structured_failures: dict[str, int] = {}  # scenario -> last-seen count
 
 
-def reset_alert_state() -> None:
-    """Drop cooldown + counter baselines — tests use this for isolation."""
-    global _prev_structured_failures
-    with _alerts_lock:
-        _last_fired.clear()
-        _prev_structured_failures = {}
-
-
 def _cooldown_ok(key: str) -> bool:
     """True if *key* is not currently in cooldown; records the fire time."""
     now = time.monotonic()

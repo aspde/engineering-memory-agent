@@ -145,13 +145,8 @@ class RateLimiter:
 
 
 # Process-local singleton the middleware reads at request time (so runtime
-# config changes take effect immediately).  ``reset_rate_limits`` lets the
-# test suite isolate state between cases.
+# config changes take effect immediately).
 _limiter = RateLimiter()
-
-
-def reset_rate_limits() -> None:
-    _limiter.reset()
 
 
 def _extract_key(scope: dict) -> str:

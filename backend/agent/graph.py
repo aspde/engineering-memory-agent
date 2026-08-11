@@ -31,6 +31,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 
 from backend.agent.nodes import (
     APPROVAL_REQUIRED_TOOLS,
+    _to_openai_tools,
     call_llm_node,
     check_approval_node,
     check_conflict_node,
@@ -74,7 +75,13 @@ def build_agent_graph(
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
     """
-    _call_llm = partial(call_llm_node, tools=tools)
+    # Serialise tool schemas once at graph-build time — the roster is fixed,
+    # so every ReAct turn reuses this list instead of re-serialising per call.
+    _call_llm = partial(
+        call_llm_node,
+        tools=tools,
+        tool_schemas=_to_openai_tools(tools),
+    )
     _check_approval = partial(
         check_approval_node,
         approval_required_tools=approval_required_tools,

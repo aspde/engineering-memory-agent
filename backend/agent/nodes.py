@@ -46,28 +46,16 @@ def _stream_writer():
         return lambda _payload: None
 
 
-# Tool schemas are serialised from each tool's pydantic args schema.  The
-# roster is fixed at graph-build time, so the serialised OpenAI function-
-# calling schemas are cached per tool-name tuple and reused — one
-# ``model_json_schema()`` per tool per process instead of per LLM turn.
-_tool_schema_cache: dict[tuple[str, ...], list[dict[str, Any]]] = {}
-_tool_schema_cache_lock = threading.Lock()
-
-
 def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
     """Convert LangChain tool objects to OpenAI function-calling schemas.
 
-    Serialisation is cached by tool-name tuple: the roster is fixed for the
-    process lifetime, so repeated agent turns reuse the same schemas instead
-    of re-running ``model_json_schema()`` every call.  A shallow copy of the
-    list is returned so callers cannot mutate the cache.
+    The roster is fixed at graph-build time, so ``build_agent_graph``
+    serialises the schemas once when it builds the graph and passes them into
+    ``call_llm_node`` via partial — this function is not on the LLM hot path.
+    Pure (no module state) and safe to call freely; ``call_llm_node`` falls
+    back to it only when invoked without a pre-computed ``tool_schemas``
+    argument (direct node invocation in tests).
     """
-    key = tuple(t.name for t in tools)
-    with _tool_schema_cache_lock:
-        cached = _tool_schema_cache.get(key)
-        if cached is not None:
-            return list(cached)
-
     schemas: list[dict[str, Any]] = []
     for t in tools:
         schema: dict[str, Any] = {
@@ -91,9 +79,7 @@ def _to_openai_tools(tools: list) -> list[dict[str, Any]]:
             schema["function"]["parameters"] = {"type": "object", "properties": {}}
         schemas.append(schema)
 
-    with _tool_schema_cache_lock:
-        _tool_schema_cache[key] = schemas
-    return list(schemas)
+    return schemas
 
 
 # An AIMessage appended when ``call_llm`` hits a provider error is a terminal
@@ -283,13 +269,6 @@ def _get_tokenizer() -> Any | None:
     return _tokenizer
 
 
-def reset_token_estimator() -> None:
-    """Drop the cached tokenizer and the load-attempt flag (tests / config)."""
-    global _tokenizer, _tokenizer_attempted
-    _tokenizer = None
-    _tokenizer_attempted = False
-
-
 def _estimate_tokens(text: str) -> int:
     """Token count for *text* — tiktoken when available, else the heuristic."""
     enc = _get_tokenizer()
@@ -415,35 +394,25 @@ def _window_messages(
 # entire early history) must not blow past the compaction call's own budget.
 _COMPACTION_TRANSCRIPT_CHARS = 12000
 
-# ── Compaction memoization ───────────────────────────────────────────
-# A tool turn bounds the conversation twice — ``call_llm_node`` (for the
-# tool-selection call) and ``generate_final_node`` (for the synthesis call)
-# — over nearly identical message lists with the SAME overflow prefix.  Each
-# previously paid its own compaction LLM call and could produce a different,
-# non-deterministic summary.  Memoize the summary on the exact transcript
-# (the sole input the summarisation LLM sees, plus the prompt version) so the
-# second call reuses the first's output.  Bounded LRU; eviction drops the
-# oldest entry.  Failures are not cached — a transient LLM error retries next
-# turn instead of poisoning the cache with an empty summary.
+# ── Compaction reuse within a turn ─────────────────────────────────
+# A tool turn bounds the conversation twice — ``call_llm_node`` (tool
+# selection) and ``generate_final_node`` (synthesis) — over message lists
+# that usually share the same overflow prefix.  Each pass would otherwise pay
+# its own compaction LLM call and could produce a different, non-deterministic
+# summary.  Instead the summary (and the overflow transcript it was computed
+# over) is carried in ``AgentState.compaction_summary`` /
+# ``compaction_transcript``: the second bound reuses the first's summary when
+# the current overflow's transcript matches — no second LLM call, one
+# deterministic summary per turn.  ``generate_final_node`` clears the fields
+# at turn end so the next turn starts fresh.
 #
-# The lock (``_compaction_cache_lock``) guards both the completed-cache and
-# the in-flight map.  ``_compaction_inflight`` holds a key -> future for a
-# summary currently being generated: a concurrent bound of the same overflow
-# awaits that future instead of firing a second LLM call.  All critical
-# sections are non-blocking dict ops — no ``await`` happens under the lock,
-# so a joining coroutine can never stall the event loop waiting on a leader
-# that needs the same lock to finish.
-_compaction_cache: dict[tuple[str, str], str] = {}
-_compaction_cache_lock = threading.Lock()
-_COMPACTION_CACHE_MAX = 32
-_compaction_inflight: dict[tuple[str, str], "asyncio.Future[str]"] = {}
-
-
-def reset_compaction_cache() -> None:
-    """Drop cached compaction summaries and in-flight calls (tests / debugging)."""
-    with _compaction_cache_lock:
-        _compaction_cache.clear()
-        _compaction_inflight.clear()
+# Deliberate simplification vs. a transcript-keyed global cache: the two
+# bounds run strictly sequentially within one ReAct turn (the graph has no
+# concurrent compaction call sites), so reuse is state passing — no lock, no
+# in-flight dedup, no cross-turn cache to invalidate.  A transcript mismatch
+# (e.g. a large tool result pushed more history into the overflow) simply
+# re-summarises, so a stale summary can never silently drop newly-overflowed
+# content.
 
 
 # Cap per-ToolMessage content in the compaction transcript — a single huge
@@ -523,81 +492,6 @@ async def _summarize_overflow(
         return ""
 
 
-async def _memoized_summarize_overflow(messages: list[BaseMessage]) -> str:
-    """Summarise *messages*, reusing a cached summary for the same transcript.
-
-    See the module note above the cache — this makes the two bounds in a tool
-    turn agree on one summary and costs at most one compaction LLM call per
-    distinct overflow.  When two bounds race on the same overflow, the loser
-    awaits the winner's in-flight future (``_compaction_inflight``) instead
-    of firing a second LLM call.
-
-    No ``await`` happens under ``_compaction_cache_lock``: joining a future
-    or running the summariser could stall the event loop (the leader needs
-    that same lock in its ``finally`` to publish).  The lock only guards the
-    non-blocking dict lookups/inserts, so a coroutine that found the future
-    is always the leader and a coroutine that found an existing one joins it.
-    """
-    version, _ = get_prompt("agent.compaction")
-    transcript = _overflow_transcript(messages)
-    key = (version, transcript)
-    with _compaction_cache_lock:
-        cached = _compaction_cache.get(key)
-        if cached is not None:
-            return cached
-        inflight = _compaction_inflight.get(key)
-        if inflight is None:
-            # We are the leader — register our future under the lock so a
-            # concurrent bound joins it, then do the summarising outside.
-            inflight = asyncio.get_running_loop().create_future()
-            _compaction_inflight[key] = inflight
-            leader = True
-        else:
-            leader = False
-
-    if not leader:
-        # Joiner — await the leader's future outside the lock.  A leader that
-        # failed surfaces as an exception here; fails safe like the summariser
-        # itself (no summary cached, caller falls back to truncation) rather
-        # than parking the caller on a dead future.
-        try:
-            return await inflight
-        except asyncio.CancelledError:
-            # Our own cancellation must propagate — the caller's
-            # ``asyncio.timeout`` (AGENT_TIMEOUT) may have cancelled us while
-            # we waited on a slow leader.  Swallowing it would let the node
-            # run past its deadline and only fail on the next await.
-            raise
-        except BaseException:
-            return ""
-
-    # ── Leader path ──────────────────────────────────────────────────
-    try:
-        summary = await _summarize_overflow(messages, transcript=transcript)
-    except BaseException:
-        # Let waiters resolve too — a cancelled/errored leader must not leave
-        # them parked on a future that never resolves.  An empty result keeps
-        # the joiner's behaviour identical to a summariser that returned ""
-        # (nothing is cached); the leader re-raises the original exception so
-        # cancellation/failure still propagates to its own caller.
-        if not inflight.done():
-            inflight.set_result("")
-        raise
-    else:
-        if not inflight.done():
-            inflight.set_result(summary)
-        if summary:
-            with _compaction_cache_lock:
-                _compaction_cache[key] = summary
-                if len(_compaction_cache) > _COMPACTION_CACHE_MAX:
-                    _compaction_cache.popitem(last=False)
-        return summary
-    finally:
-        with _compaction_cache_lock:
-            if _compaction_inflight.get(key) is inflight:
-                _compaction_inflight.pop(key, None)
-
-
 def _split_overflow(
     messages: list[BaseMessage], tail_budget: int
 ) -> tuple[list[BaseMessage], list[BaseMessage]]:
@@ -622,8 +516,12 @@ def _split_overflow(
 
 
 async def _maybe_compact(
-    messages: list[BaseMessage], max_tokens: int | None = None
-) -> list[BaseMessage]:
+    messages: list[BaseMessage],
+    max_tokens: int | None = None,
+    *,
+    existing_summary: str | None = None,
+    existing_transcript: str | None = None,
+) -> tuple[list[BaseMessage], str | None, str | None]:
     """Fold history older than the token budget into a running-summary SystemMessage.
 
     Only active when ``config.conversation_compaction_enabled`` is set
@@ -635,33 +533,59 @@ async def _maybe_compact(
     inside the same total budget.  On any failure it returns *messages*
     unchanged and the caller's windowing still truncates — compaction never
     loses more context than the existing behaviour.
+
+    Returns ``(messages, new_summary, new_transcript)``.  ``new_summary`` is
+    the summary just computed (``None`` when nothing was summarised, or when
+    the caller's *existing_summary* was reused); ``new_transcript`` is the
+    overflow transcript that summary was computed over, ``None`` alongside
+    ``new_summary``.
+
+    Reuse: a tool turn bounds the conversation twice — ``call_llm_node``
+    then ``generate_final_node`` — over message lists that usually share the
+    same overflow prefix.  Passing *existing_summary* / *existing_transcript*
+    (the previous bound's output, carried in ``AgentState``) reuses the old
+    summary WITHOUT a second LLM call — but only when the current overflow's
+    transcript exactly matches *existing_transcript*.  A large tool result
+    can push more history into the overflow; if the prefix changed, the old
+    summary would drop that newly-overflowed content, so the check
+    re-summarises.  Failures are never reused: a failed summarise returns
+    ``None`` and leaves the caller's state untouched, so the next pass retries.
     """
     from backend.shared.config import config
 
     if max_tokens is None:
         max_tokens = _context_budget()
     if not config.conversation_compaction_enabled:
-        return messages
+        return messages, None, None
     system = [m for m in messages if isinstance(m, SystemMessage)]
     rest = [m for m in messages if not isinstance(m, SystemMessage)]
     if sum(_message_tokens(m) for m in rest) <= max_tokens:
-        return messages
+        return messages, None, None
     # Reserve ~60% of the window for the retained tail; the running summary
     # gets the rest.  If even the tail can't fit (a single oversized message),
     # the split still keeps the newest message and compacts everything older.
     tail_budget = max(int(max_tokens * 0.6), 1)
     overflow, tail = _split_overflow(rest, tail_budget)
     if not overflow:
-        return messages
-    summary = await _memoized_summarize_overflow(overflow)
+        return messages, None, None
+    transcript = _overflow_transcript(overflow)
+    if existing_summary and existing_transcript == transcript:
+        # Same overflow prefix as the previous bound in this turn — the old
+        # summary still covers it.  Pinned system messages stay first, then
+        # the running summary, then the retained tail.  The summary may
+        # coexist with the persona system in the LangChain message list —
+        # ``call_llm_node`` coalesces all system messages into one before
+        # serialization, so Anthropic's single-top-level-system constraint
+        # is met (see ``_merge_system_messages``).
+        return (
+            system + [SystemMessage(content=existing_summary)] + tail,
+            None,
+            None,
+        )
+    summary = await _summarize_overflow(overflow, transcript=transcript)
     if not summary:
-        return messages
-    # Pinned system messages stay first, then the running summary, then the
-    # retained tail.  The summary may coexist with the persona system in the
-    # LangChain message list — ``call_llm_node`` coalesces all system messages
-    # into one before serialization, so Anthropic's single-top-level-system
-    # constraint is met (see ``_merge_system_messages``).
-    return system + [SystemMessage(content=summary)] + tail
+        return messages, None, None
+    return system + [SystemMessage(content=summary)] + tail, summary, transcript
 
 
 def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
@@ -697,15 +621,31 @@ def _merge_system_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 
 async def _bounded_messages(
-    messages: list[BaseMessage], max_tokens: int | None = None
-) -> list[BaseMessage]:
+    messages: list[BaseMessage],
+    max_tokens: int | None = None,
+    *,
+    existing_summary: str | None = None,
+    existing_transcript: str | None = None,
+) -> tuple[list[BaseMessage], str | None, str | None]:
     """Compact (when enabled) then window *messages* for the LLM.
 
     With compaction disabled this is exactly ``_window_messages`` — the
-    default behaviour is unchanged.
+    default behaviour is unchanged.  Returns ``(windowed, new_summary,
+    new_transcript)`` — see :func:`_maybe_compact` for the summary contract.
+    Callers publish a non-``None`` ``new_summary`` into ``AgentState`` so the
+    same turn's later bound reuses it instead of paying a second call.
     """
-    compacted = await _maybe_compact(messages, max_tokens)
-    return _window_messages(compacted, max_tokens)
+    compacted, new_summary, new_transcript = await _maybe_compact(
+        messages,
+        max_tokens,
+        existing_summary=existing_summary,
+        existing_transcript=existing_transcript,
+    )
+    return (
+        _window_messages(compacted, max_tokens),
+        new_summary,
+        new_transcript,
+    )
 
 
 def _truncate_tool_content(text: str, limit: int = _MAX_TOOL_CONTENT_CHARS) -> str:
@@ -930,15 +870,6 @@ _auto_memory_last_content: dict[str, str] = {}  # thread_id -> last content
 _auto_memory_recent_writes: deque = deque()     # monotonic ts, process-wide
 
 
-def reset_auto_memory_throttle() -> None:
-    """Drop all auto-memory throttle state — tests use this for isolation."""
-    with _auto_memory_lock:
-        _auto_memory_last_write.clear()
-        _auto_memory_write_count.clear()
-        _auto_memory_last_content.clear()
-        _auto_memory_recent_writes.clear()
-
-
 def _auto_memory_throttled(thread_id: str, content: str) -> bool:
     """True when a new auto-memory capture should be skipped (throttled)."""
     from backend.shared.config import config
@@ -1154,25 +1085,21 @@ def _schedule_auto_memory(state: AgentState) -> None:
     _auto_memory_tasks.add(task)
 
 
-async def wait_auto_memory_tasks() -> None:
-    """Wait for all in-flight auto-memory background tasks to finish.
-
-    Tests call this after exercising a node that schedules auto-memory,
-    before asserting on its side effects; production never needs it.
-    """
-    while _auto_memory_tasks:
-        await asyncio.gather(*list(_auto_memory_tasks), return_exceptions=True)
-
-
 # ── Nodes ────────────────────────────────────────────────────────────
 
 
-async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
+async def call_llm_node(
+    state: AgentState,
+    *,
+    tools: list,
+    tool_schemas: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Send messages + tool definitions to the LLM, return an AIMessage.
 
-    The *tools* parameter is injected at graph-construction time via
-    ``functools.partial`` so the node has access to tool schemas without
-    global state.
+    *tools* and the pre-serialised *tool_schemas* are injected at
+    graph-construction time via ``functools.partial`` — schema serialisation
+    is a per-build cost, not a per-turn one.  ``tool_schemas=None`` falls
+    back to serialising *tools* here (direct node invocation in tests).
 
     Streaming: the LLM call is streamed, and text deltas are forwarded to
     the SSE client live through the LangGraph custom stream (``stream_mode=
@@ -1194,10 +1121,17 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
 
     # Prepend the system prompt if this is the first call, then bound the
     # history sent to the LLM (compact when enabled, then window to the
-    # recent tail + pinned system prompts).
+    # recent tail + pinned system prompts).  The previous bound's compaction
+    # summary (this turn, or an earlier ReAct loop pass) is passed in so the
+    # same overflow prefix reuses it instead of paying a second summariser
+    # call; a fresh summary is published in the return update below.
     messages = list(state["messages"])
     has_system = any(isinstance(m, SystemMessage) for m in messages)
-    messages = await _bounded_messages(messages)
+    messages, compaction_summary, compaction_transcript = await _bounded_messages(
+        messages,
+        existing_summary=state.get("compaction_summary"),
+        existing_transcript=state.get("compaction_transcript"),
+    )
     if not has_system:
         version, system_text = get_prompt("agent.system")
         logger.info("call_llm_node: using agent.system prompt v%s", version)
@@ -1209,7 +1143,8 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     # instruction section.
     messages = _merge_system_messages(messages)
 
-    tool_schemas = _to_openai_tools(tools)
+    if tool_schemas is None:
+        tool_schemas = _to_openai_tools(tools)
     dicts = _messages_to_dicts(messages)
 
     writer = _stream_writer()
@@ -1271,7 +1206,16 @@ async def call_llm_node(state: AgentState, *, tools: list) -> dict[str, Any]:
     else:
         aimessage = AIMessage(content=content)
 
-    return {"messages": [aimessage], "step_count": step_base + 1}
+    update: dict[str, Any] = {"messages": [aimessage], "step_count": step_base + 1}
+    if compaction_summary:
+        # A fresh summary was computed this pass — publish it (with the
+        # overflow transcript it covers) so ``generate_final_node``'s bound
+        # later in the same turn reuses it.  A reused summary leaves the
+        # existing state fields untouched, so they stay valid for the next
+        # bound.
+        update["compaction_summary"] = compaction_summary
+        update["compaction_transcript"] = compaction_transcript
+    return update
 
 
 async def generate_final_node(state: AgentState) -> dict[str, Any]:
@@ -1308,7 +1252,14 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
             "Reusing call_llm output as final answer (no tool results this turn)"
         )
         _schedule_auto_memory(state)
-        return {"final_prompt": None, "final_response": str(last.content)}
+        return {
+            "final_prompt": None,
+            "final_response": str(last.content),
+            # The turn ends here — clear the compaction fields so the next
+            # turn's first call_llm computes its own summary.
+            "compaction_summary": None,
+            "compaction_transcript": None,
+        }
 
     # ── Harvest context from ToolMessages in the recent conversation ──
     # Both this loop and the role loop below walk the *bounded* history so a
@@ -1316,7 +1267,14 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     # prompt on every turn.  When compaction is enabled the overflow is folded
     # into a running-summary SystemMessage, which is folded into the context
     # block below so the synthesis LLM still sees the compressed history.
-    windowed = await _bounded_messages(state["messages"])
+    # Reuse the compaction summary computed by this turn's call_llm bound —
+    # the overflow prefix is identical, so the synthesis prompt sees the same
+    # running summary without a second summariser call.
+    windowed, _, _ = await _bounded_messages(
+        state["messages"],
+        existing_summary=state.get("compaction_summary"),
+        existing_transcript=state.get("compaction_transcript"),
+    )
     context_parts: list[str] = []
     # Compaction summaries (SystemMessages) become <summary> context items.
     for m in windowed:
@@ -1424,6 +1382,10 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         "final_prompt": messages,
         "final_response": response,
         "messages": [aimessage],
+        # The turn ends here — clear the compaction fields so the next
+        # turn's first call_llm computes its own summary.
+        "compaction_summary": None,
+        "compaction_transcript": None,
     }
 
 

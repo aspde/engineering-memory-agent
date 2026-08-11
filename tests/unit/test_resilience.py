@@ -25,6 +25,7 @@ from backend.service.llm_service import AnthropicProvider, OpenAICompatibleProvi
 from backend.shared import resilience
 from backend.shared.config import config
 from backend.shared.resilience import CircuitBreaker, CircuitOpenError, is_retryable
+from tests.support.process_state import reset_circuit_breakers
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -91,9 +92,9 @@ class _StatusError(RuntimeError):
 
 @pytest.fixture(autouse=True)
 def _isolate_breakers():
-    resilience.reset_circuit_breakers()
+    reset_circuit_breakers()
     yield
-    resilience.reset_circuit_breakers()
+    reset_circuit_breakers()
 
 
 @pytest.fixture(autouse=True)
@@ -191,115 +192,9 @@ class TestCircuitBreakerUnit:
         cb.record_failure()
         assert cb.is_open
         time.sleep(0.02)
-        probe_token = cb.before_call()  # cooldown elapsed → the single recovery probe is admitted
-        assert probe_token is not None
-        # HALF-OPEN: the probe is in flight, so calls still fail fast…
-        assert cb.is_open
-        with pytest.raises(CircuitOpenError):
-            cb.before_call()  # only one probe — every other caller fails fast
-        cb.record_success(probe_token)  # probe succeeded → CLOSED
+        cb.before_call()  # cooldown elapsed → the next call is admitted
         assert not cb.is_open
-
-    def test_probe_failure_reopens_immediately(self) -> None:
-        """One failed probe re-opens the breaker even below the failure
-        threshold — a failed probe means the provider is still down."""
-        import time
-
-        cb = CircuitBreaker("t", failure_threshold=3, cooldown_seconds=0.01)
-        cb.record_failure()
-        cb.record_failure()
-        cb.record_failure()  # trip OPEN at the threshold
-        time.sleep(0.02)
-        cb.before_call()  # admit the recovery probe
-        assert cb.is_open
-        cb.record_failure()  # probe fails → back to OPEN
-        assert cb.is_open
-        with pytest.raises(CircuitOpenError):
-            cb.before_call()
-
-    def test_stale_probe_does_not_wedge(self) -> None:
-        """A probe that never resolves (e.g. its task was cancelled) must not
-        wedge the breaker — after one cooldown window a fresh probe may be
-        admitted instead of failing fast forever."""
-        import time
-
-        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
-        cb.record_failure()
-        time.sleep(0.02)
-        cb.before_call()  # admit the probe
-        time.sleep(0.02)  # probe never resolves → becomes stale
-        assert not cb.is_open
-        cb.before_call()  # a fresh probe is admitted, not a CircuitOpenError
-        assert cb.is_open
-
-    def test_stale_inflight_success_does_not_close_open_breaker(self) -> None:
-        """Regression: a call admitted *before* the breaker tripped and still
-        in flight when the breaker opens must not close it when it finally
-        succeeds.  Otherwise the breaker oscillates OPEN→CLOSED→OPEN — the
-        stale success re-closes it, a fresh burst of failures re-opens it —
-        while hammering a provider that is still down."""
-        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=60)
-        cb.before_call()  # call A admitted while CLOSED (token None)
-        cb.record_failure()  # another call trips the breaker → OPEN
-        assert cb.is_open
-        # Call A — in flight since before the trip — eventually succeeds.
-        cb.record_success()
-        assert cb.is_open  # must NOT re-close the open breaker
-        with pytest.raises(CircuitOpenError):
-            cb.before_call()  # still failing fast
-
-    def test_wrong_probe_token_does_not_close_half_open(self) -> None:
-        """A success carrying a token that does not match the admitted probe —
-        e.g. a stale caller racing with a stale token — must not close the
-        breaker; only the current probe's token may."""
-        import time
-
-        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
-        cb.record_failure()
-        time.sleep(0.02)
-        probe_token = cb.before_call()  # the admitted probe
-        assert probe_token is not None
-        cb.record_success(probe_token + 999)  # stale caller's wrong token
-        assert cb.is_open  # only the real probe's token may close it
-        cb.record_success(probe_token)
-        assert not cb.is_open
-
-    def test_only_admitted_probe_success_closes_half_open(self) -> None:
-        """The single half-open recovery probe — identified by the token
-        ``before_call`` returns — is the only call that can close the breaker;
-        a stale success from a call admitted before the trip (no token) must
-        leave it HALF-OPEN."""
-        import time
-
-        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
-        cb.before_call()  # call A admitted while CLOSED (token None)
-        cb.record_failure()  # trip → OPEN
-        time.sleep(0.02)  # cooldown elapses
-        probe_token = cb.before_call()  # probe B admitted (token set)
-        assert probe_token is not None
-        assert cb.is_open  # HALF-OPEN: probe B in flight
-        cb.record_success()  # stale call A succeeds with no token
-        assert cb.is_open  # must stay HALF-OPEN — probe B still the decider
-        cb.record_success(probe_token)  # the admitted probe succeeds → CLOSED
-        assert not cb.is_open
-
-    def test_stale_probe_success_with_old_token_does_not_close(self) -> None:
-        """A probe from an earlier half-open cycle that went stale must not
-        close the breaker when it eventually resolves — only the *current*
-        probe's token may close it."""
-        import time
-
-        cb = CircuitBreaker("t", failure_threshold=1, cooldown_seconds=0.01)
-        cb.record_failure()
-        time.sleep(0.02)
-        old_token = cb.before_call()  # probe 1 admitted
-        time.sleep(0.02)  # probe 1 never resolves → stale
-        new_token = cb.before_call()  # fresh probe 2 admitted
-        assert new_token != old_token
-        cb.record_success(old_token)  # stale probe 1 eventually succeeds
-        assert cb.is_open  # must stay HALF-OPEN — probe 2 still in flight
-        cb.record_success(new_token)  # probe 2 succeeds → CLOSED
-        assert not cb.is_open
+        cb.before_call()  # subsequent calls pass normally
 
 
 # ── Retry behavior through the providers ─────────────────────────────
@@ -414,7 +309,7 @@ class TestCircuitBreakerWiring:
         assert create.await_count == calls_before  # no provider call while open
 
     @pytest.mark.asyncio
-    async def test_recovers_and_probe_succeeds_after_cooldown(
+    async def test_recovers_after_cooldown_and_succeeds(
         self, monkeypatch
     ) -> None:
         monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
@@ -430,7 +325,7 @@ class TestCircuitBreakerWiring:
 
         _wait_cooldown_elapsed(
             resilience.get_circuit_breaker(provider._breaker_name)
-        )  # cooldown elapses → recovery probe admitted
+        )  # cooldown elapses → the next call is admitted (re-probe)
         create.side_effect = None
         create.return_value = _chat_response("recovered")
         result = await provider.chat([{"role": "user", "content": "hi"}])
@@ -438,7 +333,7 @@ class TestCircuitBreakerWiring:
         assert not resilience.get_circuit_breaker(provider._breaker_name).is_open
 
     @pytest.mark.asyncio
-    async def test_probe_failure_reopens_breaker(self, monkeypatch) -> None:
+    async def test_failure_after_cooldown_reopens_breaker(self, monkeypatch) -> None:
         monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
         monkeypatch.setattr(config.resilience, "circuit_breaker_cooldown", 0.01)
         monkeypatch.setattr(config.resilience, "max_attempts", 1)
@@ -450,49 +345,14 @@ class TestCircuitBreakerWiring:
             await provider.chat([{"role": "user", "content": "hi"}])  # trip
         _wait_cooldown_elapsed(
             resilience.get_circuit_breaker(provider._breaker_name)
-        )  # cooldown elapses → the recovery probe is admitted
+        )  # cooldown elapses → the next call is admitted (re-probe)
         with pytest.raises(openai.RateLimitError):
-            await provider.chat([{"role": "user", "content": "hi"}])  # probe fails
-        # Probe failure re-opened the breaker → the next call fails fast with
-        # no SDK request (a single probe, not a stampede).
+            await provider.chat([{"role": "user", "content": "hi"}])  # re-probe fails
+        # The failed re-probe re-opened the breaker → the next call fails fast
+        # with no SDK request (a persistent outage stays closed to traffic).
         with pytest.raises(CircuitOpenError):
             await provider.chat([{"role": "user", "content": "hi"}])
-        assert create.await_count == 2  # trip + probe only
-
-    @pytest.mark.asyncio
-    async def test_non_retryable_probe_failure_settles_probe(
-        self, monkeypatch
-    ) -> None:
-        """A recovery probe that fails with a *non-retryable* error (e.g. a
-        401 auth problem, which the retry loop never touches) must still
-        settle the probe: the caller sees the real 401, and the breaker
-        re-opens instead of staying wedged HALF-OPEN failing everyone fast
-        for the rest of the cooldown."""
-        monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 1)
-        monkeypatch.setattr(config.resilience, "circuit_breaker_cooldown", 0.01)
-        monkeypatch.setattr(config.resilience, "max_attempts", 1)
-        provider = _openai_provider()
-        create = AsyncMock(side_effect=_api_error(openai.RateLimitError, 429))
-        provider._async_client.chat.completions.create = create
-
-        with pytest.raises(openai.RateLimitError):
-            await provider.chat([{"role": "user", "content": "hi"}])  # trip
-
-        _wait_cooldown_elapsed(
-            resilience.get_circuit_breaker(provider._breaker_name)
-        )  # cooldown elapses → the recovery probe is admitted
-        create.side_effect = _api_error(openai.AuthenticationError, 401)
-        # The probe's own caller sees the real 401 (not a CircuitOpenError)…
-        with pytest.raises(openai.AuthenticationError):
-            await provider.chat([{"role": "user", "content": "hi"}])
-
-        breaker = resilience.get_circuit_breaker(provider._breaker_name)
-        # …and the probe is settled: no longer "probe in flight", re-opened.
-        assert not breaker._probing
-        assert breaker.is_open
-        with pytest.raises(CircuitOpenError):
-            await provider.chat([{"role": "user", "content": "hi"}])  # fast fail
-        assert create.await_count == 2  # trip + probe only
+        assert create.await_count == 2  # trip + re-probe only
 
     @pytest.mark.asyncio
     async def test_chat_json_fails_fast_when_breaker_open(self, monkeypatch) -> None:

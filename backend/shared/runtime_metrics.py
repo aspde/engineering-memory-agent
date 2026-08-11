@@ -16,7 +16,7 @@ ones:
   call passes through), so call count / latency / tokens by scenario and
   status all line up with the cost rows.
 - **Circuit breakers** — ``backend/shared/resilience.py`` reports the
-  open/half-open state, how many times the breaker tripped, and how many
+  open/closed state, how many times the breaker tripped, and how many
   calls were rejected while open.
 - **Agent concurrency** — the interactive-run slot counter in
   ``backend/service/agent_service.py`` reports in-flight runs and the 503
@@ -44,7 +44,6 @@ from prometheus_client import (
     Counter,
     Gauge,
     Histogram,
-    Summary,
     generate_latest,
 )
 
@@ -97,10 +96,10 @@ LLM_TOKENS = Counter(
 
 # ── Circuit breakers ──────────────────────────────────────────────────
 
-# 1 = open / half-open (not admitting ordinary calls), 0 = closed.
+# 1 = open (not admitting ordinary calls), 0 = closed.
 CIRCUIT_STATE = Gauge(
     "ema_circuit_breaker_state",
-    "1 when the named circuit breaker is open/half-open, 0 when closed.",
+    "1 when the named circuit breaker is open, 0 when closed.",
     ["name"],
     registry=_REGISTRY,
 )
@@ -313,47 +312,3 @@ def render_metrics() -> str:
     return generate_latest(_REGISTRY).decode("utf-8")
 
 
-def reset_runtime_metrics() -> None:
-    """Clear every metric — tests call this for isolation.
-
-    Labeled metrics are cleared via ``clear()``.  Label-less metrics keep
-    their data in instance attributes and can't go through that path:
-    prometheus_client 0.26's ``clear()`` returns early when there are no
-    labels, and ``reset()`` exists only on ``Counter`` — the earlier
-    ``reset()``-based branch silently skipped ``AGENT_STEPS`` (a label-less
-    Histogram), leaking samples across tests.  Each label-less type is
-    therefore zeroed explicitly.  Each guard is independent — clearing must
-    never mask a bug in a single metric.
-    """
-    for metric in (
-        HTTP_REQUESTS,
-        HTTP_DURATION,
-        LLM_CALLS,
-        LLM_DURATION,
-        LLM_TOKENS,
-        CIRCUIT_STATE,
-        CIRCUIT_OPENS,
-        CIRCUIT_REJECTIONS,
-        AGENT_SLOTS_IN_USE,
-        AGENT_SLOTS_REJECTED,
-        AGENT_STEPS,
-    ):
-        try:
-            if getattr(metric, "_labelnames", None):
-                metric.clear()
-                continue
-            if isinstance(metric, Counter):
-                metric.reset()
-            elif isinstance(metric, Gauge):
-                metric._value.set(0.0)
-            elif isinstance(metric, Histogram):
-                metric._sum.set(0.0)
-                for bucket in metric._buckets:
-                    bucket.set(0.0)
-                metric._created = 0.0
-            elif isinstance(metric, Summary):
-                metric._sum.set(0.0)
-                metric._count.set(0.0)
-                metric._created = 0.0
-        except Exception:
-            pass

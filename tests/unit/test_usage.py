@@ -28,9 +28,9 @@ from backend.service.usage import (
     pending_count,
     pending_rows,
     record_call,
-    reset_usage_buffer,
 )
 from backend.shared.config import current_thread_id, current_trace_id
+from tests.support.process_state import reset_usage_buffer
 
 
 @pytest.fixture(autouse=True)

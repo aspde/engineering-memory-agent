@@ -321,9 +321,9 @@ class TestOpenAIBreakerIsolation:
     async def test_primary_breaker_open_does_not_block_fallback(
         self, monkeypatch,
     ) -> None:
-        from backend.shared import resilience
         from backend.shared.config import config
         from backend.shared.resilience import get_circuit_breaker
+        from tests.support.process_state import reset_circuit_breakers
 
         from backend.service.embedding_service import (
             FallbackEmbeddingProvider,
@@ -369,7 +369,7 @@ class TestOpenAIBreakerIsolation:
             assert result == [[0.5, 0.5]]
             assert not get_circuit_breaker(fallback._breaker_name()).is_open
         finally:
-            resilience.reset_circuit_breakers()
+            reset_circuit_breakers()
 
 
 # ── Provider loading path: concurrent, idempotent, loop-friendly ─────

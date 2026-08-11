@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from backend.agent.state import AgentState
 from backend.shared import config as config_mod
+from tests.support.process_state import wait_auto_memory_tasks
 
 
 @pytest.fixture(autouse=True)
@@ -399,7 +400,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "已记住"
-        await mod.wait_auto_memory_tasks()
+        await wait_auto_memory_tasks()
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -428,7 +429,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "Final."
-        await mod.wait_auto_memory_tasks()
+        await wait_auto_memory_tasks()
         mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -450,7 +451,7 @@ class TestAutoMemoryWiring:
         )
         result = await mod.generate_final_node(state)
         assert result["final_response"] == "已记住"
-        await mod.wait_auto_memory_tasks()
+        await wait_auto_memory_tasks()
         mock_write.assert_not_awaited()
 
 
@@ -848,5 +849,5 @@ class TestAutoMemoryBackgrounding:
         # The capture is still in flight — the node returned before it
         # finished, instead of awaiting all of it synchronously.
         assert mod._auto_memory_tasks
-        await mod.wait_auto_memory_tasks()
+        await wait_auto_memory_tasks()
         mock_write.assert_awaited_once()

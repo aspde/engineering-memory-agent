@@ -298,7 +298,7 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 | 状态 | 位置 | 多副本后果 |
 |------|------|-----------|
-| LLM / Embedding 熔断器（开关状态、半开探测） | `backend/shared/resilience.py` | 每个副本各自计数熔断、半开探测互相打散，一个实例熔断不保护其他实例；/health 只反映本副本状态 |
+| LLM / Embedding 熔断器（开关状态、冷却窗口） | `backend/shared/resilience.py` | 每个副本各自计数熔断、冷却窗口互相打散，一个实例熔断不保护其他实例；/health 只反映本副本状态 |
 | auto-memory 节流（per-thread 间隔/上限、进程级滚动窗口） | `backend/agent/nodes.py` | 每个副本独立计数，实际写入频率放大到上限的 N 倍 |
 | LLM usage 缓冲（`_pending`，由后台 flusher 批量入库） | `backend/service/usage.py` | 缓冲只记录本副本的调用；写入 `llm_usage` 的行不重复，但 `USAGE_BUFFER_MAX` 兜底语义按副本独立 |
 | API 限流令牌桶（per-key 的 `_buckets`） | `backend/api/ratelimit.py` | 每个副本各自计数——一个实例被限流不保护其他副本，实际允许的请求量放大到单副本限额的 N 倍 |

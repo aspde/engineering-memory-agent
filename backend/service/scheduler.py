@@ -20,11 +20,9 @@ Usage::
 from __future__ import annotations
 
 import asyncio
-import calendar
 import logging
-import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +45,7 @@ class PatrolScheduler:
         async def _loop() -> None:
             logger.info("Daily patrol scheduled at %02d:00 each day", hour)
             while True:
-                now = datetime.now()
+                now = datetime.now().astimezone()
                 next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
                 if next_run <= now:
                     next_run += timedelta(days=1)
@@ -76,7 +74,7 @@ class PatrolScheduler:
             label = days[day] if 0 <= day <= 6 else f"day={day}"
             logger.info("Weekly patrol scheduled on %s at %02d:00", label, hour)
             while True:
-                now = datetime.now()
+                now = datetime.now().astimezone()
                 next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
                 # Advance to the target day-of-week
                 days_ahead = day - now.weekday()
@@ -131,9 +129,13 @@ class PatrolScheduler:
 def previous_daily_slot(hour: int, *, now: datetime | None = None) -> datetime:
     """The most recent daily schedule slot at *hour* strictly in the past.
 
-    Matches the scheduler loop's wall-clock semantics (naive local time).
+    Returned as an aware local datetime (the scheduler loop's wall-clock
+    semantics, with the local offset attached).  DST is deliberately not
+    tracked across the boundary — the offset is the one at call time, so a
+    transition within the next day shifts a slot by an hour at worst, which
+    the catch-up logic tolerates.
     """
-    now = now or datetime.now()
+    now = (now or datetime.now()).astimezone()
     slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     if slot >= now:
         slot -= timedelta(days=1)
@@ -144,32 +146,13 @@ def previous_weekly_slot(
     day: int, hour: int, *, now: datetime | None = None
 ) -> datetime:
     """The most recent weekly schedule slot (*day*, *hour*) strictly in the past."""
-    now = now or datetime.now()
+    now = (now or datetime.now()).astimezone()
     slot = now.replace(hour=hour, minute=0, second=0, microsecond=0)
     days_ahead = day - now.weekday()
     slot += timedelta(days=days_ahead)
     if slot >= now:
         slot -= timedelta(days=7)
     return slot
-
-
-def _localize_wall_clock(dt: datetime) -> datetime:
-    """Interpret a naive wall-clock *dt* in the system's local timezone.
-
-    Resolves the local UTC offset at *dt*'s own calendar time (via
-    ``time.mktime``) rather than the *current* offset, so a slot on the other
-    side of a DST transition is compared against TIMESTAMPTZ at the correct
-    instant — ``dt.replace(tzinfo=datetime.now().astimezone().tzinfo)`` would
-    be off by the offset delta.  (The single ambiguous DST fold-back hour is
-    resolved to one side by ``mktime``; acceptable for missed-slot detection.)
-    """
-    if dt.tzinfo is not None:
-        return dt
-    # timegm treats the naive time as UTC, mktime as local; the difference is
-    # the local UTC offset at that wall-clock instant (e.g. +08:00 for local
-    # 08:00 in UTC+8 → mktime is 8h *less* than timegm).
-    offset = timedelta(seconds=calendar.timegm(dt.timetuple()) - time.mktime(dt.timetuple()))
-    return dt.replace(tzinfo=timezone(offset))
 
 
 async def should_catch_up(patrol_type: str, slot: datetime) -> bool:
@@ -181,15 +164,17 @@ async def should_catch_up(patrol_type: str, slot: datetime) -> bool:
     fills genuinely-missed slots, it does not retry failures (a separate
     concern handled by the next scheduled slot / stale-row marking).
 
-    *slot* is a naive local wall-clock time (as ``previous_*_slot`` returns);
-    it is interpreted in the local timezone so the TIMESTAMPTZ comparison in
-    Postgres is against the same instant.
+    *slot* is a local wall-clock time, naive or aware; it is normalized to an
+    aware instant with the offset at call time (``slot.astimezone()``) so the
+    TIMESTAMPTZ comparison in Postgres is against the same instant.  A DST
+    transition within a day of the slot shifts it by an hour at worst —
+    acceptable for missed-slot detection.
     """
     from sqlalchemy import text
 
     from backend.db import get_session_factory
 
-    slot = _localize_wall_clock(slot)
+    slot = slot.astimezone()
 
     session_factory = get_session_factory()
     async with session_factory() as session:

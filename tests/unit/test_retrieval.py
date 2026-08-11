@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.support.process_state import clear_embed_query_cache
+
 
 def _row(id: str, content: str, meta: dict | None = None, chunk_index: int = 0):
     """Build a mock SQLAlchemy Row with a ``_mapping`` attribute.
@@ -881,7 +883,7 @@ class TestQueryMemoriesDecayBatch:
         from backend.service import retrieval as mod
         from backend.service import decay as decay_mod
 
-        mod.clear_embed_query_cache()
+        clear_embed_query_cache()
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1]])
         monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
@@ -1155,11 +1157,9 @@ class TestEmbedQueryCache:
 
     @pytest.fixture(autouse=True)
     def _clean_cache(self) -> None:
-        from backend.service import retrieval as mod
-
-        mod.clear_embed_query_cache()
+        clear_embed_query_cache()
         yield
-        mod.clear_embed_query_cache()
+        clear_embed_query_cache()
 
     def _mock_provider(self, monkeypatch):
         from backend.service import retrieval as mod
@@ -1244,6 +1244,6 @@ class TestEmbedQueryCache:
 
         provider = self._mock_provider(monkeypatch)
         await mod.embed_query("q")
-        mod.clear_embed_query_cache()
+        clear_embed_query_cache()
         await mod.embed_query("q")
         assert provider.embed.await_count == 2

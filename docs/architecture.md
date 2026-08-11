@@ -143,7 +143,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 - **HTTP 层**：ASGI 中间件（`MetricsMiddleware`，挂在 `backend/main.py`）按路由模板路径记录请求数、延迟直方图（5ms–60s bucket）与状态码分布——`path` 取匹配到的 route 模板（`/api/agent/thread/{thread_id}` 而非具体 id），标签基数有界。
 - **LLM 层**：与 `llm_usage` 同一咽喉点（`usage.record_call`）打点——按 scenario 的调用数（success/error）、延迟直方图、input/output/total token 计数。
-- **韧性层**：`resilience.py` 的 `CircuitBreaker` 在状态转换处打点——open/half-open 状态 gauge、进入 OPEN 次数、open 期间快速拒绝次数。
+- **韧性层**：`resilience.py` 的 `CircuitBreaker` 在状态转换处打点——open/closed 状态 gauge、进入 OPEN 次数、open 期间快速拒绝次数。
 - **Agent 层**：交互式并发槽位占用 gauge + 超 `MAX_AGENT_CONCURRENCY` 的 503 拒绝计数（`agent_service.py`）；每次 chat 完成记录 ReAct 步数分布（`agent_routes.py`）——**task eval 测到的过度调用信号在产线持续可见**。
 - 所有记录函数在 `config.metrics_enabled` 关闭时 no-op、异常吞掉，绝不阻塞/拖垮热路径；测试用 `reset_runtime_metrics()` 隔离。
 - 与 `llm_usage` 的分工：**usage 表回答"花了多少钱、哪次调用贵"（历史查询）；Prometheus 回答"现在健不健康、慢在哪、并发满没满"（实时时序）**。二者由同一批 provider 打点驱动，互不依赖。

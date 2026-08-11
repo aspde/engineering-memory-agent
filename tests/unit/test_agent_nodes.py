@@ -1,7 +1,7 @@
 """Tests for agent node functions — mock LLM provider."""
 
 import json
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from langgraph.types import Command
@@ -218,29 +218,6 @@ class TestMessageConversion:
         assert len(schemas) == 1
         assert schemas[0]["type"] == "function"
         assert schemas[0]["function"]["name"] == "search_memories_tool"
-
-    def test_to_openai_tools_cached_per_tool_set(self, monkeypatch) -> None:
-        """Serialisation runs once per tool name — later calls hit the cache.
-
-        A tool unique to this test keeps the module-level cache key from
-        colliding with other tests' schemas.
-        """
-        from langchain_core.tools import tool
-
-        @tool
-        async def unique_schema_tool(query: str) -> str:
-            """A tool only this test uses."""
-            return "ok"
-
-        args_schema = MagicMock()
-        args_schema.model_json_schema.return_value = {"type": "object", "properties": {}}
-        monkeypatch.setattr(unique_schema_tool, "args_schema", args_schema)
-
-        first = _to_openai_tools([unique_schema_tool])
-        second = _to_openai_tools([unique_schema_tool])
-        assert args_schema.model_json_schema.call_count == 1
-        assert first == second
-        assert first is not second  # shallow copy — callers can't mutate the cache
 
 
 def _make_state(messages=None, final_response=None, error=None, pending_approval=None, final_prompt=None):

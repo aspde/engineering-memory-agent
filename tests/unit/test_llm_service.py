@@ -14,7 +14,8 @@ from backend.shared.metrics import (
     record_usage,
     reset_token_usage,
 )
-from backend.service.usage import pending_rows, reset_usage_buffer
+from backend.service.usage import pending_rows
+from tests.support.process_state import reset_circuit_breakers, reset_usage_buffer
 
 
 @pytest.fixture(autouse=True)
@@ -1109,11 +1110,9 @@ class TestStreamingBreaker:
         """Fresh breaker registry per test — test_llm_service.py otherwise
         shares one module-global breaker per endpoint|model name, and the
         threshold/state from a neighbouring test would leak in."""
-        from backend.shared import resilience
-
-        resilience.reset_circuit_breakers()
+        reset_circuit_breakers()
         yield
-        resilience.reset_circuit_breakers()
+        reset_circuit_breakers()
 
     @pytest.mark.asyncio
     async def test_mid_stream_failure_trips_breaker(self, monkeypatch) -> None:
@@ -1241,11 +1240,9 @@ class TestAttemptAccounting:
     def _isolate_breakers(self) -> None:
         """Fresh breaker registry per test so the retried-failure counters in
         this class never leak into (or out of) other breaker tests."""
-        from backend.shared import resilience
-
-        resilience.reset_circuit_breakers()
+        reset_circuit_breakers()
         yield
-        resilience.reset_circuit_breakers()
+        reset_circuit_breakers()
 
     @staticmethod
     def _make_openai_provider(monkeypatch: pytest.MonkeyPatch):
