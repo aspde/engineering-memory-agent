@@ -16,9 +16,9 @@ Design choices:
       stores, so per-category numbers map directly to product quality.
 
 The corpus is intentionally EMA's own engineering history: every query is a
-real question a new contributor (or an interviewer) would ask. This makes the
-eval set double as interview material — the numbers answer "how well does EMA
-remember its own decisions?".
+real question a new contributor would ask. This makes the eval set double as
+onboarding material — the numbers answer "how well does EMA remember its own
+decisions?".
 """
 
 from __future__ import annotations

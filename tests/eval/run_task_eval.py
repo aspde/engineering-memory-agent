@@ -23,7 +23,7 @@ Examples:
     python -m tests.eval.run_task_eval --sample 3 --judge deterministic
 
     # Full run with LLM judges and a Markdown report
-    python -m tests.eval.run_task_eval --report-md docs/interview/task-eval-report.md
+    python -m tests.eval.run_task_eval --report-md tests/eval/reports/task-eval-report.md
 
     # Regression gate: fail (exit 2) if completion or groundedness drop
     python -m tests.eval.run_task_eval \

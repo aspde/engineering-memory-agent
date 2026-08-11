@@ -1,6 +1,6 @@
 """Simulate an N-chunk corpus: verify Recall@5 drop and rerank crossover at scale.
 
-Scale hypothesis (docs/interview/gap-remediation.md §11.5.1): rerank's value
+Scale hypothesis (docs/engineering/gap-remediation.md §11.5.1): rerank's value
 is scale-dependent — harmful on the 30-chunk corpus (candidate pool covers
 ~73%, dense ranking is already near-perfect), marginal at ~1000 (recall
 starts dropping), and expected to turn *positive* at 10k+ (candidate pool

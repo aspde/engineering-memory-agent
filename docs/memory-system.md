@@ -38,7 +38,7 @@ Read Path:
 | `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | opt-in；小语料下实测掉 recall 且慢 ~90 倍（eval-report），默认关闭 |
 | `rerank_llm()` | 现有 LLMProvider | API 调用费用 | opt-in；需精细语义判断时 |
 
-**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`docs/interview/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
+**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`tests/eval/reports/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
 
 ### 2. 三阶段记忆提取
 

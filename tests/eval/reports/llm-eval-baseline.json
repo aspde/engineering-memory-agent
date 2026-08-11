@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Baseline of the LLM behavior eval.  Generated from a clean run (0 execution errors, 0 judge degradations) with --judge deterministic, so every metric is reproducible and trustworthy.  Regenerate after intentional behavior changes (prompt version bumps, model swaps, tool roster edits) via: python -m tests.eval.run_llm_eval --suite all --judge deterministic --report-json docs/interview/llm-eval-report.json && python -m tests.eval.compare_baseline",
+  "note": "Baseline of the LLM behavior eval.  Generated from a clean run (0 execution errors, 0 judge degradations) with --judge deterministic, so every metric is reproducible and trustworthy.  Regenerate after intentional behavior changes (prompt version bumps, model swaps, tool roster edits) via: python -m tests.eval.run_llm_eval --suite all --judge deterministic --report-json docs/engineering/llm-eval-report.json && python -m tests.eval.compare_baseline",
   "environment": {
     "generated_at": "2026-08-09",
     "commit": "4ae4848",

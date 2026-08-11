@@ -1,9 +1,9 @@
 """Decay A/B — does Ebbinghaus decay weighting change memory retrieval?
 
 The production memory read path ranks by ``similarity × decay_factor``
-(``search_memories``) and writes recall state on every search.  The gap in
-the interview materials was: **"记忆衰减加权有没有让检索变好？" had never
-been measured**.  This script closes it.
+(``search_memories``) and writes recall state on every search.  The gap was:
+**"记忆衰减加权有没有让检索变好？" had never been measured**.  This script
+closes it.
 
 It runs the same 30-query labeled set twice from *identical* decay state:
 

@@ -735,8 +735,8 @@ async def get_token_usage_endpoint() -> dict[str, Any]:
       - ``entity_normalization`` — LLM entity-match judgement
       - ``rerank_llm`` — LLM-based rerank (when ``use_llm_rerank=True``)
 
-    To start a fresh measurement window during an interview demo, call
-    ``POST /api/agent/usage/reset`` to clear counters.
+    To start a fresh measurement window, call ``POST /api/agent/usage/reset``
+    to clear counters.
 
     ``structured_failures`` counts structured-output calls (entity/relation
     extraction) that exhausted their retries and degraded to empty — so

@@ -8,7 +8,7 @@ The three-stage extraction went through two optimizations:
 
 This script measures each channel on the 8-item extraction suite so a
 prompt/model edit can be compared against the committed baseline
-(``docs/interview/llm-eval-baseline.json`` — zero-shot + json, 2026-08-09,
+(``tests/eval/reports/llm-eval-baseline.json`` — zero-shot + json, 2026-08-09,
 same provider):
 
   - **zero-shot + json**  = committed baseline (read from the JSON, not re-run)
@@ -34,7 +34,7 @@ from typing import Any
 from tests.eval.llm_ground_truth import load_extraction_items
 from tests.eval.llm_runner import run_extraction
 
-_BASELINE_PATH = Path(__file__).resolve().parent.parent.parent / "docs" / "interview" / "llm-eval-baseline.json"
+_BASELINE_PATH = Path(__file__).resolve().parent.parent.parent / "tests" / "eval" / "reports" / "llm-eval-baseline.json"
 
 EXTRACTION_METRICS = (
     "entity_precision",

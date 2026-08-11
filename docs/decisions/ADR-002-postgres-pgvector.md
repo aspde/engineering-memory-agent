@@ -90,7 +90,7 @@ LIMIT :limit;
 | Chunk 检索 | `retrieve(query)` | embed → vector_search(HNSW) → （可选 rerank） → 返回 |
 | Memory 检索 | `query_memories(query)` | embed → search_memories(decay_weighted) → （可选 rerank） → update_decay_batch → 返回 |
 
-两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../interview/eval-report.md)。衰减更新为 `update_decay_batch`（单条 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数）。
+两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../../tests/eval/reports/eval-report.md)。衰减更新为 `update_decay_batch`（单条 `UPDATE ... RETURNING` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数）。
 
 ### 写入时的向量操作
 

@@ -3,7 +3,7 @@
 The eval report file (``tests/eval/reports/llm-eval-report.json``) is overwritten
 every run, so on its own it can't answer "did this prompt/model change move
 quality?"  This script diffs a fresh report against the committed baseline
-(``docs/interview/llm-eval-baseline.json``) and prints per-metric deltas —
+(``tests/eval/reports/llm-eval-baseline.json``) and prints per-metric deltas —
 the feedback loop that makes an intentional change's effect visible before it
 lands.
 
@@ -37,7 +37,7 @@ import json
 import sys
 from pathlib import Path
 
-BASELINE_PATH = Path(__file__).resolve().parents[2] / "docs" / "interview" / "llm-eval-baseline.json"
+BASELINE_PATH = Path(__file__).resolve().parents[2] / "tests" / "eval" / "reports" / "llm-eval-baseline.json"
 
 
 def _load(path: Path) -> dict:
@@ -98,7 +98,7 @@ def main() -> int:
     parser.add_argument(
         "--baseline",
         default=str(BASELINE_PATH),
-        help="Baseline JSON (default: docs/interview/llm-eval-baseline.json).",
+        help="Baseline JSON (default: tests/eval/reports/llm-eval-baseline.json).",
     )
     parser.add_argument(
         "--tolerance",

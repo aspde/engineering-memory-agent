@@ -313,9 +313,9 @@ def build_interpretation(
         )
     lines.extend(f"- {p}" for p in props)
 
-    # ── Interview talking points ───────────────────────────────────
+    # ── How to read the numbers ───────────────────────────────────
     lines.append("")
-    lines.append("**面试时怎么讲？**")
+    lines.append("**如何解读这些数字？**")
     lines.append(
         "- 先说结论：主评估集 Recall@5=1.0 是**自问自答的假满分**，只能证明“找得到”，不能证明“判别力”。"
     )

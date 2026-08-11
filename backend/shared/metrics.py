@@ -11,7 +11,7 @@ from multiple asyncio tasks, and ``reset_token_usage()`` is used in tests.
 Public API:
     - ``record_usage(scenario, usage)`` — accumulate tokens (called by providers)
     - ``pop_scenario(kwargs)`` — extract & remove the scenario kwarg
-    - ``get_token_usage()`` — snapshot forinterview demo / API endpoint
+    - ``get_token_usage()`` — snapshot for the /api/agent/usage endpoint
     - ``reset_token_usage()`` — clear counters (tests / fresh measurement)
 
 The leading underscore on ``_extract_total_tokens`` marks it as an
@@ -193,9 +193,10 @@ def record_usage(scenario: str, usage: Any) -> None:
 def get_token_usage() -> dict[str, int]:
     """Return a snapshot of cumulative token usage per scenario.
 
-    Used forinterview demo — call after a few agent turns to show per-scenario
-    cost breakdown (agent_chat / memory_search / conflict_detection /
-    entity_extraction / relation_extraction / rerank).
+    Returns cumulative token usage per scenario — call after a few agent
+    turns to show the per-scenario cost breakdown (agent_chat /
+    memory_search / conflict_detection / entity_extraction /
+    relation_extraction / rerank).
     """
     with _token_usage_lock:
         return dict(_token_usage)

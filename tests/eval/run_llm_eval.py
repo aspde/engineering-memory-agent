@@ -27,7 +27,7 @@ Examples:
     python -m tests.eval.run_llm_eval --suite tool_selection,extraction,answer
 
     # Full run incl. end-to-end with LLM judges and a Markdown report
-    python -m tests.eval.run_llm_eval --suite all --report-md docs/interview/llm-eval-report.md
+    python -m tests.eval.run_llm_eval --suite all --report-md tests/eval/reports/llm-eval-report.md
 
     # Regression gate: fail (exit 2) if headline metrics drop below thresholds
     python -m tests.eval.run_llm_eval --suite all \

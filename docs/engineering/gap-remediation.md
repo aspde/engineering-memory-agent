@@ -1,7 +1,7 @@
 # 短板诊断与评估体系补全方案
 
-> 本文档针对 EMA 作为面试项目最危险的短板——**AI 工程化（评估体系 / 成本监控）**——给出可执行的补全方案。
-> 目标：面试前用 1-2 天补齐，让"没做评估"变成"有最小评估体系"。
+> 本文档针对 EMA 最危险的短板——**AI 工程化（评估体系 / 成本监控）**——给出可执行的补全方案。
+> 目标：用 1-2 天补齐，让"没做评估"变成"有最小评估体系"。
 
 ---
 
@@ -35,7 +35,7 @@
 
 ### 2.1 为什么这是最危险的短板
 
-AI/LLM 应用工程师岗位面试**必问**的三连击：
+评估体系要回答的三个核心问题：：
 1. 「你怎么知道你的 RAG 检索准不准？」
 2. 「换了个 reranker，效果变好还是变差？怎么量化？」
 3. 「你的记忆衰减加权有没有让检索变好？」
@@ -76,7 +76,7 @@ GROUND_TRUTH: list[dict] = [
 3. 人工判断每个查询应该召回哪些记忆（这是 ground truth）
 4. 存成上面的结构
 
-**关键**：标注集不必大，20 条能跑出数字就够面试讲。
+**关键**：标注集不必大，20 条就能跑出有意义的数字。
 
 #### 2.2.2 评估指标实现
 
@@ -167,7 +167,7 @@ if __name__ == "__main__":
     print(avg2)
 ```
 
-#### 2.2.4 跑出数字后的面试话术
+#### 2.2.4 跑出数字后的表述口径
 
 有了数字后，可以这样答：
 
@@ -227,7 +227,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
         return {"accuracy": 0, "completeness": 0, "relevance": 0, "reason": "parse_failed"}
 ```
 
-**话术**：「生成质量我用 LLM-as-judge，让 LLM 从准确性、完整性、相关性打 1-5 分。LLM 评估有偏差，只能做粗筛，所以我会人工抽检 20%。」
+**表述**：「生成质量我用 LLM-as-judge，让 LLM 从准确性、完整性、相关性打 1-5 分。LLM 评估有偏差，只能做粗筛，所以我会人工抽检 20%。」
 
 ### 2.4 实施完成记录（阶段 B 已交付）
 
@@ -248,7 +248,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 
 **单元测试**（101 passed）：[test_eval_metrics.py](../../tests/unit/test_eval_metrics.py)（指标手算 case）+ [test_eval_dataset.py](../../tests/unit/test_eval_dataset.py)（数据集一致性 + 合成坏语料校验器）+ [test_eval_runner.py](../../tests/unit/test_eval_runner.py)（synthetic retriever 端到端）+ [test_eval_report.py](../../tests/unit/test_eval_report.py)
 
-**关键设计决策**（面试可讲）：
+**关键设计决策**（可对外呈现）：
 1. **指纹而非 UUID**：标注集用 `relevant_fingerprints`（summary 中的独特子串）匹配相关结果，不依赖 memory_id。可移植、可重现、CI 友好。`validate_dataset` 强校验每个指纹唯一且可解析。
 2. **retriever 无关**：runner 接收 `RetrieverAdapter(fn, match_field)`，同一套指标同时评估 chunks 表（`retrieve`）和 memories 表（`query_memories`）。
 3. **位置 ID 映射**：runner 把 retrieved 结果映射成 `[0,1,...,n-1]`，relevant 集为命中指纹的 index 集合，复用纯函数 metrics，零 I/O 耦合。
@@ -269,24 +269,24 @@ python -m tests.eval.seed --memories --clear
 python -m tests.eval.run_eval --retriever memory
 ```
 
-**待回填数字**（跑完后填入 self-introduction.md / ema-deep-dive.md；**注**：以下 chunks 路径数字为 08-06 06:11 旧 baseline，基于重新播种前语料——当前语料下 vector 单独即 Recall@5=1.000，见 §11 更正）：
+**待回填数字**（当前数字来源见 project-overview.md / deep-dive.md；**注**：以下 chunks 路径数字为 08-06 06:11 旧 baseline，基于重新播种前语料——当前语料下 vector 单独即 Recall@5=1.000，见 §11 更正）：
 - chunks 路径（vector_search，无 rerank）：Recall@5=**0.833** / MRR=**0.817** / NDCG@5=**0.819** / MAP@5=0.811（30 query，旧 baseline，当前语料已 1.000）
 - memory 路径：**已跑**（`python -m tests.eval.seed --memories` 后 `run_eval --retriever memory`）——**2026-08-11 扩充到 70 条后默认确定性基线 Recall@5=0.886 / MRR=0.767 / NDCG@5=0.798**（70 query，语料翻倍 + hard 占比 30%，见 [memory-path-report-70.md](../../tests/eval/reports/memory_path_report_70.md)；30 条时代为 0.900/0.825/0.844，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)）
 - cross-encoder rerank vs 无 rerank Δ recall@5：**-0.033**（hybrid:ce 0.967 vs hybrid:norank 1.000，30 query 全量实测——rerank 在小语料下有害，见 §11.5） | **LLM rerank vs bounded-CE（生产 memory 路径，已实测）**：recall@5 相同 **0.900**（rerank 不改变召回集合），**MRR 0.819→0.833（+0.014）/ NDCG@5 0.840→0.851**，但**平均延迟 2.5s→14.1s（5.5x，每候选 1 次 LLM 调用）**——小语料下 rerank 只微调排序不救召回，收益 scale-dependent，见 [memory_llm_vs_ce_report.md](../../tests/eval/reports/memory_llm_vs_ce_report.md)
 - easy/medium/hard recall@5：**0.714 / 0.929 / 0.778**（medium 最高，easy 反而最低——部分 easy query 词重合但向量区分度不足；hard 概念查询 0.778 优于预期）
 - 按 category：技术决策 1.000 / 代码实现 1.000 / 架构设计 0.833 / 故障复盘 0.667 / 历史背景 0.667（故障复盘+历史背景是短板，概念查询多）
 
-**性能瓶颈实测**（面试可讲）：cross-encoder rerank（BGE-reranker-v2-m3，568M 参数）在 CPU 上单 query 总耗时 **17.5s**（含 embed+search+rerank，见 [eval-report.md](./eval-report.md) hybrid:ce 行）。这是 EMA 单机 CPU 部署的已知瓶颈，优化方向：① embed/rerank 服务化接 GPU；② 降过采样倍数（top_k×4→top_k×2）；③ 高频 query 缓存 rerank 结果。当前评估默认走 hybrid 无 rerank 路径绕过此瓶颈。
+**性能瓶颈实测**（可对外呈现）：cross-encoder rerank（BGE-reranker-v2-m3，568M 参数）在 CPU 上单 query 总耗时 **17.5s**（含 embed+search+rerank，见 [eval-report.md](../../tests/eval/reports/eval-report.md) hybrid:ce 行）。这是 EMA 单机 CPU 部署的已知瓶颈，优化方向：① embed/rerank 服务化接 GPU；② 降过采样倍数（top_k×4→top_k×2）；③ 高频 query 缓存 rerank 结果。当前评估默认走 hybrid 无 rerank 路径绕过此瓶颈。
 
 ---
 
 ## 三、关键数字实测清单
 
-面试官最爱追问的数字，必须实测填实：
+关键数字必须实测填实：
 
 ### 3.1 必测数字
 
-| 指标 | 测量方法 | 实测值 | 面试话术 |
+| 指标 | 测量方法 | 实测值 | 表述口径 |
 |------|---------|--------|---------|
 | 记忆库总条数 | `SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL` | 0（生产空）/ 70 条评估种子 | "评估集 70 条标注 query，生产待部署" |
 | chunks 总条数 | `SELECT COUNT(*) FROM chunks` | 70（评估种子） | "种子语料 70 条，覆盖 5 类记忆" |
@@ -336,7 +336,7 @@ python -m tests.eval.run_eval --retriever memory
 
 **根因**：`search_memories_tool` / `retrieve_chunks_tool`（[tools.py](../../backend/agent/tools.py)）把 `use_llm_rerank` 作为**工具参数暴露给 LLM**（默认 False 但 LLM 可自选 True）。LLM 在对话里自主开启 → 每个候选 memory 一次 LLM 调用（~2.5s/次）→ 每轮 40-80s 纯 rerank 延迟。
 
-**量化结论（面试可讲）**：
+**量化结论（可对外呈现）**：
 1. **rerank_llm 是对话路径延迟和成本的双第一**：延迟占 58.6%、成本占 46%，是 agent_chat 本身（124s）的 3.8 倍。
 2. **是否走 rerank 是对话 P95 的决定性变量**：走 rerank 的轮 67-110s，没走的轮 12-40s——**关掉 LLM rerank，P95 预计从 73.6s 降到 ~25s，成本省 ~46%**。
 3. **这不是删功能**：eval 已证（[memory_llm_vs_ce_report.md](../../tests/eval/reports/memory_llm_vs_ce_report.md)）LLM rerank 在小语料下只微调排序不改变召回集合（recall@5 同为 0.900，MRR +0.014），默认路径的确定性排序在召回上等价。优化动作是把工具参数的默认锁死为 False（或从 schema 移除），让 LLM 无法在对话路径上开启慢速 rerank。
@@ -392,13 +392,13 @@ def _record_usage(scenario: str, usage: dict | None) -> None:
 
 
 def get_token_usage() -> dict[str, int]:
-    """返回各场景累计 token 用量，供面试演示。"""
+    """返回各场景累计 token 用量，供对外演示。"""
     return dict(_token_usage)
 ```
 
 > 该草案的计数逻辑现由 `backend/service/usage.py` 实现（`record_usage` + 有界内存缓冲 + 后台 flusher + `estimate_cost`），场景字段与 `llm_usage.scenario` 对齐。
 
-### 4.2 面试话术
+### 4.2 表述口径
 
 > 「LLM 调用我做了统一埋点——provider 层是唯一咽喉点，每次调用写一行观测到 `llm_usage` 表，按场景统计（记忆提取、冲突检测、rerank、Agent 对话分开算），并通过 `/api/usage/*` 暴露按天/按场景/按模型的汇总和成本估算。trace_id 贯穿一次 agent 运行，能回放单轮对话的调用链。
 >
@@ -473,17 +473,17 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 2. **tradeoff 在 40 并发显现**：延迟大幅改善（P95 9.4s→1.9s）但吞吐受限（60s 完成 30 vs 290）——conc=2 限死了 embed 并行度。这是 CPU 密集系统的固有取舍：**低并发高质量 or 高并发高延迟**。要更高并发吞吐，调 `EMBEDDING_MAX_CONCURRENCY=3/4`（P95 会回升）或 embed 服务化上 GPU（batch 化）。
 3. **配置匹配核数是最优默认**：2×4=8 线程峰值 = 核数，零超卖。高并发场景按需上调 conc，代价是 P95 上升——这是可量化的旋钮，不是黑盒。
 
-**面试话术**：「冷压测 10 并发 P95 19s 的根因是 CPU 并发超卖——每个 embed 都抢满 8 核。我加了线程信号量限并发 + `torch.set_num_threads` 限单任务线程（乘积=核数），容器内复测 P95 从 19s 降到 690ms、Max 920ms，QPS 反而升到 4.39。40 并发下 P95 也降到 1.9s，但吞吐受限——这是单机 CPU 的固有边界，要突破得 embed 上 GPU。」
+**表述口径**：「冷压测 10 并发 P95 19s 的根因是 CPU 并发超卖——每个 embed 都抢满 8 核。我加了线程信号量限并发 + `torch.set_num_threads` 限单任务线程（乘积=核数），容器内复测 P95 从 19s 降到 690ms、Max 920ms，QPS 反而升到 4.39。40 并发下 P95 也降到 1.9s，但吞吐受限——这是单机 CPU 的固有边界，要突破得 embed 上 GPU。」
 
 > **Windows 启动注**：Windows 上 uvicorn 默认 ProactorEventLoop 与 psycopg 异步不兼容，`_pool.wait()` 会无限重试挂起 lifespan。已修复：`_setup_checkpointer` 给 wait 加 10s 超时，超时降级 InMemorySaver（`backend/service/agent_service.py` + `tests/unit/test_checkpointer_fallback.py`）。Linux 容器（Dockerfile）无此问题。
 
-### 5.4 面试话术
+### 5.4 表述口径
 
 > 「我用 locust 压过检索接口：10 并发 QPS 4.8、P95 110ms；160 并发 QPS 63、P95 1.0s，全程 0 失败。**但这些是缓存热路径——10 个固定查询反复压，query-embedding 命中 LRU。我后来用 779 条互不相同的真实查询压冷路径：10 并发 QPS 掉到 2.6、P95 19s，40 并发 QPS 4.9、P95 9.4s**。瓶颈在 BGE-M3 CPU 推理——每个新 query 都要 embed（并发下 366→1120ms），LRU 缓存是热路径唯一的加速器，真实用户永远 miss。高并发要把 embedding 服务化成独立 batch 服务上 GPU。」
 
 ---
 
-## 六、面试应答总策略
+## 六、对外表述总策略
 
 ### 6.1 评估体系类问题（必问）
 
@@ -509,7 +509,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 ---
 
-## 七、执行清单（面试前 2 天）
+## 七、执行清单
 
 > **进度**：评估体系、成本监控、CI、Dockerfile、locust 压测已交付。下方原清单保留待办项，已完成的标记 ✅。
 
@@ -525,7 +525,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 - [x] 上午：写 Dockerfile（后端 + 前端单镜像，torch 分步安装）—— ✅ 完成（见 [deployment.md](../deployment.md)）
 - [x] 上午：locust 压测，拿 QPS + P95 数字 —— ✅ 完成（见 §5.3 实测表）
-- [ ] 下午：把所有实测数字填回 self-introduction.md / ema-deep-dive.md 占位符 —— 1h
+- [x] 下午：把实测数字回填进 project-overview.md / deep-dive.md —— ✅ 完成
 
 ### 完成后应能答
 
@@ -542,7 +542,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 > 评估体系、成本监控、容器化、locust 压测、对话 P95/token 成本均已交付，剩余高优先级动作：
 
-1. **填实所有占位符**（1h）—— 避免临场卡壳
+1. 数字均已在文档中回填，来源可追溯（project-overview.md / deep-dive.md / decision-faq.md）
 
 检索与生成评估数字已有（生产 memory 路径默认确定性基线 **70 条** Recall@5 0.886 / MRR 0.767，语义通道 opt-in 贡献已量化；hard-negative 判别力 27 条实测——纯向量综合通过 59.3%，bounded-CE 提至 81.5%；LLM 行为评测四套件 / locust QPS 63@160 并发），标注集已从 30 条扩充到 70 条；检索判别力改进已落地（bounded cross-encoder top-3 重排），语义通道自证已通过"默认关闭 + opt-in"修复。对话 P95（73.6s，10 轮真实对话）与 token 成本（≈28.6k tokens/轮、≈¥0.06）已实测（§3.1），且已从工具 schema 锁死对话 LLM rerank。
 
@@ -550,7 +550,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 ## 九、技术深度评估
 
-> 基于 EMA 实际代码核查的深度热力图。用于决定面试时主打什么、避开什么。
+> 基于 EMA 实际代码核查的深度分布。用于决定对外讲解时强调什么、如实披露什么。
 
 ### 9.1 整体判断
 
@@ -585,7 +585,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 - rerank：cross-encoder 原理必须能讲，**不主动提 listwise/微调**
 - 衰减：讲"工程整合"，**不主动讲公式系数调参**
 
-### 9.5 被问到缺失深度时的应答
+### 9.5 缺失深度的表述
 
 > 「这块 EMA 目前没做，是后续优化方向。比如 query rewriting 我考虑过——在 retrieve 前加一步 LLM 改写，能提升召回率，但增加一次 LLM 调用，成本和延迟要权衡。如果做，我会先 A/B 测算 ROI。」
 
@@ -596,7 +596,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 ## 十、三阶段提取优化方案（补深度薄的地方）
 
 > 三阶段提取是 EMA 记忆写入的关键环节，目前全 zero-shot + JSON 解析，深度偏薄。
-> 本方案给出 2 个可落地的优化，让面试时能讲"我做过 prompt 优化"。
+> 本方案给出 2 个可落地的优化，能讲"我做过 prompt 优化"。
 >
 > **状态（2026-08-11）：✅ 两项优化均已实施并实测**——few-shot examples 已进 prompt（`extraction.entities`/`extraction.relations` v3），函数调用通道已实现（`extract_entities`/`extract_relations` 工具，OpenAI 兼容 provider 优先，降级 `chat_structured`）。**A/B 实测见 [extraction_ab_report.md](../../tests/eval/reports/extraction_ab_report.md)：few-shot 让 entity_recall 0.781→0.927、relation_recall 0.531→0.688、relation_f1 0.356→0.427（+0.071）；函数调用通道 recall 持平、precision 略降（过度抽取）但 entity_type_accuracy 上升（enum 生成期约束）**。下方保留原始方案文档供回顾。
 
@@ -644,7 +644,7 @@ Now extract entities from the text above. Output ONLY the JSON array:"""
 - examples 里展示 type 枚举的正确用法（decision 不是 technology）
 - examples 用 EMA 真实场景，提升 in-domain 效果
 
-**面试话术**：
+**表述口径**：
 > 「我对比过 zero-shot 和 few-shot——加 2 个 in-domain examples 后，entity 抽取的 JSON 解析失败率从 [X%] 降到 [Y%]，准确率也有提升。关键是 examples 要覆盖不同 type 的边界 case，比如 decision 和 technology 容易混淆。」
 
 ### 10.3 优化 2：Function Calling 强制结构化输出（1-2 小时）
@@ -714,7 +714,7 @@ async def extract_entities_v2(content_or_summary: str) -> list[dict]:
 
 **注意**：`tool_choice` 强制调用是 OpenAI 的语法，Anthropic 的语法略有不同（需要在 [llm_service.py](../../backend/service/llm_service.py) 的 `chat_raw` 里适配）。如果 provider 不支持强制调用，退回到 few-shot + JSON 解析。
 
-**面试话术**：
+**表述口径**：
 > 「我后来把 entity 抽取从 JSON 解析改成了 function calling——用 enum 约束 type 字段，required 强制字段存在，格式错误率从 [X%] 降到接近 0。代价是部分 provider 的 tool_choice 支持不一致，我在 LLMProvider 抽象层做了适配。」
 
 ### 10.4 优化 3：抽取准确率评估（可选，配合 §2 评估体系）
@@ -755,7 +755,7 @@ async def eval_extraction():
     }
 ```
 
-**面试话术**：
+**表述口径**：
 > 「我评估过 entity 抽取——50 条标注集上，precision [0.82]，recall [0.74]。主要漏召是复合实体（如"连接池配置"被拆成"连接池"和"配置"）。加 few-shot 后 recall 提到 [0.81]。」
 
 ### 10.5 执行清单
@@ -769,7 +769,7 @@ async def eval_extraction():
 | 🟢 P2 | 实现 function calling 版 extract_entities | 2h | 能讲"结构化输出" | ✅ 完成（enum 生成期约束 + 降级） |
 | 🟢 P2 | 构造 50 条标注集，算 precision/recall | 3h | 被追问准确率能答 | 🟡 部分（用 8 条 llm_eval 标注集替代） |
 
-### 10.6 面试应答对比
+### 10.6 表述对比
 
 | 问题 | 优化前 | 优化后（实测数字） |
 |------|--------|--------|
@@ -784,7 +784,7 @@ async def eval_extraction():
 
 ## 十一、检索召回优化方案（补 RAG 高级技巧短板）
 
-> **2026-08-07 更新（语料更正）**：旧版"0.833→1.000（5/5 救回）"的 baseline 生成于 08-06 06:11，早于 07:12 的语料重新播种，且旧指纹与 seed 内容不匹配——**对比不一致，旧结论在当前语料上不可复现**。当前语料 + 当前指纹下 BGE-M3 稠密召回即 Recall@5=1.000。详见 §11.5 实测表与 [eval-report.md](eval-report.md)。
+> **2026-08-07 更新（语料更正）**：旧版"0.833→1.000（5/5 救回）"的 baseline 生成于 08-06 06:11，早于 07:12 的语料重新播种，且旧指纹与 seed 内容不匹配——**对比不一致，旧结论在当前语料上不可复现**。当前语料 + 当前指纹下 BGE-M3 稠密召回即 Recall@5=1.000。详见 §11.5 实测表与 [eval-report.md](../../tests/eval/reports/eval-report.md)。
 >
 > **真正的生产瓶颈是 sparse_search 的 O(N) 扫描，不是 rerank**：中文 sparse 必须把 jieba 分词结果落到 `chunks.tokens` 列 + GIN 索引，用 `tokens && :q` 把候选集限制在真实 token 重叠的行（O(log N) 发现候选），Jaccard 只在小候选集上算。rerank（cross-encoder）经 A/B 验证在小语料下有害（0.15 floor 误伤 q015），可跳过，收益 scale-dependent。§11.1-11.4 保留为历史诊断过程，体现"做了、测了、错了、再测、纠正归因、连默认假设都敢质疑"的迭代。
 
@@ -878,7 +878,7 @@ async def retrieve_multi_query(
 - 改写只增加 1 次 LLM 调用（~500ms），成本可控
 - q007 "koa-connect 之前出过什么问题" 预期被改写成 "koa-connect ctx 泄漏 / 中间件 wrapper 问题"，词重合度提升
 
-**面试话术**：
+**表述口径**：
 > 「概念查询（如"之前出过什么问题"）dense 词面召回弱，我做了 query rewriting 作为 Agent 的显式 tool（query_rewrite_and_search），让 Agent 自主判断概念查询时调用，fails safe 失败退回原 query。但单独改写救不回稠密召回——真正的瓶颈是中文 sparse 通道不可用 + 检索的 O(N) 扩容。Postgres `simple` 分词器对中文返回 0 行，我把 jieba 分词结果落库（tokens 列 + GIN 索引），`tokens &&` 过滤把候选集限制在真实重叠的行，sparse 才既可用又不退化。」
 
 ### 11.3 方案 B：Hybrid Search（dense + sparse BM25，4-6h）
@@ -930,7 +930,7 @@ async def retrieve_hybrid(query: str, top_k: int = 5) -> list[Chunk]:
 - dense + sparse 并集，互补：dense 救语义相关，sparse 救关键词命中
 - q029 "连接器支持哪些平台" → sparse 命中含 "Git/PingCode/CI/飞书" 的记忆
 
-**面试话术**：
+**表述口径**：
 > 「中文 sparse 检索的生产瓶颈是 O(N) 扫描。我先试 Postgres 原生 tsvector，`simple` 分词器分不了中文（对中文返回 0 行）；换成 jieba 分词 + Jaccard，并把 jieba 结果落到 chunks.tokens 列 + GIN 索引，`tokens &&` 过滤把候选集限制在真实重叠的行——1000 条语料延迟 -69%。rerank 单独 A/B 在小语料下有害（0.15 floor 误伤 q015），可跳过，收益 scale-dependent。选 Postgres/Python 不选 ES 是不引新组件。」
 
 ### 11.4 方案对比与选型
@@ -968,7 +968,7 @@ python -m tests.eval.run_eval --retriever rewrite --report-json rewrite.json
 python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 ```
 
-**实测结果**（30 query 全量评估；**注**：baseline 0.833 为重新播种前的旧语料，hybrid 行在播种后——0.83→0.97 增量混入了语料变更，非纯 jieba 收益。当前语料下 vector 单独即 1.000，见 [eval-report.md](eval-report.md)）：
+**实测结果**（30 query 全量评估；**注**：baseline 0.833 为重新播种前的旧语料，hybrid 行在播种后——0.83→0.97 增量混入了语料变更，非纯 jieba 收益。当前语料下 vector 单独即 1.000，见 [eval-report.md](../../tests/eval/reports/eval-report.md)）：
 
 | 方案 | Recall@5 | MRR | 救回 miss | 延迟/query | 实测结论 |
 |------|----------|-----|----------|-----------|---------|
@@ -1087,13 +1087,13 @@ python -m tests.eval.run_eval --retriever hybrid --report-json hybrid.json
 | q010「向量索引召回不准怎么调」 | miss | **救回** | rerank 的 pairwise 打分把目标种子拉回 top-5 |
 | q015「人工介入 HITL 是怎么实现的」 | miss | 仍 miss | 目标在 rerank 候选池外（召回问题，rerank 无解） |
 
-**关键发现（面试最值得讲）**：
+**关键发现（最值得呈现）**：
 1. **rerank 的收益主体是 MRR（+0.154）而非 Recall（+0.034）**——10k 下 dense sim 排序开始压缩，40 个候选"都像"，cross-encoder 拉开差距；召回缺口（q015）是候选池外的问题，rerank 救不了。这实证了 §11.5.1 的"rerank 解决排序精度而非召回"。
 2. **无 rerank 延迟在 10k 没有恶化（882ms vs 30 条 979ms）**——sparse_search DB 侧 GIN 迁移的 O(N)→O(log N) 在万级同样生效，hnsw 也撑住了。**延迟不是 rerank 的决策障碍，收益翻转才是**。
-3. **完整 scale-dependent 决策曲线现已全部实测**：30 条有害 → 1000 条临界 → 万级转正。这不是"rerank 有用/没用"的二元判断，而是随语料规模变化的连续函数——面试被追问"万级怎么办"时，用这张实测表回答。
+3. **完整 scale-dependent 决策曲线现已全部实测**：30 条有害 → 1000 条临界 → 万级转正。这不是"rerank 有用/没用"的二元判断，而是随语料规模变化的连续函数——被追问"万级怎么办"时，用这张实测表回答。
 4. **+CE rerank 延迟 29.9s/query 是生产部署前的门槛**：万级开启 rerank 的前提是 embedding/rerank 服务化上 GPU（否则对话延迟不可接受）——这正好接上规模性能风险矩阵的 GPU 拐点。
 
-### 11.6 面试应答对比
+### 11.6 表述对比
 
 | 问题 | 优化前 | 优化后 |
 |------|--------|--------|

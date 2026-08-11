@@ -1,8 +1,8 @@
-# EMA 对抗性审查证据档案
+# EMA 代码审查记录与修复清单
 
-> 基于 5 路对抗性技术审查 + 代码逐条核查（2026-08-10）。本文件是**证据档案**：每条短板的代码证据、当前状态、以及深挖时的应答入口。代码项已全部修复并提交，纯应答项的话术已提取到 [script-cards.md](./script-cards.md)——**临场背话术，深挖查证据**。
+> 基于 5 路对抗性技术审查 + 代码逐条核查（2026-08-10）形成的缺陷清单与处理记录。每条记录代码证据、当前状态与处理方向。代码项已全部修复并提交；待改进项的完整分析见 [decision-faq.md](./decision-faq.md) 对应章节。
 >
-> 状态标记：✅ 已完成（代码+测试+提交）｜🗣 纯应答项（话术已备）
+> 状态标记：✅ 已完成（代码+测试+提交）｜🗣 待改进项（已记录处理方向）
 
 ---
 
@@ -10,11 +10,9 @@
 
 | 区间 | 状态 | 说明 |
 |------|------|------|
-| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 话术全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
+| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 处理全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
 | P1 崩溃级缺陷 | **10 ✅ 全完成** | `0481dd5` 一次提交修完，全量回归通过 |
-| P2 生产/安全/定位 | **4 ✅ 代码项 + 12 🗣 话术项** | 代码完成：P2-4 沙箱 / P2-5 tsc 门禁 / P2-8 attempts / P2-11 错误渲染。其余为纯应答话术（已备在 [script-cards.md](./script-cards.md)） |
-
-**面试前只剩**：背熟 [script-cards.md](./script-cards.md) 的 13 段话术；填实 `ema-deep-dive.md` / `self-introduction.md` 里的 `[需要你补充：XXX]` 个人占位符。
+| P2 生产/安全/定位 | **4 ✅ 代码项 + 12 🗣 待改进项** | 代码完成：P2-4 沙箱 / P2-5 tsc 门禁 / P2-8 attempts / P2-11 错误渲染。其余为待改进项（分析见 [decision-faq.md](./decision-faq.md)） |
 
 ---
 
@@ -26,7 +24,7 @@
 
 **现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../tests/eval/reports/hard_negative_report.md)）。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：补充 14（评估数字 1.0 是自证吧？）
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。
 
 ### ✅ P0-2 语义相关性通道用"被评测模型给自己打分"
 
@@ -40,7 +38,7 @@
 
 **现状**：已加 judge 一致性小样本校准——12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**。ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：补充 15（LLM judge 可信吗？）
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 5 节（LLM judge 可信吗）。
 
 ### ✅ P0-4 单次 LLM 采样方差大、两份基线打架、CI 门禁卡中间
 
@@ -48,23 +46,23 @@
 
 **现状**：已加 `tests/eval/multi_run_gate.py`——N 次运行均值 + 95% CI 下限判红（t 值硬编码，无 scipy）；`eval.yml` 的 llm-eval 门禁改为 `--n-runs 3` 均值 CI 下限判红。单次随机低值不再误杀 CI，真实下滑才把 CI 下限推到阈值以下。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：补充 16（单次跑的数字能代表能力吗？）
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 6 节（单次跑的数字能代表能力吗）。
 
 ### ✅ P0-5 头部数字用非生产路径，生产 `memory` 路径无报告
 
 **证据**：`eval-report.json:15-24` 的 1.0/0.983 来自 `chunk:vector`（裸向量）；生产默认 `query_memories`（memory 路径）无 committed 报告；`eval.yml` 对 memory 的门禁 recall 0.95/mrr 0.87 比报的 0.983 低。
 
-**现状**：已补跑生产 memory 路径报告（[memory_path_report.md](../../tests/eval/reports/memory_path_report.md)），ema-deep-dive 成果表注明路径口径。
+**现状**：已补跑生产 memory 路径报告（[memory_path_report.md](../../tests/eval/reports/memory_path_report.md)），[deep-dive.md](./deep-dive.md) 成果表注明路径口径。
 
 ### ✅ P0-6 "四级阈值 0.92/0.75/0.60 实测调参"无任何证据
 
 **证据**：全仓库（docs/tests/eval）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
 
-**现状（已标定）**：`tests/eval/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**诚实边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
+**现状（已标定）**：`tests/eval/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 1（已更新为标定口径）。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 1 节（四级阈值怎么定的）。
 
-### ✅ P0-7 核心卖点与实现失配（4 处，深挖必露馅）
+### ✅ P0-7 核心卖点与实现失配（4 处）
 
 | # | 文档宣称 | 代码实际（证据） |
 |---|---------|---------|
@@ -75,7 +73,7 @@
 
 **现状**：文档已与代码一致（公式/rerank/threshold 改口）；7b 的"从未召回永不衰减"已修（时间基准 `COALESCE(recalled_at, created_at)`，见 `decay.py`）；7a 公式参数已随 A/B 校准同步。
 
-→ 通用口径见 [script-cards.md](./script-cards.md)：补充 17（衰减公式和"沉底"卖点对得上吗？）——主动分级：哪些是有意取舍（rerank 关闭有 A/B 数字）、哪些已标定（四级阈值 0.85/0.72 有数据）、哪些文档同步过（公式）。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 7 节（衰减公式和"沉底"对得上吗）。
 
 ### ✅ P0-8 分块对中文无感知，"不截断语义单元"对中文是假的
 
@@ -87,7 +85,7 @@
 
 ## P1 — 崩溃级缺陷（全部 ✅ 已修复，`0481dd5` 一次提交）
 
-> 这些是"被要求现场演示就会炸"的缺陷，修复时每条都补了回归测试。证据保留供深挖引用。
+> 这些是"被要求现场演示就会炸"的缺陷，修复时每条都补了回归测试。证据保留供后续引用。
 
 ### ✅ P1-1 REST 写路径遇到 conflict 直接 500
 
@@ -131,25 +129,25 @@
 
 ---
 
-## P2 — 生产成熟度 / 安全 / 定位（深挖命中的靶子）
+## P2 — 生产成熟度 / 安全 / 定位
 
 ### 🗣 P2-1 全站零速率限制 + 单 key 内嵌前端 bundle
 
 **证据**：全仓库无任何请求限流；`VITE_EMA_API_KEY` 构建期打进 JS bundle（`frontend/src/api/client.ts:13-19`，`.env.example:264-271`），任何打开页面的人都能提取 key 无限调 `/api/agent/chat`、`/api/memory/ingest`；`MAX_AGENT_CONCURRENCY=4` 是并发上限不是限流。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 2（前端 bundle 里有 key，认证防谁？）——**主动认 + 30 秒三层方案**（网关限流 / 短期凭证 / 重路径单独限流），不硬辩"demo 取舍"。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 10 节（前端 bundle 里的 key）。
 
 ### 🗣 P2-2 `APP_ENV=test` 环境变量即可关闭全部 API 认证
 
 **证据**：`auth.py:40-41` 第一行 `if os.environ.get("APP_ENV") == "test": return`；`config.py:218` 默认 development。测试安全与生产安全共用进程级开关。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 3——承认是可审计隐患，正确做法是 `dependencies_overrides` / fixture 注入。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 11 节（为什么测试环境绕过认证用环境变量）。
 
 ### 🗣 P2-3 webhook 非 production 且未配 secret 时接受无签名请求
 
 **证据**：`webhook_routes.py:83-98`。**要点**：production 是 fail-closed（未配 secret 直接拒绝），这层是对的；问题在"dev + 无 secret"两个默认值叠加等于裸奔。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 4。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 12 节（webhook 没配 secret 怎么处理）。
 
 ### ✅ P2-4 `ingest_git_repo_tool` 无路径沙箱
 
@@ -157,7 +155,7 @@
 
 **现状**：已修——`REPO_ALLOW_ROOT` 白名单沙箱，空=默认 fail-closed（所有 ingest 拒绝），路径 resolve 后校验防 `..` 逃逸（见 `ingestion.py` + `config.py`）。
 
-**应答要点**：prompt injection 当前仍是软防御（`prompts.py` untrusted-DATA 声明 + `<doc>/<memory>` 包裹），测试只测结构隔离不测行为隔离（`test_prompt_injection.py`）——已知加固点。
+**待改进**：prompt injection 当前仍是软防御（`prompts.py` untrusted-DATA 声明 + `<doc>/<memory>` 包裹），测试只测结构隔离不测行为隔离（`test_prompt_injection.py`）——已知加固点。
 
 ### ✅ P2-5 CI 缺三道门禁：前端无 tsc、后端无 integration、不构建 Docker
 
@@ -169,13 +167,15 @@
 
 **证据**：`db/__init__.py:34`（asyncpg 池 5+10）+ `agent_service.py:123-128`（psycopg 池 max_size=5）互不感知、参数写死；`schema.py:23-47` embedding 维度变更清空全部向量列、无可回滚。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 5——双池是驱动差异技术债；"清向量列换维度"超出简化进入危险区，应引 Alembic。
+**现状**：已引入 Alembic schema 版本化迁移（`alembic_version` 表 + upgrade/downgrade 成对迁移，基线固化 9 表，新库/旧库/回滚三路径已实测）——"清向量列换维度"的危险路径已可回滚。双池仍是驱动差异技术债。
+
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 13 节（为什么有两套连接池）。
 
 ### 🗣 P2-7 检索是读路径却写库（每次检索 UPDATE decay）
 
 **证据**：`retrieval.py:786-795` 每次 `query_memories` 对 top-k 结果执行 `update_decay_batch`；`decay.py:103-118`。语义失真：`recall_count` 记录"被任意查询返回过"而非"被使用过"，垃圾查询无差别强化返回的记忆，马太效应自我强化。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 6——承认"被包装成优点的折中"，改进方向是显式确认才记 recall / 异步合并写。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 2 节（检索为什么每次 UPDATE decay）。
 
 ### ✅ P2-8 读路径的 LLM 用量会计丢失瞬时失败（错误率被低估）
 
@@ -187,13 +187,13 @@
 
 **证据**：`memory.py:488-517` create_task fire-and-forget，重启即丢；全项目无 `DELETE FROM memory_entities`，merge/overwrite 后被合并实体在关联表永不清除（`entity.py:137-148` 只 INSERT ON CONFLICT DO NOTHING）；`entity.py:24` `SIMILARITY_THRESHOLD=0.85` 无准确率测量。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 7——fire-and-forget 是有意取舍；stale 链接和 0.85 是无据参数，诚实认 + 周巡检补偿方案。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 14 节（实体归一化可靠吗）。
 
 ### 🗣 P2-10 `chat_sync`/`embed_sync` 在生产零调用——每 provider 维护双客户端是死复杂度
 
 **证据**：接口 abstractmethod 强制（`llm.py:28-31`、`embedding.py:14-17`），生产唯一"调用"是包装器互相转发，真实调用方只有 tests。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 8——承认是过度设计，实际应删。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 15 节（chat_sync 用在哪）。
 
 ### ✅ P2-11 前端偏薄：无状态管理、单页 150-400 行、SSE 无重连
 
@@ -201,38 +201,38 @@
 
 **现状**：已修错误与正文混排（SSE 错误/网络失败渲染为独立 `kind:'error'` 消息，不再 append 进回复正文）；无状态管理与 SSE 无重连仍为定位取舍。
 
-**应答要点**：前端定位"配角、验证后端能力"，坦承非最强项（README 已承认前端深度/DevOps/安全低优先）。
+**定位说明**：前端定位"配角、验证后端能力"（README 已承认前端深度/DevOps/安全低优先）。
 
-### 🗣 P2-12 检索排序的边界近似（可辩护）
+### 🗣 P2-12 检索排序的边界近似
 
 **证据**：`retrieval.py:676` multi-query 并集按插入序截断、未先按相关性排序；`retrieval.py:494-516` sparse 候选 `ORDER BY id` 先截断后 Jaccard 过滤；`decay.py:159-196` 两阶段窗口（top_k×8）不保证全局最优。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 9——承认"确定性偏差的边界近似"，讲清什么数据规模下才成问题。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 3 节（检索排序是全局最优吗）。
 
 ---
 
-## P2 — 社招定位风险（纯应答）
+## 项目定位与改进方向
 
 ### 🗣 P2-13 无团队协作背书 + 无真实用户
 
-**证据/策略**（README.md 和 self-introduction.md 已备）：不强调"独立完成"，改讲"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1416 测试）。**必须补**：每个数字要有真实来源（QPS 4.8、记忆条数、token 成本），并准备好"1416 个测试没有 code review 怎么保证质量"的答案。
+**证据/策略**（README.md 和 [project-overview.md](./project-overview.md)）：定位为"端到端主导 + 工程纪律替代 review"（ADR/CI/评估集/1450+ 测试）。每个数字要有真实来源（QPS 4.8、记忆条数、token 成本），并准备"1450+ 测试没有 code review 怎么保证质量"的答案。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 10。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 18 节（没有团队怎么保证质量）。
 
-### 🗣 P2-14 规模太小暴露个人项目量级
+### 🗣 P2-14 规模偏小，属个人项目量级
 
 **证据**：记忆库 30 条（评估集）、10 并发 QPS 4.8、项目周期 3 个月。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 11——拐点思维（万级记忆库 pgvector HNSW 够用），诚实承认生产级规模没跑过。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 17 节（数据量这么小有意义吗）——拐点思维（万级记忆库 pgvector HNSW 够用），诚实承认生产级规模没跑过。
 
-### 🗣 P2-15 LangGraph 是冷门框架，面试官可能不熟或问"为什么不用 LangChain Agent"
+### 🗣 P2-15 LangGraph 是相对冷门框架
 
-**已有应答**（ema-deep-dive.md 决策 1）：黑盒 + HITL 控制弱 + 调试代价。**必须再补**两个点：公司已有 LangChain 基础设施时的迁移成本与收益（框架是薄封装，核心价值在记忆/检索/韧性层）；LangGraph 与自研 event loop 的边界（价值在 interrupt/checkpoint/流式）。
+**已有分析**（[deep-dive.md](./deep-dive.md) 决策 1）：黑盒 + HITL 控制弱 + 调试代价。补充两个点：公司已有 LangChain 基础设施时的迁移成本与收益（框架是薄封装，核心价值在记忆/检索/韧性层）；LangGraph 与自研 event loop 的边界（价值在 interrupt/checkpoint/流式）。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 12。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 16 节（为什么不用 LangChain Agent）。
 
-### 🗣 P2-16 岗位匹配度：记忆/RAG 很深，但 Agent 岗位面试官更常考生产可靠性
+### 🗣 P2-16 生产可靠性是 Agent 工程的重点考查面
 
-**应答策略**：把"评估有水分"主动转为"我做过诚实评估"（P0-1/2/4 口径）；把"无限流"转为"我清楚生产安全基线"（P2-1）；把 task completed=0.5 和 unexpected_rate=0.375（DeepSeek 过度调工具）当成**最有价值的发现**主动讲——比任何完美数字都证明懂 Agent 的生产行为。
+**定位策略**：把"评估有水分"主动转为"我做过诚实评估"（P0-1/2/4 口径）；把"无限流"转为"我清楚生产安全基线"（P2-1）；把 task completed=0.5 和 unexpected_rate=0.375（DeepSeek 过度调工具）当成**最有价值的发现**主动讲——比任何完美数字都更能说明对 Agent 生产行为的理解。
 
-→ 应答口径见 [script-cards.md](./script-cards.md)：必背 13。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。
