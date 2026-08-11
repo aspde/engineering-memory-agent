@@ -1,0 +1,24 @@
+# Caddy reverse proxy for EMA — TLS termination in front of the backend.
+#
+# Default (CADDY_SITE_ADDRESS unset): serves plain HTTP on :8080 so local
+# testing works with zero cert setup (Caddy treats localhost as a local
+# address and never attempts ACME).
+#
+# Production: set CADDY_SITE_ADDRESS=<your-domain> (e.g. ema.example.com) in
+# .env — Caddy automatically provisions a Let's Encrypt certificate, serves
+# HTTPS on :443 and redirects HTTP :80 → HTTPS.  Caddy's default auto-HTTPS
+# is on; cert-expiry e-mail notices go to ACME_EMAIL (empty = Caddy's
+# anonymous default account).
+
+{
+	email {$ACME_EMAIL}
+}
+
+# The frontend is a SPA served by FastAPI itself (single container), so this
+# proxy only forwards to the backend — the backend serves both the SPA and
+# the API, so there is nothing to split at the proxy layer.
+
+{$CADDY_SITE_ADDRESS:http://localhost:8080} {
+	encode zstd gzip
+	reverse_proxy backend:8000
+}

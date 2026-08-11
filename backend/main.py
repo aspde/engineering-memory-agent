@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from sqlalchemy import text
 
 from backend.api.router import api_router
+from backend.api.ratelimit import RateLimitMiddleware
 from backend.db import close_db, get_session_factory
 from backend.db.schema import init_db
 from backend.shared.config import config, validate_config
@@ -51,15 +52,11 @@ _FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 async def lifespan(app: FastAPI):
     """Startup: configure logging, validate config, init DB, start patrol."""
 
-    # ── Logging level from LOG_LEVEL (documented in .env.example, was ignored).
-    _log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
-    if not logging.getLogger().handlers:
-        logging.basicConfig(
-            level=_log_level,
-            format="%(asctime)s %(levelname)s %(name)s %(message)s",
-        )
-    for _name in ("backend", "backend.agent"):
-        logging.getLogger(_name).setLevel(_log_level)
+    # ── Logging from LOG_LEVEL + LOG_FORMAT (json enables structured output
+    #    for log collection; text keeps the default human-readable lines).
+    from backend.shared.logging_config import setup_logging
+
+    setup_logging()
 
     # ── Fail fast on invalid configuration instead of mid-request errors or
     #    silently invalid schedules (e.g. PATROL_DAILY_HOUR=25).
@@ -333,6 +330,12 @@ app = FastAPI(
 
 # Runtime health metrics: per-route request count / latency / status for
 # every HTTP request (including /health and /metrics themselves).
+#
+# Middleware order matters: RateLimitMiddleware is registered first, so
+# MetricsMiddleware sits *outside* it and records the 429s the limiter
+# produces — rate-limit rejections stay visible in the HTTP status
+# distribution instead of disappearing before metrics sees them.
+app.add_middleware(RateLimitMiddleware)
 app.add_middleware(MetricsMiddleware)
 
 app.include_router(api_router, prefix="/api")

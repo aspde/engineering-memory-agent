@@ -1,0 +1,12 @@
+# Grafana datasource provisioning — the Prometheus datasource every EMA
+# dashboard targets via the fixed uid `prometheus`.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

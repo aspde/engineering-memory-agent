@@ -29,6 +29,9 @@ Thumbs.db
 # Local embedding model cache (mounted into the container, not in git)
 docker/models/
 
+# Database backups (written by the compose `backup` container)
+backups/
+
 # Build
 dist/
 build/

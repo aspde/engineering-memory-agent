@@ -4,7 +4,7 @@ services:
     container_name: ema-postgres
     environment:
       POSTGRES_USER: ema
-      POSTGRES_PASSWORD: ema123
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ema123}
       POSTGRES_DB: ema_dev
     ports:
       - "5432:5432"
@@ -29,8 +29,13 @@ services:
     container_name: ema-backend
     env_file: .env
     environment:
-      # Override DB host for the compose network (`.env` points at localhost).
-      DATABASE_URL: postgresql://ema:ema123@postgres:5432/ema_dev
+      # Database host for the compose network.  The default points at the
+      # ``postgres`` service; a ``DATABASE_URL`` set in .env overrides it
+      # (e.g. after restoring to a new database — see deployment.md → Backup &
+      # Restore).  Note the plain ``localhost`` value in a dev .env does not
+      # resolve inside the container, so deployments must leave this unset or
+      # point it at the ``postgres`` service.
+      DATABASE_URL: ${DATABASE_URL:-postgresql://ema:ema123@postgres:5432/ema_dev}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     ports:
@@ -46,5 +51,89 @@ services:
       postgres:
         condition: service_healthy
 
+  # Hourly PostgreSQL backup into ./backups (host directory, git-ignored).
+  # Reuses the pgvector image (ships pg_dump, same major version as postgres)
+  # and just runs scripts/backup.sh — dump once on startup, then every
+  # BACKUP_INTERVAL seconds, pruning to the newest BACKUP_KEEP files.
+  # Restore procedure: docs/deployment.md → Backup & Restore.
+  backup:
+    image: pgvector/pgvector:pg16
+    container_name: ema-backup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: ema
+      PGPASSWORD: ${POSTGRES_PASSWORD:-ema123}
+      PGDATABASE: ema_dev
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-3600}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup.sh:/backup.sh:ro
+    # `sed 's/\r$//'` strips CRLF so the script works regardless of how the
+    # repo was checked out on Windows.
+    command: ["sh", "-c", "sed 's/\\r$//' /backup.sh | sh"]
+
+  # Monitoring: Prometheus scrapes backend /metrics (ema_* series), Grafana
+  # renders the EMA dashboard. Scrape config: docker/prometheus.yml; Grafana
+  # provisioning + dashboard: docker/grafana/. Login: admin / GF_ADMIN_PASSWORD.
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: ema-prometheus
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: ema-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./docker/grafana/provisioning/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./docker/grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./docker/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  # TLS termination + reverse proxy.  Default CADDY_SITE_ADDRESS=localhost:8080
+  # serves plain HTTP for local testing; set a real domain in .env and Caddy
+  # provisions a Let's Encrypt cert automatically (HTTPS on :443, HTTP→HTTPS
+  # redirect on :80).  The backend stays reachable on :8000 for direct local
+  # access; expose only the proxy when going public.  See
+  # docs/deployment.md → HTTPS (TLS) 与反向代理.
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: ema-caddy
+    environment:
+      # Only the proxy-specific settings are injected — the full .env
+      # (API keys etc.) must not leak into the edge container.
+      CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-http://localhost:8080}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    depends_on:
+      - backend
+
 volumes:
   postgres_data:
+  prometheus_data:
+  grafana_data:
+  caddy_data:
+  caddy_config:

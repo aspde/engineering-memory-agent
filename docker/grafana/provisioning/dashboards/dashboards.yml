@@ -1,0 +1,14 @@
+# Grafana dashboard provisioning — loads every JSON file under
+# /etc/grafana/dashboards (bind-mounted from ./docker/grafana/dashboards).
+apiVersion: 1
+
+providers:
+  - name: 'EMA'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards

@@ -63,6 +63,21 @@ class EmbeddingConfig:
     hf_endpoint: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_HF_ENDPOINT", "https://hf-mirror.com")
     )
+    # CPU embedding 并发控制（local provider）。BGE-M3 推理是 CPU 密集，
+    # torch/OpenMP 默认抢占全部核；不限制时并发请求的 embed 同时涌入互相
+    # 抢核，造成延迟长尾（冷路径压测实测 10 并发 P95 19s，单条 embed
+    # 366→1120ms）。``max_concurrency`` 限制同时进行的推理任务数，
+    # ``torch_threads`` 限制单任务的内部线程数——两者乘积约等于核数时
+    # 零超卖。调整后需重跑冷压测验证 P95（tests/perf/locustfile.py 默认
+    # 冷池）。
+    max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("EMBEDDING_MAX_CONCURRENCY", "2"))
+    )
+    torch_threads: int = field(
+        default_factory=lambda: int(
+            os.getenv("EMBEDDING_TORCH_THREADS", str(max(1, (os.cpu_count() or 4) // 2)))
+        )
+    )
     # Optional cross-provider failover: when ``EMBEDDING_FALLBACK_PROVIDER`` is
     # set and the primary's call fails (a retryable error after its retries,
     # an open circuit breaker, or a local-model failure such as a corrupt BGE
@@ -360,6 +375,28 @@ class AppConfig:
     metrics_enabled: bool = field(
         default_factory=lambda: os.getenv("METRICS_ENABLED", "true").lower() == "true"
     )
+    # ── API rate limiting (per-key token bucket) ─────────────────────
+    # Caps request volume per API key so an unbounded / abusive caller can't
+    # burn unlimited LLM tokens (each chat round costs real tokens).  Two
+    # tiers: ``chat`` (agent chat + scenario runs, LLM-dense) and ``general``
+    # (every other /api route).  Buckets are process-local — same single-
+    # instance assumption as the circuit breakers / agent concurrency counter
+    # (see deployment.md 单实例部署约束).  See backend/api/ratelimit.py.
+    rate_limit_enabled: bool = field(
+        default_factory=lambda: os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
+    )
+    rate_limit_chat_requests: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_CHAT_REQUESTS", "30"))
+    )
+    rate_limit_chat_window_seconds: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_CHAT_WINDOW_SECONDS", "60"))
+    )
+    rate_limit_general_requests: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_GENERAL_REQUESTS", "120"))
+    )
+    rate_limit_general_window_seconds: int = field(
+        default_factory=lambda: int(os.getenv("RATE_LIMIT_GENERAL_WINDOW_SECONDS", "60"))
+    )
     # ── LLM health alerting ──────────────────────────────────────────
     # A periodic loop inspects a recent window of llm_usage for a high error
     # rate, the in-memory structured-failure counters, and the primary LLM
@@ -517,6 +554,28 @@ def validate_config() -> list[str]:
     if config.context_token_budget < 1:
         problems.append(
             f"CONTEXT_TOKEN_BUDGET={config.context_token_budget} must be >= 1"
+        )
+
+    # Rate-limit quotas: a non-positive requests count admits nothing, and a
+    # zero window would make ``requests / window`` divide by zero in the
+    # limiter's token bucket.
+    if config.rate_limit_chat_requests < 1:
+        problems.append(
+            f"RATE_LIMIT_CHAT_REQUESTS={config.rate_limit_chat_requests} must be >= 1"
+        )
+    if config.rate_limit_chat_window_seconds < 1:
+        problems.append(
+            f"RATE_LIMIT_CHAT_WINDOW_SECONDS={config.rate_limit_chat_window_seconds} "
+            "must be >= 1"
+        )
+    if config.rate_limit_general_requests < 1:
+        problems.append(
+            f"RATE_LIMIT_GENERAL_REQUESTS={config.rate_limit_general_requests} must be >= 1"
+        )
+    if config.rate_limit_general_window_seconds < 1:
+        problems.append(
+            f"RATE_LIMIT_GENERAL_WINDOW_SECONDS={config.rate_limit_general_window_seconds} "
+            "must be >= 1"
         )
 
     # Sampling rate and alert thresholds are ratios — out-of-range values

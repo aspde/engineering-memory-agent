@@ -1,0 +1,14 @@
+# Prometheus config for EMA — scrapes the backend's /metrics endpoint
+# (ema_* runtime health series, see backend/shared/runtime_metrics.py).
+# Backend and Prometheus are on the same compose network, so the scrape
+# target is the compose service name `backend`.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: ema
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['backend:8000']
