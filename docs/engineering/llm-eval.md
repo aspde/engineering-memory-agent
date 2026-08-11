@@ -71,7 +71,7 @@ answer 套件注入 golden context，回答不了"真实检索到底给了模型
 标注集：`查询 + 必须被检索到的 source_content + 必须覆盖的事实 + 禁止出现的论断 +
 检索模式（memory / chunk）`。`source_content` 通过 `tests.eval.e2e_seed` 写入
 memories/chunks 表（带 `eval_e2e` 标签，可 `--clear` 重建，不走 LLM 抽取，
-与检索评测的 30 条语料互不污染）。
+与检索评测的 70 条语料互不污染）。
 
 执行器 `make_e2e_runner` 跑真实生产读路径（memory 模式 → `query_memories`，
 chunk 模式 → `retrieve_hybrid`），把检索结果按 `generate_final_node` 的

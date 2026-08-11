@@ -20,7 +20,7 @@
 
 ### ✅ P0-1 评估数字是"自问自答"，Recall@5=1.000 含金量低
 
-**证据**：`tests/eval/ground_truth.py` 的 query 由 30 条种子记忆反向生成（指纹即摘要逐字子串）；`tests/eval/seed.py` 把同一份 seed 灌进库；语料 30 条、每 query 仅 `n_relevant=1`（`tests/eval/reports/eval-report.json` 全部行），随机基线 recall@5=5/30≈0.167。因此 1.0 是"记住答案"而非"检索能力"。
+**证据**：`tests/eval/ground_truth.py` 的 query 由种子记忆反向生成（指纹即摘要逐字子串）；`tests/eval/seed.py` 把同一份 seed 灌进库；审查时语料 30 条、每 query 仅 `n_relevant=1`（`tests/eval/reports/eval-report.json` 全部行），随机基线 recall@5=5/30≈0.167。因此 1.0 是"记住答案"而非"检索能力"。**2026-08-11 起语料与 query 已扩至 70 条**（5 类 × 14，见 [memory_path_report_70.md](../../tests/eval/reports/memory_path_report_70.md)），默认确定性基线改为 0.886 / 0.767。
 
 **现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../tests/eval/reports/archive/hard_negative_report.md)）。
 
@@ -30,7 +30,7 @@
 
 **证据**：`tests/eval/dataset.py:219-252`，`run_eval.py:103-111` 默认开启；用同一个 BGE-M3 嵌入召回结果与目标摘要，cos≥0.80 判"相关"——模型检到自己就是"对"。"hard" 类目 recall=1.0 依赖此通道。
 
-**现状**：已改为 opt-in（`--semantic-relevance`），默认确定性纯子串基线（memory 路径 recall 0.900 / MRR 0.844）；报告区分 `substring_hits` / `semantic_only_hits` 如实披露自证贡献。
+**现状**：已改为 opt-in（`--semantic-relevance`），默认确定性纯子串基线（memory 路径 70 条 recall 0.886 / MRR 0.767）；报告区分 `substring_hits` / `semantic_only_hits` 如实披露自证贡献。
 
 ### ✅ P0-3 LLM judge 与被测模型同源、无校准
 
@@ -219,21 +219,21 @@
 
 ### 🗣 P2-13 无团队协作背书 + 无真实用户
 
-**证据**（README.md 和 [project-overview.md](./project-overview.md)）：定位为"端到端主导 + 工程纪律替代 review"——质量保证不依赖 code review，而以 ADR、CI 门禁、评估集与 1450+ 测试替代；无真实用户、生产库为空。该取舍的代价分析见 [decision-faq.md](./decision-faq.md) 第 18 节（没有团队怎么保证质量）。
+**证据**（README.md 和 [project-overview.md](./project-overview.md)）：定位为"端到端主导 + 工程纪律替代 review"——质量保证不依赖 code review，而以 ADR、CI 门禁、评估集与约 1400 测试替代；无真实用户、生产库为空。该取舍的代价分析见 [decision-faq.md](./decision-faq.md) 第 20 节（没有团队怎么保证质量）。
 
-→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 18 节（没有团队怎么保证质量）。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 20 节（没有团队怎么保证质量）。
 
 ### 🗣 P2-14 规模偏小，属个人项目量级
 
-**证据**：记忆库 30 条（评估集）、10 并发 QPS 4.8、项目周期 3 个月。
+**证据**：记忆库 70 条（评估集种子）、10 并发 QPS 4.8、项目周期 3 个月。
 
-→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 17 节（数据量这么小有意义吗）——拐点思维（万级记忆库 pgvector HNSW 够用），诚实承认生产级规模没跑过。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 19 节（数据量这么小有意义吗）——拐点思维（万级记忆库 pgvector HNSW 够用），诚实承认生产级规模没跑过。
 
 ### 🗣 P2-15 LangGraph 是相对冷门框架
 
 **已有分析**（[deep-dive.md](./deep-dive.md) 决策 1）：黑盒 + HITL 控制弱 + 调试代价。补充两个点：公司已有 LangChain 基础设施时的迁移成本与收益（框架是薄封装，核心价值在记忆/检索/韧性层）；LangGraph 与自研 event loop 的边界（价值在 interrupt/checkpoint/流式）。
 
-→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 16 节（为什么不用 LangChain Agent）。
+→ 完整分析见 [decision-faq.md](./decision-faq.md) 第 18 节（为什么不用 LangChain Agent）。
 
 ### 🗣 P2-16 生产可靠性是 Agent 工程的重点考查面
 

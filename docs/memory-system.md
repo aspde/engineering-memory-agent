@@ -73,7 +73,7 @@ extract_entities(content) ─┘
 
 阈值经标定（`tests/eval/reports/archive/threshold_calibration_report.md`）：同义改写对的相似度 p25 为 0.878、同类不同记忆上限 0.792，0.85 是自然分离点。旧值 0.92 高到「同一知识被不同来源写出来」的 merge 一半不触发。
 
-合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本）；矛盾检测失败则**传播失败**——写入不落库，绝不把可能矛盾的记忆静默写入。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数，写入继续。
+合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本，失败成本是"少合并一次"）；矛盾检测失败则**降级为 supplement 关联写入**（`write_memory` 的 failsafe）——不假定矛盾（那会丢弃内容或把非矛盾误路由到 HITL），也不把新内容无标记写进冲突记忆，内容以补充关联保留；检测遗漏的矛盾由每周巡检的全量矛盾扫描兜底。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数（`ema_structured_failures_total`），写入继续。
 
 检测到矛盾时，两种路径都进入人工处理（HITL），绝不静默丢弃：**agent 路径**通过 `interrupt()` 暂停对话等待选择；**webhook/连接器路径**没有交互会话，冲突内容落入 `pending_conflicts` 队列（保存 `_deferred` 载荷），由人通过 `GET/POST /api/conflicts` 用相同的四种选项（keep_existing / overwrite / merge / keep_both）经同一个 `resolve_conflict()` 解决。队列对同一冲突（同一 `existing_id` + 同一内容哈希）只保留一条 pending 记录——webhook 至少一次投递的重放不会堆叠重复行；已解决的行离开去重范围，同类内容再次出现会正常重新入队。
 
@@ -182,6 +182,6 @@ backend/
 
 - **函数优先**：每个功能一个函数，没有不必要的 class wrapper
 - **独立可测**：每个函数单独 mock LLM/embedding 即可测试
-- **分层容错**：结构化输出经 `response_format`/forced tool 强制 + `jsonschema` 校验 + 有界重试（`chat_structured`）。重试耗尽后，增强类（实体/关系提取）**大声降级**——ERROR 日志 + 失败计数；正确性关键类（矛盾检测、实体匹配）**传播失败**，绝不静默写入错误数据
+- **分层容错**：结构化输出经 `response_format`/forced tool 强制 + `jsonschema` 校验 + 有界重试（`chat_structured`）。重试耗尽后，增强类（实体/关系提取）**大声降级**——ERROR 日志 + 失败计数（`ema_structured_failures_total`），写入继续；矛盾检测（正确性关键类）失败则**降级为 supplement 关联写入**——不假定矛盾（不丢弃内容、不误路由 HITL），也不把新内容无标记写进冲突记忆，检测遗漏由每周巡检的全量矛盾扫描兜底
 - **不依赖 LangChain**：chunk、retrieval、rerank 全部自实现，不引入链条式黑盒
 - **SQL 可见**：向量搜索手写 SQL，`<=>` 操作符和参数完全可控

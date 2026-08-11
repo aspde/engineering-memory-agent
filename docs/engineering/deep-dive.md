@@ -23,6 +23,8 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 - CI/CD 构建记录
 - 飞书讨论
 
+> 注意：PingCode/CI/飞书连接器与 webhook 入口按 [ADR-011](../decisions/ADR-011-breadth-default-off.md) **默认关闭**（`CONNECTORS_ENABLED`），因为它们服务的输入源（真实数据源、真实用户）尚不存在；Git 摄取（`ingest_git_repo_tool`）与文档摄取是 Agent 工具，不受此限制。广度层全部在代码里，开 flag 即启用。
+
 每条原始内容经过：**分块 → 嵌入 → 三阶段提取（摘要+实体+关系）→ 四级相似度去重 → 入库**。检索时用向量召回 + 召回统计 + rerank。
 
 一句话价值：**让团队的工程记忆可检索、可复用、不随人走**。
@@ -51,7 +53,7 @@ EMA 不让人写文档，而是**从工程活动里自动提取记忆**。数据
 
 | 层 | 技术 | 职责 |
 |----|------|------|
-| 前端 | React + TS + Vite + Tailwind | 6 个页面：聊天、记忆库、实体图谱、连接器、巡检、冲突解决 |
+| 前端 | React + TS + Vite + Tailwind | 6 个页面：聊天、记忆库、实体图谱、连接器、巡检、冲突解决（连接器/巡检页在 flag 关闭时显示错误态，ADR-011） |
 | 后端 | FastAPI + Python 3.12 + async | API、生命周期、调用 Agent |
 | Agent | LangGraph 手动 StateGraph | ReAct 循环 + 2 个 HITL 卡点 |
 | 记忆 | 自实现 service 函数 | 提取、去重、召回统计、检索——不用 LangChain Retriever |
@@ -141,6 +143,8 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 **核心理由**：Phase 1 杠杆率最高——实体数据已存在 JSONB 里，缺的只是归一化层。工作量小但让所有记忆产生关联，解锁后续所有 Phase。
 
+> **现状（2026-08-11，ADR-011）**：Phase 2/3/4 已按路线图实现完毕，但输入源（真实数据源、真实用户）还不存在，三个模块挂到 `CONNECTORS_ENABLED` / `SCENARIOS_ENABLED` / `PATROL_ENABLED` 之后**默认关闭**——路由不挂载、巡检调度器不启动，活跃面收敛到核心闭环；任一模块有真实输入时开 flag 即恢复。广度层代码仍在进程中（非死代码），只是不被默认暴露。
+
 **设计权衡**：
 - Q：Phase 4 为什么不做提前设计？→ A：垂直场景本质是"不同 System Prompt + Tool 组合"，是纯消费层。提前设计是过度设计，等前三个 Phase 完成后场景需求自然涌现，按需孵化。
 - Q：每个 Phase 多长？→ A：Phase 1-2 各 1-2 周，Phase 3 是 2-3 周，Phase 4 按需。我坚持"每个 Phase 只做解锁下一阶段所需的最小能力"。
@@ -164,13 +168,32 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 **关键工程细节**：
 - **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `tests/eval/reports/archive/threshold_calibration_report.md`）
-- **容错降级**：LLM 合并失败保留原摘要，冲突检测失败假定无冲突——不阻塞写入
+- **容错降级**：LLM 合并失败保留原摘要（失败成本是"少合并一次"）；矛盾检测失败降级为 supplement 关联写入——不假定矛盾（不丢弃内容、不误路由 HITL），也不把新内容无标记写进冲突记忆，检测遗漏由周巡检兜底（见下节「写入侧质量防线」）
 - **冲突解决 4 选项**：keep_existing / overwrite / merge / keep_both，由 `resolve_conflict()` 实现
 - **冲突走 HITL**：`check_conflict_node` 检测到 conflict action 后 `interrupt()`，等用户选
 
 **设计权衡**：
 - Q：为什么不用 LLM 直接判断要不要合并？→ A：LLM 判断成本高且不稳定。先用向量相似度做粗筛（便宜、稳定），只在边界区间（0.72-0.85）才调 LLM 做精细判断。这样 90% 的写入只需要一次向量搜索，不用调 LLM。
-- Q：冲突检测的 prompt 长什么样？→ A：很简洁——给 LLM 两个 summary，让它返回 `{"conflict": true/false}` 的 JSON。强制 JSON 输出便于解析，失败时假定无冲突。
+- Q：冲突检测的 prompt 长什么样？→ A：很简洁——给 LLM 两个 summary，让它返回 `{"conflict": true/false}` 的 JSON。强制 JSON 输出便于解析，失败时降级为 supplement 关联写入，不阻塞写入。
+
+**写入侧质量防线（为什么记忆库不会被写坏）**
+
+记忆写入是系统里唯一"不可逆 + 一次写坏会无限复用"的操作——读错了下次还能再读，写错了它变成检索候选、影响之后所有回答。所以读侧我用指标防（Recall/MRR），写侧我用设计防，完整防线分六层：
+
+| 层 | 防线 | 失败语义 | 代码位置 |
+|----|------|---------|---------|
+| 1 精确去重 | content-hash 幂等门：精确重复在 LLM 抽取前停住；`meta.prior_hashes` 保留被合并/覆盖的旧 hash，重放与重摄取永远命中 | 零 LLM 成本，防重放污染 | `write_memory()` / `_find_by_content_hash()` |
+| 2 抽取降级 | 摘要 LLM 挂 → 原文前 200 字回退；实体/关系重试耗尽 → 降级 `[]` + ERROR + `ema_structured_failures_total` 计数；关系端点必须落在已提取实体集合内，否则丢弃（防幻觉端点） | 增强类失败降级，内容不丢 | `backend/service/extraction.py` |
+| 3 阈值分级 | 四级相似度去重，阈值经标定：0.85 合并 / 0.72 冲突 / 0.60 关联 / <0.60 新增 | 边界带本身有噪声（embedding 只是信号，LLM 判断有主观性），所以"冲突"的后果不落在默认路径上 | `write_memory()` 分级 |
+| 4 矛盾不静默 | agent 路径 `interrupt()` 等人；webhook/连接器入 `pending_conflicts` 队列；检测失败降级 supplement（内容不丢）；每周巡检全量矛盾扫描兜底"写入时漏掉"的旧矛盾（巡检默认关闭，`PATROL_ENABLED=true` 开启，见 ADR-011） | 单点漏判不会变成永久的自相矛盾 | `_detect_conflict()` / `check_conflict_node` / `run_patrol()` |
+| 5 HITL 审批 | 写/摄取工具执行前等人确认；巡检无人值守，冲突自动 keep_both（上限 3 次） | 产品层最后防线 | `check_approval_node` |
+| 6 可逆 | 所有删除是 `deleted_at` 软删；patrol 冲突可 reopen；裁决留台账 | 判错可重裁，无不可逆破坏点 | `resolve_conflict()` |
+
+**诚实边界**（主动交代，比防线本身更可信）：
+
+1. **merge 忠实度是唯一静默风险点，且没测**——合并把两条摘要合成一条，若 LLM 丢了旧记忆的事实、或写了旧记忆没有的内容，判断（该不该合）与操作（合成）都是 LLM、无外部校验。缓解：合并失败保留原摘要、内容哈希幂等保证可重放，但没有数字证明"合并不丢事实"。要补就是 20-30 对已知摘要对 + judge 打分"合并后是否覆盖全部事实"。
+2. **矛盾检测只 vet 最近匹配**——`write_memory` 只对相似度最高的那条做矛盾检测，第 2/3 近邻只记录为 supplement、不逐一 vet（每个近邻多一次结构化 LLM 调用，为罕见事件买单，权衡后拒绝）。近邻矛盾靠周巡检兜底。
+3. **`_has_substance` 守卫只在 auto-memory 路径生效**——它拒绝"摘要退化成原文截断 + 零实体"的 LLM 故障产物，但 webhook/连接器摄取不走该守卫。
 
 ### 难点 2：衰减加权为什么被移除
 
@@ -220,17 +243,17 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 | 指标 | 数值 | 来源 |
 |------|------|------|
-| 数据源接入数 | 4 个（Git / PingCode / CI / 飞书） | — |
-| 记忆库规模 | 评估集 30 条种子记忆（生产待部署） | tests/eval/seed_memories.jsonl |
-| 检索 Recall@5 | **0.900（默认确定性基线）**；语义通道 opt-in 时 1.000 | tests/eval 实测（30 query，memory:norank@k5；默认纯子串匹配，见 [memory-path-report.md](../../tests/eval/reports/memory_path_report.md)） |
-| 检索 MRR | **0.844（默认确定性基线）**；语义通道 opt-in 时 0.944 | 同上；此前的 0.983 是 chunk:vector 路径，非生产默认路径 |
-| 语义通道贡献 | 30 条中 3 条（q018/q024/q026）仅靠 embedding 相似度判相关（0.900→1.000、0.844→0.944）；**语义通道是显式 opt-in，非默认** | 语义通道用被评测的 BGE-M3 自评（见 dataset.py），因自证故默认关闭、显式开启，贡献已如实披露 |
+| 数据源接入数 | 4 个（Git / PingCode / CI / 飞书；连接器默认关闭，见 ADR-011） | — |
+| 记忆库规模 | 评估集 70 条种子记忆（生产待部署） | tests/eval/seed_memories.jsonl |
+| 检索 Recall@5 | **0.886（默认确定性基线，70 条）**；语义通道 opt-in 时 1.000（30 条时代的历史测量） | tests/eval 实测（memory:norank@k5；默认纯子串匹配，见 [memory-path-report-70.md](../../tests/eval/reports/memory_path_report_70.md)） |
+| 检索 MRR | **0.767（默认确定性基线，70 条）**；语义通道 opt-in 时 0.944（30 条时代） | 同上；此前的 0.983 是 chunk:vector 路径，非生产默认路径 |
+| 语义通道贡献 | 30 条时代 3 条（q018/q024/q026）仅靠 embedding 相似度判相关（0.900→1.000、0.844→0.944）；**语义通道是显式 opt-in，非默认**，当前 70 条门禁不依赖它 | 语义通道用被评测的 BGE-M3 自评（见 dataset.py），因自证故默认关闭、显式开启，贡献已如实披露 |
 | 检索判别力（hard-negative） | **纯向量 27 条陷阱集：综合通过仅 59.3%、MRR 0.790、11 条陷阱压过目标 → bounded cross-encoder top-3 重排后 81.5%、MRR 0.889、5 条** | [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md) 实测；纯向量对表层词重合高度宽容（陷阱与目标共享关键词时排序靠词面而非意图）；已实现 bounded-CE 重排修复（`query_memories(use_cross_encoder=True)`，默认关） |
-| 检索 NDCG@5 | 0.959 | tests/eval 实测（memory:norank@k5） |
-| 检索延迟（稳态） | ~190ms（hybrid 无 rerank：embed + sparse + sort） | tests/eval 实测（hybrid:norank@k5 190ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
+| 检索 NDCG@5 | 0.798（70 条默认）；0.959 为 30 条语义开启时的历史值 | tests/eval 实测（memory:norank@k5，见 [memory-path-report-70.md](../../tests/eval/reports/memory_path_report_70.md)） |
+| 检索延迟（稳态） | ~190ms（30 条 hybrid 无 rerank：embed + sparse + sort）；memory 路径 70 条平均 ~550ms | tests/eval 实测（hybrid:norank@k5 190ms；memory:norank@k5 552ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
 | cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | tests/eval 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
-| 代码量 | backend 13916 行 + agent 2497 行（纯 Python，无前端） | wc -l |
-| 测试覆盖 | 1416 测试用例 | pytest --collect-only |
+| 代码量 | backend 约 1.4 万行（不含 agent）+ agent 约 2.3 千行（纯 Python，无前端） | wc -l |
+| 测试覆盖 | 1396 测试用例 | pytest --collect-only |
 | Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875 | run_task_eval 8 任务实测（DeepSeek，deterministic judge，2026-08-09） |
 | Agent 任务轨迹质量 | groundedness 1.000 / citation 0.875 / **0 执行错误**；unexpected_rate 0.375 暴露过度调用 | 同上次运行，详见 [llm-eval.md](llm-eval.md) |
 | 日均检索次数 | [待生产部署后统计] | — |
@@ -241,9 +264,9 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 **任务级评估设计**：8 个真实多步任务驱动**完整 Agent 图**（ReAct 循环 + 真实工具执行 + HITL 自动放行），测的不是单次决策而是整条轨迹——`completed`（调齐必备工具 + 实质答案）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）。HITL 自动放行是为了隔离"人的决策"与"Agent 能力"。**实测最有价值的不是分数，而是它暴露了组件级评测看不到的轨迹级问题**：DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了 4 次），概念查询甚至撞 max_steps——`unexpected_rate 0.375` 是 completed 掉到 0.5 的主因，改进方向是强化工具描述边界与轨迹节流。这套评估还顺带抓出并修复了一个生产 HITL 正确性 bug（拒绝审批后写操作仍被静态边路由执行），见 [llm-eval.md](llm-eval.md) 末尾。
 
-**评估集设计**：30 条标注 query，5 类 × 6 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard。**三个如实披露的点**：
-1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5=1.0 只能证明"找得到"，不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
-2. **语义通道已改为显式 opt-in（非默认）**：30 条里 3 条靠"被评测的 BGE-M3 给自己打分"（embedding 相似度 ≥0.80）判为相关（0.900→1.000、0.844→0.944）。这部分是模型"认出自已"，不是独立判据——所以默认评估是**确定性纯子串基线**（recall 0.90/MRR 0.84，无自证），语义通道显式开启才启用，贡献已在报告里如实披露。
+**评估集设计**：70 条标注 query，5 类 × 14 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard（18/30/22，hard 占 31%），每条标 1 条相关记忆。**三个如实披露的点**：
+1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5 只能证明"找得到"（当前默认基线 0.886），不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
+2. **语义通道已改为显式 opt-in（非默认）**：30 条时代 3 条靠"被评测的 BGE-M3 给自己打分"（embedding 相似度 ≥0.80）判为相关（0.900→1.000、0.844→0.944）。这部分是模型"认出自已"，不是独立判据——所以默认评估是**确定性纯子串基线**（70 条 recall 0.886 / MRR 0.767，无自证），语义通道显式开启才启用，贡献已在报告里如实披露。
 3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md)。
 
 **设计选择**：对抗性审查要求"hard negative 跑一遍还 1.0 吗"必须能回答——与其让 1.0 被当自证拆穿，不如主动把真实判别力数字摆出来：1.0 的局限是什么、用 27 条陷阱集量化了真实判别力、下一步怎么改进。诚实暴露比完美数字可信。
@@ -316,10 +339,10 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 |---------|---------|
 | "四级相似度阈值怎么定的？" | 已标定：收集三类摘要对的相似度分布（同义改写 0.84-0.97 / 同类 ≤0.79 / 异类 ≤0.72），发现旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测；0.85 是分离点，已改 MERGE 0.85 / CONFLICT 0.72（见 threshold_calibration_report.md）。诚实边界：8 对改写样本小，真实生产分布待部署后确认 |
 | "衰减公式为什么是这个？" | 诚实回答：衰减已从排序路径移除。decay A/B 显示衰减加权 recall@5 0.667、无衰减 0.900，唯一测量数据表明衰减让检索变差，且其前提「近期/高频=相关」只建立在合成老化分布上。连续调参（S=2x→8x→12x）本质是逼近 no-op。改为纯相似度排序 + `record_recalls` 记录召回元数据，过期归档由 patrol LLM 读原始 recall 字段判断（见 decay_ab_report.md）。这个"用数据否掉自己的功能"的决策本身就是亮点 |
-| "评估数字 1.0 是自证吧？" | 主动认 + 给诚实口径：主评估集 30 条**默认是确定性纯子串基线**（recall 0.90 / MRR 0.84，无自证）；语义通道是显式 opt-in（救回 3/30 → 1.00/0.94，用被评测模型自评故非默认）；真实判别力看 27 条陷阱集——纯向量综合通过仅 59.3%、11 条陷阱压过目标。**已用这个集落地改进**：bounded cross-encoder top-3 重排提至 81.5%（默认关、显式启用），排除 query 重写/hybrid（会放大表层词问题） |
+| "评估数字 1.0 是自证吧？" | 主动认 + 给诚实口径：主评估集 70 条**默认是确定性纯子串基线**（recall 0.886 / MRR 0.767，无自证）；语义通道是显式 opt-in（30 条时代救回 3/30 → 1.00/0.94，用被评测模型自评故非默认，当前门禁不依赖它）；真实判别力看 27 条陷阱集——纯向量综合通过仅 59.3%、11 条陷阱压过目标。**已用这个集落地改进**：bounded cross-encoder top-3 重排提至 81.5%（默认关、显式启用），排除 query 重写/hybrid（会放大表层词问题） |
 | "为什么不用 LangChain Agent？" | 黑盒 + HITL 控制弱 + 调试代价 |
 | "pgvector 性能不行吧？" | 万级数据 hnsw 够用，讲拐点 |
 | "实体归一化准确率怎么样？" | 两层判断（向量+LLM），fire-and-forget + 巡检补全 |
 | "HITL 暂停后状态怎么存？" | PostgresSaver，thread_id 恢复 |
-| "怎么防止 LLM 幻觉污染记忆？" | 老实说目前没做置信度过滤，是下一步改进项 |
+| "怎么防止 LLM 幻觉/写坏记忆库？" | 写侧用设计防——六层防线：content-hash 幂等 → 抽取降级有计数 → 阈值标定 → 矛盾不静默（含检测失败降级 supplement）+ 周巡检全量兜底 → HITL 审批 → 软删可逆（见难点 1「写入侧质量防线」）。诚实边界：merge 忠实度未测（唯一静默风险点）、矛盾检测只 vet 最近匹配、`_has_substance` 只在 auto-memory 路径生效——如实交代 |
 | "如果让你重做会改什么？" | 提前打 layer 字段做分层记忆 + 加检索日志 |

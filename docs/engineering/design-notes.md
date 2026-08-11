@@ -70,10 +70,10 @@
 
 | Reranker | 引擎 | 成本 | 适用 |
 |----------|------|------|------|
-| cross-encoder | BGE-Reranker-v2-m3 本地 | 零 API | 默认，90% 场景 |
+| cross-encoder | BGE-Reranker-v2-m3 本地 | 零 API | 显式启用（默认关，eval 实测小语料下掉 recall） |
 | LLM | LLMProvider | API 费用 | 需精细语义判断 |
 
-cross-encoder 是双塔模型，query 和 doc 一起进 transformer 输出相似度，比向量召回的 dot product 准但慢——所以先用向量召回 top 20，再用 cross-encoder rerank 到 top 5。实测 top 20 rerank 约 100-200ms（CPU），可批处理优化。LLM rerank 让模型给每个候选打 0-1 分，成本高但能理解"虽然字面不像但语义相关"的情况。
+cross-encoder 把 query 和 doc **拼接**后一起过 transformer 输出相关分（不是双塔），比向量召回的 dot product 准但慢——所以默认路径不 rerank（eval 实测小语料下 rerank 掉 recall 且慢 ~90 倍），显式启用时才把它用在召回的竞争区上：`query_memories(use_cross_encoder=True)` 只对相似度前 3 名（bounded top-3）打分重排。延迟实测：bounded top-3 在 memory 路径平均 ~2.5s/query，全量 top-20 CPU 上 568M 模型单 query 约 17.5s（见 [gap-remediation.md](gap-remediation.md) §2.4）——这是它默认关闭的原因。LLM rerank 让模型给每个候选打 0-1 分，成本高但能理解"虽然字面不像但语义相关"的情况。
 
 ### 三阶段记忆提取是什么？为什么分三阶段？
 
@@ -150,9 +150,9 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 设计要点：
 1. **强制 JSON 输出**：`Reply with ONLY a JSON object`，避免自由文本
 2. **明确判断标准**：用 CONTRADICTS 而不是 "related"，避免误判相关为冲突
-3. **容错解析**：`json.loads` 失败时 `except` 假定无冲突，不阻塞写入
+3. **容错解析**：结构化输出失败（`LLMStructuredError`）由 `write_memory` 捕获，降级为 supplement 关联写入，不阻塞写入
 
-**权衡**：`json.loads` 失败走 except 假定无冲突，是 "fails safe" 原则——宁可漏报冲突也不要阻塞写入。冲突检测频率不高（只在 0.72-0.85 区间），走结构化 JSON 够用；提取侧的 entity/relation 已经用函数调用通道（enum 生成期约束 + 降级 chat_structured）。
+**权衡**：冲突检测走 `chat_structured`（JSON schema 强制 + 有界重试），失败抛 `LLMStructuredError`，由 `write_memory` 捕获后降级为 supplement 关联写入——fails safe 原则：宁可内容以补充关联保留、矛盾由周巡检兜底，也不阻塞写入或丢弃内容。冲突检测频率不高（只在 0.72-0.85 区间）；提取侧的 entity/relation 已经用函数调用通道（enum 生成期约束 + 降级 chat_structured）。
 
 ### 三阶段提取的 prompt 怎么设计？
 
@@ -188,7 +188,7 @@ Reply with ONLY a JSON object: {{"conflict": true}} or {{"conflict": false}}
 
 fails safe 原则：
 1. **记忆合并**：LLM 合并失败 → 保留原摘要，不丢数据
-2. **冲突检测**：LLM 检测失败 → 假定无冲突，不阻塞写入
+2. **冲突检测**：LLM 检测失败 → 降级为 supplement 关联写入（不假定矛盾、不丢弃内容，检测遗漏由周巡检全量扫描兜底）
 3. **实体归一化**：失败 → fire-and-forget，记忆已写入，归一化后续巡检补
 4. **Agent 节点**：LLM 调用失败不终止图执行，错误信息进 state，generate_final 兜底
 

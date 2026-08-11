@@ -17,7 +17,7 @@ EMA（Engineering Memory Agent）把研发过程中的代码、Git 历史、技�
 | LLM | LLMProvider 抽象 | DeepSeek / Claude 切换，业务代码不依赖具体 SDK |
 | Embedding | BGE-M3 本地部署 | 可替换，含故障转移 |
 | 数据库 | PostgreSQL 16 + pgvector | 结构化数据 + 向量检索 + 对话 checkpoint 三合一 |
-| 前端 | React + TypeScript + Vite + Tailwind | 6 页面，可独立全栈交付 |
+| 前端 | React + TypeScript + Vite + Tailwind | 6 页面，可独立全栈交付；连接器/巡检/场景页在对应 `*_ENABLED` 关闭时显示错误态（见 ADR-011） |
 
 ## 核心设计
 
@@ -38,18 +38,22 @@ EMA（Engineering Memory Agent）把研发过程中的代码、Git 历史、技�
 
 不用 `create_react_agent` 是因为它是黑盒，HITL 的插入点不好控制。手动建图让两个 HITL 卡点（写前审批、记忆冲突仲裁）精确可控，用 interrupt + PostgresSaver 实现跨重启的对话恢复。
 
+### 4. 广度层默认关闭（ADR-011）
+
+连接器/webhook、垂直场景、巡检调度器按 [ADR-006](../decisions/ADR-006-extension-roadmap.md) 的 Phase 2/3/4 实现完毕，但输入源（真实数据源 / 真实用户）还不存在，生产记忆库为空。因此三个模块挂到 `CONNECTORS_ENABLED` / `SCENARIOS_ENABLED` / `PATROL_ENABLED` 之后、**默认关闭**——路由不挂载（404 而非 401）、巡检调度器不启动，核心闭环（chat + 记忆读写 + 实体 + 冲突仲裁 + 用量观测）恒挂载。不删代码，任一模块有真实输入时开 flag 即恢复。
+
 ## 量化成果
 
 | 指标 | 数值 | 说明 |
 |------|------|------|
-| 数据源 | 4 个 | Git / PingCode / CI / 飞书 |
+| 数据源 | 4 个 | Git / PingCode / CI / 飞书；连接器与 webhook 默认关闭（`CONNECTORS_ENABLED=true` 开启，见 [ADR-011](../decisions/ADR-011-breadth-default-off.md)） |
 | 检索评估集 | 70 条标注 query | 5 类 × 14、hard 占 30%，生产 memory 路径默认确定性基线 Recall@5 0.886 / MRR 0.767（纯子串匹配无自证） |
 | 检索判别力 | 27 条 hard-negative | 纯向量综合通过 59.3% → bounded cross-encoder top-3 重排后 81.5% |
 | sparse 检索 | O(N) → O(log N) | jieba 分词落 chunks.tokens 列 + GIN 索引，1000 条语料延迟 -69% |
 | rerank | 17.5s → 0.19s | A/B 验证小语料下 cross-encoder 有害（0.15 floor 误伤低分相关），默认跳过 |
 | Agent 任务级 | completed 0.5 / tool_recall 0.94 / grounded 1.0 | 8 个多步任务驱动完整图，0 执行错误；unexpected_rate 0.375 暴露过度调用 |
-| 压测 | 10 并发 QPS 4.8 / P95 110ms | 160 并发 QPS 63、0 失败，瓶颈在 BGE-M3 CPU 嵌入 |
-| 规模 | 后端+agent 1.6 万行 / 1450+ 测试 | — |
+| 压测 | 10 并发 QPS 4.8 / P95 110ms | 热路径（重复查询命中 LRU）；冷路径 10 并发 QPS 2.6，P95 19s 长尾在并发控制修复后降到 690ms（见 [gap-remediation.md](gap-remediation.md) §5.3） |
+| 规模 | 后端+agent 约 1.7 万行 / 1400 测试 | — |
 
 ## 评估驱动的优化迭代
 

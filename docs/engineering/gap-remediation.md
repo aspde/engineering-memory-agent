@@ -14,9 +14,9 @@
 |------|---------|------|
 | 无用户级认证(登录/角色/权限) | 接入认证已有 API key:所有 `/api` 请求须携带 `Authorization: Bearer <EMA_API_KEY>`([auth.py](../../backend/api/auth.py) `secrets.compare_digest` 常量时间比较 + 通用 401,全局挂载于 [router.py](../../backend/api/router.py),`APP_ENV=test` 豁免),单 key 共享、无用户身份 | 有意取舍 + 已实现兜底 |
 | 未容器化 | 已解决:根目录 [Dockerfile](../../Dockerfile)(后端 + 前端单镜像)+ `docker compose up -d` 一键启动([deployment.md](../deployment.md)) | ✅ 已补 |
-| 巡检内嵌主进程 | [main.py:163-272](../../backend/main.py) 调度器在 FastAPI 主进程 | 有意取舍([ADR-007](../../decisions/ADR-007-patrol-in-process-scheduler.md)) |
+| 巡检内嵌主进程 | [main.py:163-272](../../backend/main.py) 调度器在 FastAPI 主进程 | 有意取舍([ADR-007](../decisions/ADR-007-patrol-in-process-scheduler.md))；且按 [ADR-011](../decisions/ADR-011-breadth-default-off.md) **默认关闭**（`PATROL_ENABLED=false`，调度器不自启、巡检路由不挂载） |
 | Windows 降级 | [main.py:24-30](../../backend/main.py) PostgresSaver 降级 InMemorySaver | 已知平台差异 |
-| 连接池写死 | [db/__init__.py](../../db/__init__.py) 5+10 | 低 |
+| 连接池写死 | [db/__init__.py](../../backend/db/__init__.py) 5+10 | 低 |
 
 **已补齐**(相对本文档初版):评估体系(Recall@K/MRR/NDCG + LLM-as-judge,见 §2.4)、成本监控(`llm_usage` 表 + `/api/usage/*` 端点 + 成本估算,见 [architecture.md](../architecture.md))、CI/CD(`.github/workflows/ci.yml` 跑后端 pytest + 前端 vitest + `eval.yml` 每周检索评估)、Prompt 版本管理([prompts.py](../../backend/service/prompts.py) 中央注册表 + 版本号)、运行监控指标([runtime_metrics.py](../../backend/shared/runtime_metrics.py) + `GET /metrics` 暴露 Prometheus 时序)、数据库备份与恢复(compose `backup` 容器每小时 pg_dump -Fc 到 `./backups/` + 恢复 runbook)、监控采集闭环(compose `prometheus` + `grafana` "EMA — Runtime Health" 看板)、API 限流(per-key 令牌桶中间件,chat/general 两档,429 + Retry-After,见 [ratelimit.py](../../backend/api/ratelimit.py))、Caddy TLS 反代(compose `caddy` 服务)、日志结构化(`LOG_FORMAT=json` 单行 JSON + trace_id/thread_id)、Alembic schema 版本化迁移(`alembic_version` 表 + `migrations/versions/` 成对 upgrade/downgrade)。这些不再列为短板。
 
@@ -158,38 +158,7 @@ if __name__ == "__main__":
 - 裁判输出用 `chat_structured`(JSON Schema 校验 + 语义重试),替代裸 `json.loads` + 解析失败归零的脆弱写法;
 - 裁判 prompt 让 LLM 输出结构化的 `covered_facts / grounded / ungrounded_claims`,覆盖率与忠实度可从判决直接算指标,幻觉论断进报告 per-query 明细。
 
-```python
-# tests/eval/llm_judge.py — 当前实现
-"""LLM-as-judge：让 LLM 评估答案质量"""
-
-import json
-from backend.service.llm_service import get_llm_provider
-
-JUDGE_PROMPT = """\
-你是一个严格的评估员。根据以下信息评估答案质量。
-
-问题：{question}
-检索到的记忆：{retrieved}
-生成的答案：{answer}
-
-请从三个维度打分（1-5 分）：
-1. 准确性：答案是否基于检索记忆，没有幻觉
-2. 完整性：答案是否覆盖了检索记忆中的关键信息
-3. 相关性：答案是否直接回应了问题
-
-只返回 JSON：{{"accuracy": X, "completeness": X, "relevance": X, "reason": "..."}}
-"""
-
-
-async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
-    llm = get_llm_provider()
-    prompt = JUDGE_PROMPT.format(question=question, retrieved=retrieved, answer=answer)
-    resp = await llm.chat([{"role": "user", "content": prompt}])
-    try:
-        return json.loads(resp.strip())
-    except Exception:
-        return {"accuracy": 0, "completeness": 0, "relevance": 0, "reason": "parse_failed"}
-```
+> 早期草案（裸 `json.loads` + 1-5 分制）已重构，`tests/eval/llm_judge.py` 当前实现走 `chat_structured`（schema 校验 + 有界重试），prompt 是 answer/summary 两套结构化工件（`covered_facts` / `grounded` / `ungrounded_claims` 与摘要忠实/完整 0-1 分），失败降级到确定性通道并计入 `judge_errors`——judge 侧降级不触发 CI 门禁。以代码为准。
 
 评估体系现状:`tests/eval/` 下交付,检索路径 70 条标注、四套 LLM 行为评测、任务级端到端评测,门禁接入 CI(每周定时,阈值按基线校准)。生成质量由 LLM-as-judge 粗筛 + 人工抽检兜底。
 
@@ -209,7 +178,7 @@ async def judge_answer(question: str, retrieved: str, answer: str) -> dict:
 | [run_eval.py](../../tests/eval/run_eval.py) | CLI:`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
 | [seed.py](../../tests/eval/seed.py) | CLI:`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
 
-单元测试(101 passed):`test_eval_metrics.py`(指标手算 case)+ `test_eval_dataset.py`(数据集一致性 + 合成坏语料校验器)+ `test_eval_runner.py`(synthetic retriever 端到端)+ `test_eval_report.py`。
+单元测试(154 passed):`tests/unit/test_eval_metrics.py`(指标手算 case)+ `test_eval_dataset.py`(数据集一致性 + 合成坏语料校验器)+ `test_eval_runner.py`(synthetic retriever 端到端)+ `test_eval_report.py` + `test_eval_core.py` + `test_eval_thresholds.py`(四级阈值分级逻辑)+ `test_eval_compare_baseline.py`。
 
 **关键设计决策**:
 
@@ -236,11 +205,11 @@ python -m tests.eval.run_eval --retriever memory
 
 **检索路径实测数字**(2026-08-11,70 条,memory 路径默认确定性基线):
 
-- **Recall@5=0.886 / MRR=0.767 / NDCG@5=0.798**(70 query,语料翻倍 + hard 占比 30%;30 条时代为 0.900/0.825/0.844)。chunks 路径早期 baseline(vector_search 无 rerank,30 query,重新播种前语料)Recall@5=0.833 / MRR=0.817——当前语料下 vector 单独即 1.000(见 §11.5)。
+- **Recall@5=0.886 / MRR=0.767 / NDCG@5=0.798**(70 query,语料翻倍 + hard 占比 30%;30 条时代为 recall 0.900 / MRR 0.844)。chunks 路径早期 baseline(vector_search 无 rerank,30 query,重新播种前语料)Recall@5=0.833 / MRR=0.817——当前语料下 vector 单独即 1.000(见 §11.5)。
 - **cross-encoder rerank vs 无 rerank Δ recall@5:-0.033**(hybrid:ce 0.967 vs hybrid:norank 1.000,30 query 全量实测——rerank 在小语料下有害,见 §11.5)。
 - **LLM rerank vs bounded-CE(生产 memory 路径)**:recall@5 相同 **0.900**(rerank 不改变召回集合),**MRR 0.819→0.833(+0.014)/ NDCG@5 0.840→0.851**,但**平均延迟 2.5s→14.1s(5.5x,每候选 1 次 LLM 调用)**——小语料下 rerank 只微调排序不救召回,收益 scale-dependent,见 [memory_llm_vs_ce_report.md](../../tests/eval/reports/memory_llm_vs_ce_report.md)。
-- **easy/medium/hard recall@5:0.714 / 0.929 / 0.778**(medium 最高,easy 反而最低——部分 easy query 词重合但向量区分度不足;hard 概念查询 0.778 优于预期)。
-- **按 category**:技术决策 1.000 / 代码实现 1.000 / 架构设计 0.833 / 故障复盘 0.667 / 历史背景 0.667(故障复盘 + 历史背景是短板,概念查询多)。
+- **easy/medium/hard recall@5:0.778 / 0.933 / 0.909**(70 条,memory_path_report_70.md)——medium 最高,hard 概念查询 0.909 优于 easy 0.778(部分 easy query 词重合但向量区分度不足)。
+- **按 category**:技术决策 1.000 / 故障复盘 1.000 / 架构设计 0.857 / 代码实现 0.786 / 历史背景 0.786(70 条)——代码实现 + 历史背景是当前短板(概念查询多),故障复盘已从 30 条时代的 0.667 升到 1.000。
 
 **性能瓶颈实测**:cross-encoder rerank(BGE-reranker-v2-m3,568M 参数)在 CPU 上单 query 总耗时 **17.5s**(含 embed+search+rerank)。优化方向:① embed/rerank 服务化接 GPU;② 降过采样倍数;③ 高频 query 缓存 rerank 结果。当前评估默认走 hybrid 无 rerank 路径绕过此瓶颈。
 
@@ -263,10 +232,10 @@ python -m tests.eval.run_eval --retriever memory
 | 单次对话平均 tool 调用数 | 在 Agent 加计数 | 2.6 次/任务(task 轨迹均值) | 任务级评测 8 任务平均 2.6 次 LLM 调用,概念查询会到 5 |
 | Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | 8 任务实测:工具选择意图准(0.94)但过度调用(unexpected 0.375)拉低严格完成率,是轨迹级真实短板 |
 | Agent 答案接地 | 同上(judge 对工具上下文判定) | groundedness 1.000 / citation 0.875 / 0 执行错误 | 答案全部接地、无捏造、零错误;过度调用而非幻觉是主要问题 |
-| BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms(CPU) | embed 150-230ms/条,CPU 推理 |
+| BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms(CPU)；限并发后 ~300ms/条 | embed CPU 推理；并发超卖时被拖慢到 366→1120ms，限并发(§5.3.2)后单条稳定 ~300ms |
 | 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 0.886(70 条默认确定性基线,2026-08-11) | 生产默认路径(query_memories,threshold 0.3)70 条标注集默认纯子串实测 recall@5=0.886;语义通道自证故默认关 |
 | 检索 MRR | 同上 | 0.767(70 条默认) | 生产 memory 路径默认 MRR 0.77(70 条语料,hard 占比 30% 更真实) |
-| 检索 NDCG@5 | 同上 | 0.959 | memory 路径 NDCG@5 0.96 |
+| 检索 NDCG@5 | 同上 | 0.798 | memory 路径 70 条默认 NDCG@5 0.798(30 条语义开启时历史值 0.959) |
 | 检索判别力(hard-negative) | `python -m tests.eval.experiments.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | 27 条陷阱集实测:纯向量找得到但容易被表面词带偏(综合通过 59.3%)。已落地 bounded cross-encoder top-3 重排(`query_memories(use_cross_encoder=True)`,默认关)提至 81.5% |
 | 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | QPS 随并发线性涨至 160 仍 0 失败,瓶颈在 BGE CPU embed |
 | 检索 P95(压测) | 同上 | 10 并发 110ms / 80 并发 690ms / 160 并发 1.0s | 缓存热路径 P95 110ms@10 并发;冷查询单次 1.75s(含 embed) |
@@ -361,7 +330,7 @@ provider 层统一埋点(唯一咽喉点),观测值进内存缓冲 + 后台 flus
 `tests/perf/locustfile.py` 压测 `/api/memory/search`。相比最小草案的升级:
 
 - **带认证头**:读取 `.env` 的 `EMA_API_KEY`,每个请求带 `Authorization: Bearer`(`backend/api/auth.py` 全局守卫所有 `/api` 路由)。
-- **真实查询集**:默认模式从一个 ~750 查询池(seed 语料 48 个实体 × 15 个问句模板 + 30 条标注 query 生成)抽样,保证请求几乎不重复(query-embedding LRU 几乎总 miss,测冷路径);`HOT=1` 回退到 10 条固定查询(测缓存热路径)。
+- **真实查询集**:默认模式从一个 ~750-779 查询池(seed 语料实体 × 问句模板 + 70 条标注 query 生成)抽样,保证请求几乎不重复(query-embedding LRU 几乎总 miss,测冷路径);`HOT=1` 回退到 10 条固定查询(测缓存热路径)。
 
 ### 5.2 跑压测
 
@@ -499,7 +468,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 | 模块 | 深度 | 代码证据 | 说明 |
 |------|------|---------|------|
-| 四级去重 + 冲突 | 深 | [memory.py:63-77](../../backend/service/memory.py) 四分支 + `_deferred` 载荷 + 关系三元组去重 | 核心深度点 |
+| 四级去重 + 冲突 | 深 | [memory.py:146-176](../../backend/service/memory.py) 四分支 + `_deferred` 载荷 + 关系三元组去重 | 核心深度点 |
 | 双 HITL LangGraph | 深 | [graph.py:41-51](../../backend/agent/graph.py) max_steps 防循环 + Command(goto) 动态路由 | 核心深度点 |
 | 实体归一化双层 | 深 | [entity.py:67-91](../../backend/service/entity.py) 向量粗筛 + [entity.py:160-189](../../backend/service/entity.py) LLM 精判 fails safe | 核心深度点 |
 | LLMProvider 抽象 | 中深 | [llm_service.py:191-199](../../backend/service/llm_service.py) Anthropic system 拆分 + tool_calls 双形态处理 | |
