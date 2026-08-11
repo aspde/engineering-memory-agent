@@ -115,15 +115,29 @@ jobs:
   # provider.  Requires the LLM_API_KEY secret (plus LLM_BASE_URL when not
   # the provider default).
   #
-  # Gate thresholds calibrated 2026-08-09 against the committed baseline
+  # The gate is a MULTI-RUN mean gate (tests/eval/multi_run_gate.py): the
+  # eval runs 3 times and the gate trips on the 95% CI *lower bound* of the
+  # 3-run mean (mean - t*stdev/sqrt(n)), NOT on any single run's value.
+  # LLM output is sampled even with --judge deterministic, so one unlucky
+  # draw can swing a headline metric — relation_recall moved 0.531 → 0.344
+  # between two runs of the same code — and a single-run floor that straddles
+  # that swing flakes CI for no real regression.  Averaging over 3 runs and
+  # gating on the CI lower bound swallows single-run noise: a one-off low
+  # value barely moves the lower bound, while a sustained quality drop drags
+  # the whole distribution down and pushes it below the floor.  A metric
+  # fails when ci95_lower < threshold - 0.03; the tolerance (wider than
+  # compare_baseline's 0.01) absorbs the small-sample CI width and residual
+  # bias, so the gate trips on a real regression, not a noise blip.
+  #
+  # Thresholds calibrated 2026-08-09 against the committed baseline
   # (docs/interview/llm-eval-baseline.json, commit 4ae4848, --judge
-  # deterministic, 0 execution errors / 0 judge degradations).  The floors
-  # sit ~0.05-0.10 below the measured values so a healthy run passes while a
-  # real regression still trips the job.  Recalibrate after an intentional
+  # deterministic, 0 execution errors / 0 judge degradations); the floors sit
+  # ~0.05-0.10 below the measured values so a healthy run passes while a real
+  # regression still trips the job.  Recalibrate after an intentional
   # behaviour change (prompt bump, model swap): regenerate the baseline and
   # move the floors to the new measured values.
   #
-  # The gate uses --judge deterministic (not the default --judge llm): the
+  # The gate runs --judge deterministic (not the default --judge llm): the
   # deterministic channel is reproducible and independent of the judge LLM's
   # availability.  During calibration (2026-08-09) the configured judge
   # provider (glm-4.7-flash) was rate-limited on both full runs — 429 on
@@ -161,14 +175,19 @@ jobs:
           pip install "$(grep -m1 '^torch==' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
 
-      - name: Run LLM behavior eval
+      - name: Run LLM behavior eval (3-run mean gate)
         run: |
-          # Deterministic gate (see job comment: reproducible, judge-outage
-          # safe).  Thresholds from the committed baseline minus ~0.05-0.10.
-          python -m tests.eval.run_llm_eval --suite tool_selection,extraction,answer \
+          # Multi-run gate (see the job comment): the eval runs 3 times and
+          # the gate trips on the 95% CI *lower bound* of the 3-run mean, not
+          # on any single run's value.  One unlucky low draw (LLM output is
+          # sampled even with --judge deterministic) no longer flakes CI; only
+          # a sustained quality drop drags the CI lower bound below a floor.
+          # Thresholds are the same numbers the old single-run gate used; each
+          # metric fails when ci95_lower < threshold - 0.03.
+          python -m tests.eval.multi_run_gate --n-runs 3 \
             --judge deterministic \
-            --report-md docs/interview/llm-eval-report.md \
-            --report-json llm-eval-report.json \
+            --suite tool_selection,extraction,answer \
+            --report-dir llm-eval-reports \
             --min-tool-accuracy 0.68 \
             --min-entity-f1 0.68 \
             --min-relation-f1 0.28 \
@@ -182,8 +201,7 @@ jobs:
         with:
           name: llm-eval-report
           path: |
-            docs/interview/llm-eval-report.md
-            llm-eval-report.json
+            llm-eval-reports/
 
   # End-to-end eval — the full chain "query → real retrieval → answer →
   # judge".  Needs the BGE-M3 embedding model (to embed the query against the

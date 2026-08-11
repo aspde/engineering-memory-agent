@@ -18,14 +18,13 @@
 
 | 区间 | 状态 | 说明 |
 |------|------|------|
-| P0 评估与核心卖点 | **6 ✅ / 2 🟡** | 完成：P0-1/2/5/7/8 + P0-6（话术）。部分：P0-3（judge 校准）、P0-4（多次均值门禁）为可选加分项 |
+| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 话术全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
 | P1 崩溃级缺陷 | **10 ✅ 全完成** | `0481dd5` 一次提交修完，全量回归通过 |
 | P2 生产/安全/定位 | **4 ✅ 代码项 + 12 🗣 话术项** | 代码完成：P2-4 沙箱 / P2-5 tsc 门禁 / P2-8 attempts / P2-11 错误渲染。其余为纯应答话术（已备在文） |
 
 **留给面试前的只剩**：
-1. 背熟全部 🗣 话术（P0-6 / P2-1/2/3/6/7/9/10/12/13/14/15/16）
-2. （可选加分，非必须）P0-3 judge 一致性小样本校准、P0-4 多次均值门禁
-3. 填实 `ema-deep-dive.md` / `self-introduction.md` 里的 `[需要你补充：XXX]` 个人占位符
+1. 背熟全部 🗣 话术（P0-6 / P2-1/2/3/6/7/9/10/12/13/14/15/16，见 [script-cards.md](./script-cards.md)）
+2. 填实 `ema-deep-dive.md` / `self-introduction.md` 里的 `[需要你补充：XXX]` 个人占位符
 
 ---
 
@@ -46,19 +45,19 @@
 
 **🔧 改代码**：把 `semantic_relevance` 默认改为 False，或改用独立判据（如非重叠词/人工标注子串）。报告里区分 `substring_hits` 与 `semantic_only_hits`，诚实披露哪些 query 是靠语义通道通过的。
 
-### 🟡 P0-3 [🔧+🗣] LLM judge 与被测模型同源、无校准
+### ✅ P0-3 [🔧+🗣] LLM judge 与被测模型同源、无校准
 
 **证据**：`tests/eval/llm_judge.py` judge 用 DeepSeek（免费档 mimo-v2.5-free）；committed 报告 `llm-eval-semantic-baseline.json:46-48` 自记 known_anomaly（ans-006 正确回答被判 grounded=false）；`.github/workflows/eval.yml:128-131` 承认 judge 曾被限流导致"所有 LLM-judged 指标不可信"。
 
-**🔧 改代码**：judge 强制独立 provider 已有（`run_llm_eval.py:208-250` 是对的，保留）；补一个 **judge 一致性小样本校准**（10-20 条人工 verdict vs LLM verdict 的一致率）。
+**🔧 改代码**：judge 强制独立 provider 已有（`run_llm_eval.py:208-250` 是对的，保留）；补一个 **judge 一致性小样本校准**（10-20 条人工 verdict vs LLM verdict 的一致率）。**✅ 已完成**：`tests/eval/judge_calibration.py` + 12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**——ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../tests/eval/reports/judge_calibration_report.md)。
 
 **🗣 应答口径**：主动讲 ans-006 那个误判——"judge 把'允许改写'当耳边风，所以我在报告里把它记为已知异常，LLM-judge 的 groundedness 是参考值不是绝对值；deterministic judge 才是门禁"。
 
-### 🟡 P0-4 [🔧+🗣] 单次 LLM 采样方差大、两份基线打架、CI 门禁卡中间
+### ✅ P0-4 [🔧+🗣] 单次 LLM 采样方差大、两份基线打架、CI 门禁卡中间
 
 **证据**：同一天 `llm-eval-baseline.json`（relation_recall 0.531, tool_accuracy 0.733）与 `llm-eval-report.json`（0.344 / 0.667）互相矛盾；`eval.yml:170-174` 门禁 `--min-tool-accuracy 0.68` 正好夹在两次观测之间；`compare_baseline.py` tolerance=0.01 对 n=15 远小于单样本翻转量 0.067。
 
-**🔧 改代码**：门禁改成**多次运行的均值 ± 置信区间**判红（n≥3 次取均值），tolerance 按 `1/n` 量级设。这份工作本身是很好的面试谈资。
+**🔧 改代码**：门禁改成**多次运行的均值 ± 置信区间**判红（n≥3 次取均值），tolerance 按 `1/n` 量级设。这份工作本身是很好的面试谈资。**✅ 已完成**：`tests/eval/multi_run_gate.py`（N 次运行均值 + 95% CI 下限判红，t 值硬编码无 scipy）；`eval.yml` 的 llm-eval 门禁已改为 `--n-runs 3` 均值 CI 下限判红；真实聚合两份 committed 报告验证门禁行为（relation_f1 / groundedness 判红暴露 judge-mode 混合，tool_accuracy 等通过）。
 
 **🗣 应答口径**："LLM 行为方差大是真实挑战，我测过同一天跑两次 relation_recall 从 0.53 掉到 0.34。所以我在门禁上做的是 [多次均值]，而不是拿单次数字当能力——单次采样当能力指标是会骗人的。"
 
