@@ -453,3 +453,25 @@ class TestToolParamBounds:
         with pytest.raises(Exception, match="greater than or equal to 1"):
             await ingest_git_repo_tool.ainvoke({"repo_path": "/x", "max_commits": 0})
         mod.ingest_repo.assert_not_awaited()
+
+
+class TestLLMRerankExposureBoundary:
+    """Agent tool schemas must NEVER surface ``use_llm_rerank`` to the model.
+
+    LLM rerank costs ~2.5s per candidate; DeepSeek once enabled it on nearly
+    every tool call, adding ~40s and ~46% of cost per chat round before it
+    was locked out of the tool schemas (see
+    ``docs/engineering/gap-remediation.md`` §3.1.1).  The retrieval functions
+    keep the parameter for explicit callers (the API client and the eval
+    harness), but exposing it to the model lets the model re-enable the slow
+    path on its own — this test makes that regression fail CI.
+    """
+
+    def test_no_tool_exposes_use_llm_rerank(self) -> None:
+        from backend.agent.tools import ALL_TOOLS
+
+        for tool in ALL_TOOLS:
+            props = tool.args_schema.model_json_schema().get("properties", {})
+            assert "use_llm_rerank" not in props, (
+                f"{tool.name} must not expose use_llm_rerank to the model"
+            )

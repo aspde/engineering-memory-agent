@@ -34,7 +34,6 @@ class IngestResponse(BaseModel):
 class SearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=50)
-    use_llm_rerank: bool = False
 
 
 class SearchResult(BaseModel):
@@ -65,7 +64,6 @@ class MemoryWriteResponse(BaseModel):
 class MemorySearchRequest(BaseModel):
     query: str
     top_k: int = Field(default=5, ge=1, le=50)
-    use_llm_rerank: bool = False
 
 
 class MemorySearchResponse(BaseModel):
@@ -134,14 +132,15 @@ async def search(req: SearchRequest) -> SearchResponse:
     Pipeline: dense vector + sparse BM25 union, ranked by reciprocal-rank
     fusion (RRF) of the two lists.  Cross-encoder rerank is skipped by default
     (eval shows it costs ~90x latency without recall gain on the current
-    corpus); pass ``use_llm_rerank=True`` for the LLM pointwise variant.
+    corpus).  LLM rerank is not exposed here — it lives in the service layer
+    only, for eval and future explicit callers.
 
     ``SearchResult.score`` is the RRF fusion normalised to a 0-1 scale
     (1.0 = ranked #1 by both retrievers) — use it for relative ordering,
     not as an absolute similarity threshold.
     """
     try:
-        results = await retrieve_hybrid(req.query, top_k=req.top_k, use_llm_rerank=req.use_llm_rerank)
+        results = await retrieve_hybrid(req.query, top_k=req.top_k)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -194,9 +193,7 @@ async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
     recalled_at) as metadata for the UI and the patrol archival scan.
     """
     try:
-        results = await query_memories(
-            req.query, top_k=req.top_k, use_llm_rerank=req.use_llm_rerank
-        )
+        results = await query_memories(req.query, top_k=req.top_k)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

@@ -2,6 +2,16 @@
 
 Write path:  embed_query() → write_chunks()
 Read path:   embed_query() → vector_search() → rerank() → assemble()
+
+── LLM rerank is NOT exposed to the agent ────────────────────────────────
+Every ``use_llm_rerank`` parameter in this module is for *explicit callers
+only* — the API client (``/api/memory/search``) and the eval harness.
+The agent's retrieval tools (backend/agent/tools.py) call these functions
+with a fixed signature and MUST never surface ``use_llm_rerank`` in their
+tool schemas: LLM rerank costs ~2.5s per candidate and DeepSeek once enabled
+it on nearly every tool call, adding ~40s and ~46% of cost per chat round
+before it was locked out (see docs/engineering/gap-remediation.md §3.1.1).
+Keep any new agent-facing retrieval entry point free of this parameter.
 """
 
 from __future__ import annotations
@@ -369,7 +379,7 @@ async def _rerank_and_filter(
     query: str,
     candidates: list[dict[str, Any]],
     top_k: int,
-    use_llm_rerank: bool,
+    use_llm_rerank: bool,  # explicit callers only — NOT exposed in agent tool schemas
     use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
     """Rerank chunk candidates, drop below-floor results.
@@ -430,10 +440,17 @@ async def retrieve(
     query: str,
     top_k: int = 5,
     *,
-    use_llm_rerank: bool = False,
+    use_llm_rerank: bool = False,  # explicit callers / eval only — NOT exposed in tool schemas
     use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
     """Full read pipeline: embed → vector search → (optional) rerank.
+
+    NOTE: no production callers — the agent's ``retrieve_chunks_tool`` uses
+    ``retrieve_hybrid``, query rewriting uses ``retrieve_multi_query``, and
+    the memory/API read paths use ``query_memories`` / ``vector_search``.
+    Kept as the eval harness's chunks retriever (``make_chunk_retriever`` in
+    ``tests/eval/dataset.py``) and as the unit-test surface for the shared
+    rerank tail (``_rerank_and_filter``) — remove only together with those.
 
     By default candidates are ranked by raw cosine similarity with no
     cross-encoder pass — the eval report shows the 568M reranker costs
@@ -549,7 +566,7 @@ async def retrieve_hybrid(
     query: str,
     top_k: int = 5,
     *,
-    use_llm_rerank: bool = False,
+    use_llm_rerank: bool = False,  # explicit callers / eval only — NOT exposed in tool schemas
     skip_rerank: bool = True,
 ) -> list[RetrievalResult]:
     """Hybrid retrieval: dense vector + sparse BM25 union → rank.
@@ -634,7 +651,7 @@ async def retrieve_multi_query(
     query: str,
     top_k: int = 5,
     *,
-    use_llm_rerank: bool = False,
+    use_llm_rerank: bool = False,  # explicit callers / eval only — NOT exposed in tool schemas
     use_cross_encoder: bool = False,
 ) -> list[RetrievalResult]:
     """Multi-query retrieval: LLM rewrite → union → dedup → (optional) rerank.
@@ -729,7 +746,7 @@ async def query_memories(
     top_k: int = 5,
     *,
     threshold: float = 0.3,
-    use_llm_rerank: bool = False,
+    use_llm_rerank: bool = False,  # explicit callers / eval only — NOT exposed in tool schemas
     use_cross_encoder: bool = False,
 ) -> list[dict]:
     """Search memories with pure-similarity ranking.
