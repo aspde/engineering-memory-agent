@@ -13,6 +13,21 @@ import pytest
 import tests.eval.llm_judge as judge_mod
 
 
+@pytest.fixture(autouse=True)
+def _stub_judge_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never construct a real LLM provider in these unit tests.
+
+    ``judge_answer`` / ``judge_summary`` evaluate ``provider or
+    get_judge_provider()`` eagerly at call time, so a test that mocks
+    ``chat_structured`` but not ``get_judge_provider`` still builds the
+    real provider — and building it fails on an empty API key (CI has
+    no LLM key; APP_ENV=test skips the config check that would catch
+    it).  Stub it for every test; the two provider-selection tests
+    override it explicitly.
+    """
+    monkeypatch.setattr(judge_mod, "get_judge_provider", lambda: object())
+
+
 class TestJudgeAnswer:
     @pytest.mark.asyncio
     async def test_normalizes_verdict(self, monkeypatch) -> None:

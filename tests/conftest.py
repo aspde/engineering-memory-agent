@@ -9,7 +9,7 @@ from httpx import ASGITransport, AsyncClient
 # Set test environment before any imports
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://ema:ema123@localhost:5432/ema_test"
+    "TEST_DATABASE_URL", "postgresql://ema:ema123@127.0.0.1:5432/ema_test"
 )
 
 # Force offline before SentenceTransformer imports are triggered
