@@ -11,7 +11,7 @@
 # anonymous default account).
 
 {
-	email {$ACME_EMAIL}
+	email {$ACME_EMAIL:webmaster@localhost}
 }
 
 # The frontend is a SPA served by FastAPI itself (single container), so this

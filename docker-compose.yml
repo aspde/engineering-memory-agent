@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ema123}
       POSTGRES_DB: ema_dev
     ports:
-      - "5432:5432"
+      # 仅本机可连：EMA 的数据库不应对局域网暴露（后端容器走 compose
+      # 内部网络访问 postgres，不需要宿主机端口对外开放）。
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
@@ -36,6 +38,10 @@ services:
       # resolve inside the container, so deployments must leave this unset or
       # point it at the ``postgres`` service.
       DATABASE_URL: ${DATABASE_URL:-postgresql://ema:ema123@postgres:5432/ema_dev}
+      # .env 里的 REPO_ALLOW_ROOT 是宿主机 Windows 路径，容器内不存在，
+      # validate_config 的 fail-fast 检查会拒绝启动。容器不挂载仓库目录，
+      # ingest_git_repo 本就用不了，置空让它 fail-closed（拒绝所有 ingest）。
+      REPO_ALLOW_ROOT: ""
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     ports:
@@ -131,7 +137,11 @@ services:
       # Only the proxy-specific settings are injected — the full .env
       # (API keys etc.) must not leak into the edge container.
       CADDY_SITE_ADDRESS: ${CADDY_SITE_ADDRESS:-http://localhost:8080}
-      ACME_EMAIL: ${ACME_EMAIL:-}
+      # Caddy 的 {$ACME_EMAIL:default} 占位符在变量"已设置但为空"时会展开成
+      # 空串并忽略默认值，导致 Caddyfile 里 email 指令缺参数。因此这里注入
+      # 非空默认值 webmaster@localhost（本地测试不触发 ACME，不会用到它）；
+      # 在 .env 设 ACME_EMAIL 时用真实邮箱。
+      ACME_EMAIL: ${ACME_EMAIL:-webmaster@localhost}
     volumes:
       - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

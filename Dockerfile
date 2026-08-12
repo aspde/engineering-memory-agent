@@ -56,8 +56,14 @@ COPY requirements.txt ./
 # snapshots, so the split must stay separate.
 RUN pip install --no-cache-dir --timeout 120 --retries 5 \
     --no-deps "torch==2.13.0+cpu" \
-    --index-url https://download.pytorch.org/whl/cpu \
-    && pip install --no-cache-dir --timeout 120 --retries 5 \
+    --index-url https://download.pytorch.org/whl/cpu
+
+# requirements 走 pip 镜像源（默认清华镜像，与本机 pip 全局配置一致；
+# 直连 files.pythonhosted.org 在此网络下不稳定，曾导致构建读超时）。
+# 需要时可用 --build-arg PIP_INDEX_URL=https://pypi.org/simple 覆盖。
+ARG PIP_INDEX_URL="https://pypi.tuna.tsinghua.edu.cn/simple"
+RUN pip install --no-cache-dir --timeout 120 --retries 5 \
+    --index-url ${PIP_INDEX_URL} \
     -r requirements.txt
 
 # psycopg's pure-Python implementation loads libpq at runtime; the
@@ -72,6 +78,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
 # /home/ema/.cache/huggingface by docker-compose (runtime HOME is
 # /home/ema, uid 10001).  See the header comment and docs/deployment.md.
 
+COPY alembic.ini ./
+COPY migrations/ migrations/
 COPY backend/ backend/
 # frontend/public assets (favicon) are copied verbatim into dist by Vite.
 COPY --from=frontend-build /app/frontend/dist frontend/dist
