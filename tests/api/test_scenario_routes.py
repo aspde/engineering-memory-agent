@@ -43,11 +43,11 @@ def _reset_scenario_slots():
     """
     import backend.service.scenarios as scenarios_mod
 
-    while scenarios_mod._scenario_active > 0:
-        scenarios_mod._release_scenario_slot()
+    while scenarios_mod._scenario_slots.active > 0:
+        scenarios_mod._scenario_slots.release()
     yield
-    while scenarios_mod._scenario_active > 0:
-        scenarios_mod._release_scenario_slot()
+    while scenarios_mod._scenario_slots.active > 0:
+        scenarios_mod._scenario_slots.release()
 
 
 class TestListScenarios:

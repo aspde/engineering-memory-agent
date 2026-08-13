@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import contextvars
 import logging
-import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from backend.shared.config import config
+from backend.shared.slots import SlotLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -100,29 +100,20 @@ async def invoke_scenario_agent(
 # Each scenario run invokes the full agent (recursion_limit=50) for its
 # whole compose chain — up to SCENARIO_TIMEOUT_SECONDS — so an unbounded
 # number of concurrent scenarios would together saturate the provider rate
-# limit and can only be stopped by a restart.  Backed by a plain counter
-# (not an ``asyncio.Semaphore``) so it stays event-loop-agnostic like the
-# interactive-agent cap in ``agent_service`` — safe across pytest's
-# function-scoped event loops.
-_scenario_active = 0
-_scenario_slots_lock = threading.Lock()
+# limit and can only be stopped by a restart.  Same plain-counter approach
+# as the interactive-agent cap in ``agent_service`` — event-loop-agnostic,
+# safe across pytest's function-scoped event loops.
+_scenario_slots = SlotLimiter(lambda: config.max_scenario_concurrency)
 
 
 def _try_acquire_scenario_slot() -> bool:
     """Reserve one in-flight scenario run; False when the cap is hit."""
-    global _scenario_active
-    with _scenario_slots_lock:
-        if _scenario_active >= config.max_scenario_concurrency:
-            return False
-        _scenario_active += 1
-        return True
+    return _scenario_slots.try_acquire()
 
 
 def _release_scenario_slot() -> None:
     """Release a scenario slot acquired by :func:`_try_acquire_scenario_slot`."""
-    global _scenario_active
-    with _scenario_slots_lock:
-        _scenario_active = max(_scenario_active - 1, 0)
+    _scenario_slots.release()
 
 
 # ── Typed scenario descriptor ──────────────────────────────────────────
