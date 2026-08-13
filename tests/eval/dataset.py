@@ -56,7 +56,7 @@ class SeedMemory:
     relations: list[dict]
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "SeedMemory":
+    def from_dict(cls, d: dict[str, Any]) -> SeedMemory:
         return cls(
             id=str(d["id"]),
             category=str(d.get("category", "")),
@@ -163,6 +163,26 @@ def validate_dataset(
                     f"{it.id}: fingerprint '{fp}' is owned by {owners} "
                     f"but seed_ids={it.seed_ids}"
                 )
+
+    # Check 5: fingerprint discoverable via the memory retriever.  The memory
+    # path's match_field is ``summary`` (see make_memory_retriever), so a
+    # fingerprint present only in ``content`` is satisfiable by the
+    # chunk/vector/hybrid paths but can NEVER match query_memories — the
+    # production default read path.  A query whose only fingerprints are
+    # content-only is unanswerable on the memory path and its recall@5
+    # bottoms out regardless of retriever quality.
+    for it in items:
+        for sid in it.seed_ids:
+            s = seed_by_id.get(sid)
+            if s is None:
+                continue
+            for fp in it.relevant_fingerprints:
+                if fp not in s.summary:
+                    warnings.append(
+                        f"{it.id}: fingerprint '{fp}' is not in target seed "
+                        f"{sid}'s summary — the memory retriever "
+                        f"(match_field='summary') can never match it"
+                    )
 
     return warnings
 

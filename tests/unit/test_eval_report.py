@@ -16,7 +16,7 @@ from tests.eval.report import (
     write_json,
     write_markdown,
 )
-from tests.eval.runner import EvalConfig, EvalResult, METRIC_KEYS
+from tests.eval.runner import METRIC_KEYS, EvalConfig, EvalResult
 
 
 def _make_result(name: str, recall: float = 0.7, mrr: float = 0.6) -> EvalResult:

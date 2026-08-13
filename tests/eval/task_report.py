@@ -15,15 +15,17 @@ CI-log view.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from tests.eval.core import (
     EvalResult,
     category_table,
-    fmt as _fmt,
     overall_table,
     to_json,
     write_text,
+)
+from tests.eval.core import (
+    fmt as _fmt,
 )
 
 SUITE_TITLE = "任务级端到端"
@@ -77,7 +79,7 @@ def _per_task_detail(result: EvalResult) -> str:
 
 def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for the task suite."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_errors = sum(len(r.errors) for r in results)
     total_judge_errors = sum(len(r.judge_errors) for r in results)
     total_items = sum(r.n_items for r in results)

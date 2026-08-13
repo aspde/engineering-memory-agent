@@ -47,7 +47,7 @@ import json
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -221,7 +221,7 @@ async def run_calibration(
         judge_errors=judge_errors,
         judge_provider=provider,
         judge_model=model,
-        generated_at=datetime.now(timezone.utc).isoformat(),
+        generated_at=datetime.now(UTC).isoformat(),
     )
 
 

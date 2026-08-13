@@ -171,7 +171,6 @@ class TestRun:
 
     @pytest.mark.asyncio
     async def test_threshold_gate_fails_with_exit_2(self, monkeypatch) -> None:
-        from tests.eval.llm_runner import run_tool_selection
 
         async def _low(**kw):
             return _fake_result("tool_selection", {"tool_accuracy": 0.3})

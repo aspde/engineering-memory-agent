@@ -92,6 +92,7 @@ async def _seed_memories(seeds: Sequence[SeedMemory]) -> int:
     import json
 
     from sqlalchemy import text
+
     from backend.db import get_session_factory
     from backend.service.embedding_service import get_embedding_provider
 

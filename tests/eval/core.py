@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # The judge-owned metric keys shared by the answer / e2e / task suites.  On a
@@ -164,7 +164,7 @@ def result_to_json_dict(result: EvalResult) -> dict[str, Any]:
 def to_json(results: Sequence[EvalResult]) -> str:
     """Serialize a list of results to the judge-based report JSON string."""
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "results": [result_to_json_dict(r) for r in results],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -230,7 +230,7 @@ def overall_table(
         sep = "|---" * (len(cols) + 1) + "|"
         lines = [header, sep]
         cells = [fmt(r.overall.get(k, 0.0)) for k in cols]
-        lines.append(f"| **overall** | " + " | ".join(cells) + " |")
+        lines.append("| **overall** | " + " | ".join(cells) + " |")
         sections.append("\n".join(lines))
         sections.append("")
     return "\n".join(sections)

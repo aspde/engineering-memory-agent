@@ -152,7 +152,6 @@ class TestValidateTaskDataset:
         assert validate_task_dataset() == []
 
     def test_duplicate_id_raises(self) -> None:
-        from tests.eval.task_ground_truth import TaskItem
 
         items = list(TASK_ITEMS) + [TASK_ITEMS[0]]
         with pytest.raises(ValueError, match="duplicate task item id"):
@@ -187,7 +186,6 @@ class TestValidateTaskDataset:
 def _item(**overrides) -> object:
     from dataclasses import replace
 
-    from tests.eval.task_ground_truth import TaskItem
 
     base = TASK_ITEMS[0]
     return replace(base, **overrides)

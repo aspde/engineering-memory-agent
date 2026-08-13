@@ -12,7 +12,6 @@ deterministic. The contract being tested:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -27,7 +26,6 @@ from tests.eval.runner import (
     result_to_dict,
     run_eval,
 )
-
 
 # ── Fixtures ──────────────────────────────────────────────────
 

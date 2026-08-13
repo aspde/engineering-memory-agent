@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from tests.eval.core import fmt as _fmt, write_text
+from tests.eval.core import fmt as _fmt
+from tests.eval.core import write_text
 from tests.eval.ground_truth import DIFFICULTIES
 from tests.eval.runner import METRIC_KEYS, EvalResult, result_to_dict
 
@@ -31,7 +32,7 @@ def _delta(a: float, b: float) -> str:
 def to_json(results: Sequence[EvalResult]) -> str:
     """Serialize a list of EvalResults to a pretty JSON string."""
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "results": [result_to_dict(r) for r in results],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -154,7 +155,7 @@ def _per_query_detail(results: Sequence[EvalResult]) -> str:
 
 def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for one or more EvalResults."""
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_errors = sum(len(r.errors) for r in results)
     # compare_eval runs every config over the same labeled set, so every result
     # shares n_queries. Take the first; fall back to 0 for an empty result list.
@@ -173,7 +174,7 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
         semantic_line = "n/a"
 
     sections: list[str] = [
-        f"# EMA Retrieval Evaluation Report",
+        "# EMA Retrieval Evaluation Report",
         "",
         f"- Generated: {now}",
         f"- Queries: {total_queries}",

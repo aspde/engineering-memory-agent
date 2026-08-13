@@ -32,10 +32,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from tests.eval.core import load_jsonl_items
-
 
 # ── Per-suite categories ───────────────────────────────────────────
 

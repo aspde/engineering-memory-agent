@@ -3,7 +3,7 @@
 {"id": "q003", "query": "嵌入模型选型理由是什么", "seed_ids": ["seed-003"], "relevant_fingerprints": ["BGE-M3 嵌入模型"], "category": "技术决策", "difficulty": "hard", "notes": "无词重合，纯概念查询，最考验向量质量"}
 {"id": "q004", "query": "Windows 环境下 LangGraph 持久化怎么降级", "seed_ids": ["seed-004"], "relevant_fingerprints": ["InMemorySaver 降级"], "category": "技术决策", "difficulty": "medium"}
 {"id": "q005", "query": "rerank 为什么默认走本地不走 LLM", "seed_ids": ["seed-005"], "relevant_fingerprints": ["cross-encoder 本地 rerank"], "category": "技术决策", "difficulty": "medium"}
-{"id": "q006", "query": "记忆去重的相似度阈值是怎么定的", "seed_ids": ["seed-006"], "relevant_fingerprints": ["0.92/0.75/0.60"], "category": "技术决策", "difficulty": "hard", "notes": "查询是抽象问法，目标是带具体数字的决策记忆"}
+{"id": "q006", "query": "记忆去重的相似度阈值是怎么定的", "seed_ids": ["seed-006"], "relevant_fingerprints": ["四级相似度阈值分级"], "category": "技术决策", "difficulty": "hard", "notes": "查询是抽象问法，目标是带具体数字的决策记忆"}
 {"id": "q007", "query": "koa-connect 之前出过什么问题", "seed_ids": ["seed-007"], "relevant_fingerprints": ["ctx 泄漏"], "category": "故障复盘", "difficulty": "easy"}
 {"id": "q008", "query": "PostgresSaver 在 Windows 上为什么不能用", "seed_ids": ["seed-008"], "relevant_fingerprints": ["PostgresSaver Windows 兼容性"], "category": "故障复盘", "difficulty": "easy"}
 {"id": "q009", "query": "BGE-M3 性能瓶颈在哪", "seed_ids": ["seed-009"], "relevant_fingerprints": ["BGE-M3 CPU 推理"], "category": "故障复盘", "difficulty": "medium"}
@@ -12,22 +12,22 @@
 {"id": "q012", "query": "Agent 会不会陷入死循环", "seed_ids": ["seed-012"], "relevant_fingerprints": ["强制进入 finalize 节点"], "category": "故障复盘", "difficulty": "hard", "notes": "概念问法，目标是带 max_steps 的实现记忆"}
 {"id": "q013", "query": "Agent 的状态图有几个节点", "seed_ids": ["seed-013"], "relevant_fingerprints": ["5-node StateGraph"], "category": "架构设计", "difficulty": "medium"}
 {"id": "q014", "query": "怎么同时支持 OpenAI 和 Anthropic 两家 API", "seed_ids": ["seed-014"], "relevant_fingerprints": ["LLMProvider 抽象层"], "category": "架构设计", "difficulty": "medium"}
-{"id": "q015", "query": "人工介入 HITL 是怎么实现的", "seed_ids": ["seed-015"], "relevant_fingerprints": ["第一个 HITL 在 resolve_conflict 节点"], "category": "架构设计", "difficulty": "medium"}
-{"id": "q016", "query": "遗忘曲线衰减怎么整合进检索", "seed_ids": ["seed-016"], "relevant_fingerprints": ["衰减加权整合"], "category": "架构设计", "difficulty": "hard"}
+{"id": "q015", "query": "人工介入 HITL 是怎么实现的", "seed_ids": ["seed-015"], "relevant_fingerprints": ["approval_required_tools"], "category": "架构设计", "difficulty": "medium"}
+{"id": "q016", "query": "检索排序会按记忆用得多不多来加权吗", "seed_ids": ["seed-016"], "relevant_fingerprints": ["演进到纯相似度"], "category": "架构设计", "difficulty": "hard", "notes": "概念问法，目标是衰减从整合到移除的机制演变"}
 {"id": "q017", "query": "记忆提取为什么要分三个阶段", "seed_ids": ["seed-017"], "relevant_fingerprints": ["asyncio.gather 并行调 LLM"], "category": "架构设计", "difficulty": "hard"}
-{"id": "q018", "query": "同名实体怎么归一化", "seed_ids": ["seed-018"], "relevant_fingerprints": ["实体归一化双层判断"], "category": "架构设计", "difficulty": "medium"}
+{"id": "q018", "query": "同名实体怎么归一化", "seed_ids": ["seed-018"], "relevant_fingerprints": ["双层判断"], "category": "架构设计", "difficulty": "medium"}
 {"id": "q019", "query": "去重逻辑的四个分支怎么实现", "seed_ids": ["seed-019"], "relevant_fingerprints": ["四分支去重"], "category": "代码实现", "difficulty": "medium"}
 {"id": "q020", "query": "_deferred 字段是干什么的", "seed_ids": ["seed-020"], "relevant_fingerprints": ["state['_deferred']"], "category": "代码实现", "difficulty": "easy"}
 {"id": "q021", "query": "关系三元组怎么避免重复写入", "seed_ids": ["seed-021"], "relevant_fingerprints": ["关系三元组去重"], "category": "代码实现", "difficulty": "medium"}
 {"id": "q022", "query": "token 计数在并发下怎么保证正确", "seed_ids": ["seed-022"], "relevant_fingerprints": ["token 计数线程安全"], "category": "代码实现", "difficulty": "hard"}
 {"id": "q023", "query": "retrieve 为什么要过采样 4 倍", "seed_ids": ["seed-023"], "relevant_fingerprints": ["top_k*4 过采样"], "category": "代码实现", "difficulty": "medium"}
-{"id": "q024", "query": "rerank 最低分阈值 0.15 是什么", "seed_ids": ["seed-024"], "relevant_fingerprints": ["_RERANK_FLOOR=0.15 阈值"], "category": "代码实现", "difficulty": "easy"}
+{"id": "q024", "query": "rerank 最低分阈值 0.15 是什么", "seed_ids": ["seed-024"], "relevant_fingerprints": ["最低分阈值"], "category": "代码实现", "difficulty": "easy"}
 {"id": "q025", "query": "EMA 这个项目是怎么演进的", "seed_ids": ["seed-025"], "relevant_fingerprints": ["从 RAG demo 演进"], "category": "历史背景", "difficulty": "hard"}
-{"id": "q026", "query": "项目分了几个阶段", "seed_ids": ["seed-026"], "relevant_fingerprints": ["EMA Phase 1-4 阶段划分"], "category": "历史背景", "difficulty": "easy"}
+{"id": "q026", "query": "项目分了几个阶段", "seed_ids": ["seed-026"], "relevant_fingerprints": ["Phase 4 记忆质量"], "category": "历史背景", "difficulty": "easy"}
 {"id": "q027", "query": "为什么用 Ebbinghaus 遗忘曲线做衰减", "seed_ids": ["seed-027"], "relevant_fingerprints": ["Ebbinghaus 衰减"], "category": "历史背景", "difficulty": "medium"}
 {"id": "q028", "query": "为什么要分 chunks 和 memories 两张表", "seed_ids": ["seed-028"], "relevant_fingerprints": ["chunks 和 memories 两表"], "category": "历史背景", "difficulty": "medium"}
 {"id": "q029", "query": "连接器支持哪些平台", "seed_ids": ["seed-029"], "relevant_fingerprints": ["扩展到 Feishu"], "category": "历史背景", "difficulty": "hard", "notes": "查询未提具体平台，考验能否召回扩展历史"}
-{"id": "q030", "query": "巡检为什么放在主进程里", "seed_ids": ["seed-030"], "relevant_fingerprints": ["巡检内嵌主进程"], "category": "历史背景", "difficulty": "medium"}
+{"id": "q030", "query": "巡检为什么放在主进程里", "seed_ids": ["seed-030"], "relevant_fingerprints": ["巡检内嵌主进程"], "category": "架构设计", "difficulty": "medium"}
 {"id": "q031", "query": "衰减公式的系数后来为什么调大", "seed_ids": ["seed-031"], "relevant_fingerprints": ["0.10 保留 floor"], "category": "技术决策", "difficulty": "hard", "notes": "问公式演进，目标是带校准结果的决策记忆"}
 {"id": "q032", "query": "去重阈值现在的值是多少", "seed_ids": ["seed-032"], "relevant_fingerprints": ["0.85 合并"], "category": "技术决策", "difficulty": "easy", "notes": "直接问当前阈值，应命中标定后的决策"}
 {"id": "q033", "query": "提取的 prompt 做了什么优化", "seed_ids": ["seed-033"], "relevant_fingerprints": ["relation_f1 从 0.356"], "category": "技术决策", "difficulty": "medium", "notes": "问提取优化，few-shot 是关键词"}
@@ -56,7 +56,7 @@
 {"id": "q056", "query": "重复查询为什么不重新算向量", "seed_ids": ["seed-062"], "relevant_fingerprints": ["SSE 重连/复问"], "category": "代码实现", "difficulty": "easy", "notes": "问 embed_query 缓存"}
 {"id": "q057", "query": "瞬时失败的调用还能看到吗", "seed_ids": ["seed-063"], "relevant_fingerprints": ["attempts 列"], "category": "代码实现", "difficulty": "hard", "notes": "概念问法，目标是 attempts 会计修复"}
 {"id": "q058", "query": "工具签名里删掉了什么参数", "seed_ids": ["seed-064"], "relevant_fingerprints": ["去掉 use_llm_rerank"], "category": "代码实现", "difficulty": "easy", "notes": "直接问签名改动"}
-{"id": "q059", "query": "检索排序为什么不加衰减加权", "seed_ids": ["seed-065"], "relevant_fingerprints": ["逼近 no-op"], "category": "代码实现", "difficulty": "medium", "notes": "问衰减移除决策（decay A/B 证据）"}
+{"id": "q059", "query": "检索排序为什么不加衰减加权", "seed_ids": ["seed-065"], "relevant_fingerprints": ["recall 统计仅作元数据"], "category": "代码实现", "difficulty": "medium", "notes": "问衰减移除决策（decay A/B 证据）"}
 {"id": "q060", "query": "门禁判红的标准差怎么算的", "seed_ids": ["seed-066"], "relevant_fingerprints": ["硬编码 t 值"], "category": "代码实现", "difficulty": "hard", "notes": "问 multi_run_gate 统计实现"}
 {"id": "q061", "query": "提取的类型约束在哪里生效", "seed_ids": ["seed-067"], "relevant_fingerprints": ["非法类型从机制上产生不出来"], "category": "代码实现", "difficulty": "medium", "notes": "问函数调用工具的 enum"}
 {"id": "q062", "query": "备份坏了怎么验证能恢复", "seed_ids": ["seed-068"], "relevant_fingerprints": ["pg_restore 恢复"], "category": "代码实现", "difficulty": "easy", "notes": "问恢复流程"}
@@ -68,3 +68,17 @@
 {"id": "q068", "query": "项目现在怎么一键跑起来", "seed_ids": ["seed-076"], "relevant_fingerprints": ["后端+前端单镜像"], "category": "历史背景", "difficulty": "easy", "notes": "问部署演进"}
 {"id": "q069", "query": "阈值的数字来源变过吗", "seed_ids": ["seed-077"], "relevant_fingerprints": ["从拍板到标定"], "category": "历史背景", "difficulty": "medium", "notes": "问阈值认知演进"}
 {"id": "q070", "query": "对话变快经历了哪几步", "seed_ids": ["seed-078"], "relevant_fingerprints": ["从测量到锁死"], "category": "历史背景", "difficulty": "hard", "notes": "概念问法，目标是 P95 优化三步走"}
+{"id": "q071", "query": "搜索突然变慢了，我该先怀疑哪一环，会不会是本地那个嵌入模型在拖后腿", "seed_ids": ["seed-009"], "relevant_fingerprints": ["CPU 推理是检索 P95"], "category": "故障复盘", "difficulty": "hard", "notes": "模糊抱怨式提问，目标是 BGE-M3 CPU 瓶颈复盘"}
+{"id": "q072", "query": "索引明明建了，召回还是这么差，是不是数据太少的时候索引反而帮倒忙", "seed_ids": ["seed-010"], "relevant_fingerprints": ["聚类质心"], "category": "故障复盘", "difficulty": "hard", "notes": "不提 ivfflat，考验能否召回具体索引参数复盘"}
+{"id": "q073", "query": "agent 搜不到东西的时候会不会一直用同一招重试，把我 token 烧光", "seed_ids": ["seed-012"], "relevant_fingerprints": ["search_memory → 无结果"], "category": "故障复盘", "difficulty": "medium", "notes": "口语化担心死循环，目标是 max_steps 复盘"}
+{"id": "q074", "query": "模型偶尔把结果包在代码块里吐出来，这种要怎么处理", "seed_ids": ["seed-011"], "relevant_fingerprints": ["代码块包裹"], "category": "故障复盘", "difficulty": "medium", "notes": "问容错，目标是 JSON 解析失败复盘"}
+{"id": "q075", "query": "提取一条记忆要开好几个请求，不能一把梭全干完吗", "seed_ids": ["seed-017"], "relevant_fingerprints": ["串行 3s 降到并行 1.2s"], "category": "架构设计", "difficulty": "medium", "notes": "用户嫌慢，目标是三阶段并行提取设计"}
+{"id": "q077", "query": "并发请求一多，token 统计会不会就算错了", "seed_ids": ["seed-022"], "relevant_fingerprints": ["计数丢失"], "category": "代码实现", "difficulty": "hard", "notes": "抽象问并发正确性，目标是线程安全计数"}
+{"id": "q078", "query": "巡检非得跟着主服务一起跑吗，不怕把接口拖垮吗", "seed_ids": ["seed-030"], "relevant_fingerprints": ["单机部署规模下可接受"], "category": "架构设计", "difficulty": "medium", "notes": "问取舍，目标是内嵌主进程决策"}
+{"id": "q079", "query": "聊天有时候要卡快一分钟，是不是有什么费时的东西在后台偷偷跑", "seed_ids": ["seed-034"], "relevant_fingerprints": ["40s 是每轮"], "category": "技术决策", "difficulty": "hard", "notes": "问延迟现象，目标是 LLM rerank 锁死决策"}
+{"id": "q080", "query": "用函数调用抽实体，怎么抽出来一堆没用的", "seed_ids": ["seed-045"], "relevant_fingerprints": ["只抽显著实体"], "category": "故障复盘", "difficulty": "medium", "notes": "问过度抽取，目标是 description 收紧复盘"}
+{"id": "q081", "query": "关键词搜索数据一多就慢得离谱，到底是哪一步卡住了", "seed_ids": ["seed-047"], "relevant_fingerprints": ["全表扫描"], "category": "故障复盘", "difficulty": "hard", "notes": "问稀疏检索瓶颈，目标是 DB 侧迁移复盘"}
+{"id": "q082", "query": "主模型要是挂了，会不会直接甩给用户一个报错", "seed_ids": ["seed-056"], "relevant_fingerprints": ["重试一次 fallback"], "category": "架构设计", "difficulty": "medium", "notes": "问兜底，目标是 failover 设计"}
+{"id": "q083", "query": "召回次数是一次查询就要发一大堆更新请求吗，这也太浪费了", "seed_ids": ["seed-061"], "relevant_fingerprints": ["N+1 写法"], "category": "代码实现", "difficulty": "medium", "notes": "问实现效率，目标是 record_recalls 批量更新"}
+{"id": "q084", "query": "那几个去重阈值是拍脑袋定的，还是真跑数据跑出来的", "seed_ids": ["seed-077"], "relevant_fingerprints": ["拍板值"], "category": "历史背景", "difficulty": "medium", "notes": "问数字来源，目标是阈值标定演进"}
+{"id": "q085", "query": "加了重排之后，反而把原来排在前面的正确答案给弄丢了，这正常吗", "seed_ids": ["seed-041"], "relevant_fingerprints": ["q015 的正确答案"], "category": "故障复盘", "difficulty": "hard", "notes": "问反常现象，目标是 cross-encoder 小语料有害复盘"}

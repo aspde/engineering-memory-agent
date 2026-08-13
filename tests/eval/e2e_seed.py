@@ -32,7 +32,6 @@ import hashlib
 import json
 import sys
 from collections.abc import Sequence
-from typing import Any
 
 from tests.eval.llm_ground_truth import E2EItem, load_e2e_items
 

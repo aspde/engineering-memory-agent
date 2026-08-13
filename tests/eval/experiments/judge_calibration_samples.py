@@ -36,10 +36,8 @@ human labels stay reviewable.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from tests.eval.llm_ground_truth import ANSWER_ITEMS, AnswerItem
-
 
 # ── Sample model ──────────────────────────────────────────────────
 

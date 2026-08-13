@@ -21,8 +21,6 @@ citation columns mean the same thing as in the answer and e2e suites.
 
 from __future__ import annotations
 
-from typing import Any
-
 from tests.eval.llm_metrics import answer_deterministic_metrics
 
 # The two apology strings the agent's failure path streams (backend/agent/nodes.py).

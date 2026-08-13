@@ -13,7 +13,6 @@ of indices whose ``match_field`` matched a fingerprint. This lets the pure
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections.abc import Sequence

@@ -28,9 +28,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import sys
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -209,6 +208,7 @@ async def _llm_generate(n_per_topic: int = 30, concurrency: int = 8) -> list[str
 
 async def _count_chunks(document_id: str) -> int:
     from sqlalchemy import text
+
     from backend.db import get_session_factory
 
     factory = get_session_factory()
@@ -256,6 +256,7 @@ async def _insert_distractors(entries: list[str], concurrency: int = 6) -> int:
 
 async def _cleanup_distractors() -> int:
     from sqlalchemy import text
+
     from backend.db import get_session_factory
 
     factory = get_session_factory()
@@ -316,7 +317,9 @@ def _print_table(title: str, baseline: dict, scaled: dict, rerank: dict | None =
         delta = s - b
         r = rerank.get(key, 0.0) if rerank else None
         if key == "latency_ms":
-            b = int(b); s = int(s); delta = int(s - b)
+            b = int(b)
+            s = int(s)
+            delta = int(s - b)
             r = int(r) if rerank else None
         row = f"{label:<16}{b:>10}{s:>10}{delta:>+9}"
         if rerank:

@@ -29,7 +29,6 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-from typing import Any
 
 from tests.eval.llm_ground_truth import load_extraction_items
 from tests.eval.llm_runner import run_extraction

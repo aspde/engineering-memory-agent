@@ -139,7 +139,6 @@ def make_task_runner(
     """
     from backend.agent.nodes import CHAT_APPROVAL_TOOLS
     from backend.agent.tools import ALL_TOOLS
-
     from backend.shared.config import config
 
     # A task run must not schedule background auto-memory capture: each

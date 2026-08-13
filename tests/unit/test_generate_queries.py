@@ -11,6 +11,7 @@ import json
 
 import pytest
 
+from tests.eval.dataset import SeedMemory
 from tests.eval.experiments.generate_queries import (
     _build_prompt,
     _merge_candidates,
@@ -18,7 +19,6 @@ from tests.eval.experiments.generate_queries import (
     generate_candidates,
     parse_generation,
 )
-from tests.eval.dataset import SeedMemory
 
 
 def _seed(seed_id: str, category: str = "技术决策", summary: str = "默认摘要内容") -> SeedMemory:
@@ -194,7 +194,7 @@ class TestGenerateCandidates:
         assert n == 8
         assert warnings == []
 
-        rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
         assert len(rows) == 8
         assert {r["source_seed_id"] for r in rows} == {"seed-001", "seed-002"}
         assert any(r["kind"] == "hard_negative" for r in rows)
@@ -229,7 +229,7 @@ class TestGenerateCandidates:
         assert len(out.read_text(encoding="utf-8").splitlines()) == 8
 
         await generate_candidates(seeds, out_path=out, force=True, generator=_fake_generator())
-        rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
         # Same 8 candidates, no duplicates — the old rows were replaced.
         assert len(rows) == 8
         assert len({r["id"] for r in rows}) == 8
@@ -272,7 +272,7 @@ class TestGenerateCandidates:
         n, warnings = await generate_candidates([seed_a, seed_b], out_path=out, generator=_gen)
         assert n == 4  # only seed-002 succeeded (its peer seed-001 is a valid target)
         assert any("seed-001" in w and "failed" in w for w in warnings)
-        rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
         assert {r["source_seed_id"] for r in rows} == {"seed-002"}
 
 
@@ -293,7 +293,7 @@ class TestMergeCandidates:
                 {"source_seed_id": "seed-003", "id": "qg-seed-003-easy", "query": "fresh"},
             ],
         )
-        rows = [json.loads(l) for l in out.read_text(encoding="utf-8").splitlines() if l.strip()]
+        rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
         assert total == len(rows) == 3
         by_id = {r["id"]: r["query"] for r in rows}
         assert by_id["qg-seed-001-easy"] == "new"  # replaced

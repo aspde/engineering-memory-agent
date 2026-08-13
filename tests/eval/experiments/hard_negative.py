@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -87,7 +87,7 @@ def load_hard_negatives() -> list[dict[str, Any]]:
             try:
                 item = json.loads(line)
             except json.JSONDecodeError as e:
-                raise ValueError(f"{CANDIDATES_FILE}:{lineno}: invalid JSON: {e}")
+                raise ValueError(f"{CANDIDATES_FILE}:{lineno}: invalid JSON: {e}") from e
             if item.get("kind") == "hard_negative":
                 items.append(item)
     return items
@@ -257,7 +257,7 @@ def build_interpretation(
     lines.append("")
     if n_worse == 0:
         lines.append(
-            f"**worse_than_random = 0**：没有任何 query 出现“陷阱排在目标之前或目标落榜而陷阱上榜”。"
+            "**worse_than_random = 0**：没有任何 query 出现“陷阱排在目标之前或目标落榜而陷阱上榜”。"
             "这是最干净的结果——陷阱可以混进 top-5（入侵率高），但从未真正压过目标。"
         )
     else:
@@ -320,21 +320,13 @@ def build_interpretation(
         "- 先说结论：主评估集 Recall@5=1.0 是**自问自答的假满分**，只能证明“找得到”，不能证明“判别力”。"
     )
     lines.append(
-        "- 然后给出本集数字：27 条 hard negative 上，目标召回 {:.1f}%、陷阱入侵 {:.1f}%、综合通过 {:.1f}%、"
-        "MRR {:.3f}（主评估同路径 {:.3f}）、worse_than_random {}/{}。".format(
-            t_recall * 100,
-            d_intrusion * 100,
-            h_pass * 100,
-            mrr,
-            MAIN_EVAL_MRR,
-            n_worse,
-            n,
-        )
+        f"- 然后给出本集数字：27 条 hard negative 上，目标召回 {t_recall * 100:.1f}%、陷阱入侵 {d_intrusion * 100:.1f}%、综合通过 {h_pass * 100:.1f}%、"
+        f"MRR {mrr:.3f}（主评估同路径 {MAIN_EVAL_MRR:.3f}）、worse_than_random {n_worse}/{n}。"
     )
     lines.append(
         "- 解读两点：(a) 高目标召回 + 高陷阱入侵的组合说明检索器“宽进”——它把相关和不相关的表层重合候选都捞进来，"
-        "靠的是 top-5 窗口兜底而不是精确判别；(b) worse_than_random={} 说明陷阱压过目标是个真实但局部的现象，"
-        "暴露的是纯向量检索在“问题意图 vs 词汇重合”上的盲区。".format(n_worse)
+        f"靠的是 top-5 窗口兜底而不是精确判别；(b) worse_than_random={n_worse} 说明陷阱压过目标是个真实但局部的现象，"
+        "暴露的是纯向量检索在“问题意图 vs 词汇重合”上的盲区。"
     )
     lines.append(
         "- 如果有下一步：这正是无监督 rerank / 检索后意图判别（query 重写、hybrid 融合、cross-encoder）应该"
@@ -348,7 +340,7 @@ def build_json_report(
     agg: dict[str, Any], items: list[dict[str, Any]], interpretation: str
 ) -> dict[str, Any]:
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "corpus": f"{agg['n']} hard_negative queries",
         "retrieval_path": RETRIEVAL_PATH,
         "aggregate": {
@@ -386,7 +378,7 @@ def build_markdown_report(
     lines: list[str] = []
     lines.append("# EMA 检索 Hard-Negative 判别力评估报告")
     lines.append("")
-    lines.append(f"- **生成时间**：{datetime.now(timezone.utc).isoformat()}")
+    lines.append(f"- **生成时间**：{datetime.now(UTC).isoformat()}")
     lines.append(
         f"- **语料**：{a['n']} 条 hard_negative query（来自 `query_candidates.jsonl`）"
     )

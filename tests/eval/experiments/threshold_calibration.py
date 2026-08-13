@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import math
 import random
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from tests.eval.dataset import load_seed_memories
@@ -53,18 +53,23 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-async def _paraphrase_summaries(summaries: list[str]) -> list[str]:
+async def _paraphrase_summaries(summaries: list[str]) -> list[str | None]:
     """LLM-paraphrase each summary into a same-meaning variant.
 
-    Simulates the same knowledge written down by a different source.  Fails
-    safe to the original (cosine 1.0) so a paraphrase error never breaks the
-    run — but a fully-failed paraphrase makes that pair trivially
-    "duplicate", which the report notes.
+    Returns ``None`` for a seed whose paraphrase failed — an LLM error, a
+    response too short to be a real paraphrase, or the model returning the
+    original verbatim.  The caller drops such pairs and reports the drop
+    count.
+
+    A failed paraphrase must NOT fall back to the original: the original vs
+    its own embedding scores cosine 1.0, a fake "perfect duplicate" that
+    inflates the merge band and skews the very distribution this calibration
+    is measuring.
     """
     from backend.service.llm_service import get_llm_provider
 
     llm = get_llm_provider()
-    out: list[str] = []
+    out: list[str | None] = []
     for s in summaries:
         try:
             resp = await llm.chat(
@@ -83,9 +88,9 @@ async def _paraphrase_summaries(summaries: list[str]) -> list[str]:
                 temperature=0.4,
             )
             text = str(resp).strip()
-            out.append(text if len(text) > 10 else s)
+            out.append(text if len(text) > 10 and text != s else None)
         except Exception:
-            out.append(s)
+            out.append(None)
     return out
 
 
@@ -112,6 +117,73 @@ def _band(value: float) -> str:
     return "new(<0.60)"
 
 
+_BAND_ORDER = ("merge(≥0.85)", "conflict(0.72-0.85)", "supplement(0.60-0.72)", "new(<0.60)")
+
+
+def _band_counts(vals: list[float]) -> list[int]:
+    """Per-band counts for *vals*, in ``_BAND_ORDER`` order."""
+    counts = {b: 0 for b in _BAND_ORDER}
+    for v in vals:
+        counts[_band(v)] += 1
+    return [counts[b] for b in _BAND_ORDER]
+
+
+def _build_conclusion(groups: dict[str, list[float]]) -> list[str]:
+    """Generate the conclusion section from this run's measured distributions.
+
+    Every line is derived from the actual numbers in *groups* — never
+    hard-coded — so a re-run with more (or different) data produces an
+    up-to-date conclusion instead of a stale snapshot.
+    """
+    names = list(groups)
+    dup = groups.get(names[0], []) if names else []
+    same = groups.get(names[1], []) if len(names) > 1 else []
+    cross = groups.get(names[2], []) if len(names) > 2 else []
+
+    lines: list[str] = []
+    if dup:
+        n_merge, n_conflict = _band_counts(dup)[:2]
+        lines.append(
+            f"- **merge 阈值合理性**：{n_merge}/{len(dup)}（{n_merge / len(dup):.0%}）的同义改写对"
+            f"落在 merge 带（≥0.85）"
+            + (
+                "，全部正确合并，对改写对分离良好。"
+                if n_conflict == 0
+                else f"，另有 {n_conflict}/{len(dup)} 落入 conflict 带（0.72-0.85）——会走冲突检测/补充"
+                "而非合并（内容不丢，但多一次裁决或补充处理）。"
+            )
+        )
+        dup_min = min(dup)
+        same_max = max(same) if same else 0.0
+        if same and dup_min < same_max:
+            lines.append(
+                f"- **分离边界**：同义改写对下限 {dup_min:.3f} 低于同类对上限 {same_max:.3f}，两类分布"
+                "在单个 merge 阈值上无法完全分离——conflict 带（0.72-0.85）承担中间裁决，靠 HITL 兜底"
+                "而非再调阈值。"
+            )
+        elif same:
+            lines.append(
+                f"- **分离边界**：同义改写对下限 {dup_min:.3f} 高于同类对上限 {same_max:.3f}，"
+                "两组在 merge 阈值处分离良好。"
+            )
+        if len(dup) < 20:
+            lines.append(
+                f"- **样本量**：改写对仅 {len(dup)} 条，结论是初步方向；需生产收集真实"
+                "「不同来源抽取同一记忆」的对后复标。"
+            )
+    else:
+        lines.append("- **merge 阈值**：本次无可用同义改写对（全部改写失败被剔除），阈值无法评估，需重跑。")
+
+    if cross:
+        cross_new = _band_counts(cross)[3]
+        if cross_new / len(cross) >= 0.9:
+            lines.append(
+                f"- **new 阈值**：{cross_new}/{len(cross)}（{cross_new / len(cross):.0%}）异类对落入 "
+                "new 带（<0.60），<0.60 判定为新记忆基本可靠。"
+            )
+    return lines
+
+
 async def _main(report_md: str | None) -> int:
     seeds = load_seed_memories()
     by_cat: dict[str, list] = {}
@@ -122,16 +194,26 @@ async def _main(report_md: str | None) -> int:
 
     provider = get_embedding_provider()
 
-    # 1. Duplicate pairs: LLM paraphrases of a sample of seeds.
+    # 1. Duplicate pairs: LLM paraphrases of a sample of seeds.  Paraphrases
+    # that failed (LLM error / degenerate verbatim return) are dropped before
+    # embedding — a failed pair would score cosine 1.0 and fake-pollute the
+    # merge band (see _paraphrase_summaries).
     sample = seeds[:_N_PARAPHRASES]
     paraphrases = await _paraphrase_summaries([s.summary for s in sample])
-    dup_vecs = await provider.embed(
-        [s.summary for s in sample] + paraphrases
-    )
-    dup_pairs = [
-        _cosine(dup_vecs[i], dup_vecs[_N_PARAPHRASES + i])
-        for i in range(_N_PARAPHRASES)
+    pairs = [
+        (orig, para) for orig, para in zip(sample, paraphrases)
+        if para is not None
     ]
+    n_failed = len(sample) - len(pairs)
+    dup_pairs: list[float] = []
+    if pairs:
+        dup_vecs = await provider.embed(
+            [s.summary for s, _ in pairs] + [para for _, para in pairs]
+        )
+        dup_pairs = [
+            _cosine(dup_vecs[i], dup_vecs[len(pairs) + i])
+            for i in range(len(pairs))
+        ]
 
     # 2. Same-category pairs: all C(6,2)=15 per category.
     same_pairs: list[float] = []
@@ -186,14 +268,15 @@ async def _main(report_md: str | None) -> int:
         lines = [
             "# 四级相似度阈值标定",
             "",
-            "> 2026-08-11 · 基于 seed 语料 + LLM 同义改写对，BGE-M3 cosine 相似度。"
-            "这是**初步标定**（30 条 seed），非生产真实去重对；生产上需收集真实对确认。",
+            f"> {datetime.now():%Y-%m-%d} · 基于 seed 语料 + LLM 同义改写对，BGE-M3 cosine 相似度。"
+            f"这是**初步标定**（{len(seeds)} 条 seed），非生产真实去重对；生产上需收集真实对确认。",
             "",
             "## 方法",
             "",
             "三类摘要对（`tests/eval/experiments/threshold_calibration.py`）：",
             "",
-            f"- **duplicate**：{_N_PARAPHRASES} 条 seed 的 LLM 同义改写（应 merge）",
+            f"- **duplicate**：{len(pairs)} 条可用 seed 的 LLM 同义改写（应 merge；"
+            f"{n_failed} 条改写失败已剔除）",
             "- **same-category**：同类 15 对/类（应 独立或补充，不 merge）",
             "- **cross-category**：40 对随机异类（应 new）",
             "",
@@ -215,10 +298,9 @@ async def _main(report_md: str | None) -> int:
             "| 组 | merge(≥0.85) | conflict(0.72-0.85) | supplement(0.60-0.72) | new(<0.60) |",
             "|----|------|------|------|------|",
         ]
-        band_order = ["merge(≥0.85)", "conflict(0.72-0.85)", "supplement(0.60-0.72)", "new(<0.60)"]
+        band_order = _BAND_ORDER
         for name, vals in groups.items():
-            bands = [_band(v) for v in vals]
-            counts = {b: bands.count(b) for b in band_order}
+            counts = dict(zip(band_order, _band_counts(vals)))
             lines.append(
                 f"| {name} | {counts[band_order[0]]} | {counts[band_order[1]]} | "
                 f"{counts[band_order[2]]} | {counts[band_order[3]]} |"
@@ -227,11 +309,14 @@ async def _main(report_md: str | None) -> int:
             "",
             "## 结论（初步）",
             "",
-            "（跑完回填：merge 阈值是否合理、同类对与异类对是否分离、建议调整。）",
+        ]
+        lines += _build_conclusion(groups)
+        lines += [
             "",
             "## 边界",
             "",
-            "- seed 语料 30 条、LLM 改写对 8 条——样本小，结论是初步方向而非生产标定。",
+            f"- seed 语料 {len(seeds)} 条、可用 LLM 改写对 {len(pairs)} 条"
+            f"（{n_failed} 条改写失败剔除）——样本小，结论是初步方向而非生产标定。",
             "- 改写对是「同一知识的不同表述」，与真实「不同来源抽取同一记忆」的摘要还有差距。",
             "- 未考虑 embedding 温度、类别内主题多样性对分布的偏置。",
         ]

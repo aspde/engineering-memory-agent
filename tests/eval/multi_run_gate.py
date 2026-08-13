@@ -63,7 +63,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -249,7 +249,7 @@ def build_aggregate_report(
     labelled = {m if m else "unknown" for m in modes}
     judge_mode = "mixed" if len(labelled) > 1 else next(iter(labelled))
     return {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "tool": "tests.eval.multi_run_gate",
         "n_runs": len(reports),
         "judge_mode": judge_mode,

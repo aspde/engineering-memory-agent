@@ -39,10 +39,8 @@ keeps the item type, constants, loader and validation.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
 from tests.eval.core import load_jsonl_items
-
 
 TASK_CATEGORIES: tuple[str, ...] = (
     "factual",

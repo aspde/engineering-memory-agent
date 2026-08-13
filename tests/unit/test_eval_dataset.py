@@ -21,13 +21,16 @@ from tests.eval.dataset import (
     SeedMemory,
     build_adapter,
     is_relevant,
-    load_ground_truth,
     load_seed_memories,
     relevance_mask,
     validate_dataset,
 )
-from tests.eval.ground_truth import CATEGORIES, GROUND_TRUTH, GroundTruthItem, assert_complete
-
+from tests.eval.ground_truth import (
+    CATEGORIES,
+    GROUND_TRUTH,
+    GroundTruthItem,
+    assert_complete,
+)
 
 # ── Ground truth structural invariants ────────────────────────
 
@@ -37,16 +40,21 @@ class TestGroundTruthStructure:
         # Should not raise — catches duplicate IDs, empty categories, etc.
         assert_complete()
 
-    def test_has_70_queries(self) -> None:
-        assert len(GROUND_TRUTH) == 70
+    def test_corpus_is_substantial(self) -> None:
+        # A floor, not an exact count: the labeled set grows as real data
+        # flows in, and pinning an exact number would force a test edit on
+        # every corpus update.
+        assert len(GROUND_TRUTH) >= 70
 
-    def test_five_categories_fourteen_each(self) -> None:
+    def test_all_categories_well_represented(self) -> None:
         from collections import Counter
 
         counts = Counter(it.category for it in GROUND_TRUTH)
         assert set(counts) == set(CATEGORIES)
         for cat in CATEGORIES:
-            assert counts[cat] == 14, f"{cat}: expected 14, got {counts[cat]}"
+            # Floor for per-category reporting, not an exact count — the
+            # category mix shifts as the corpus evolves.
+            assert counts[cat] >= 10, f"{cat}: only {counts[cat]} queries"
 
     def test_every_item_has_fingerprint_and_seed(self) -> None:
         for it in GROUND_TRUTH:
@@ -57,7 +65,7 @@ class TestGroundTruthStructure:
         from tests.eval.ground_truth import difficulty_distribution
 
         dist = difficulty_distribution(GROUND_TRUTH)
-        assert dist["easy"] + dist["medium"] + dist["hard"] == 70
+        assert dist["easy"] + dist["medium"] + dist["hard"] == len(GROUND_TRUTH)
         # At least one of each — otherwise per-difficulty breakdown is useless
         for d in ("easy", "medium", "hard"):
             assert dist[d] >= 1, f"no {d} queries"
@@ -298,7 +306,6 @@ class TestSemanticMatching:
         from unittest.mock import AsyncMock
 
         import backend.service.embedding_service as emb_mod
-
         from tests.eval.dataset import semantic_relevance_mask
 
         provider = AsyncMock()
@@ -325,7 +332,6 @@ class TestSemanticMatching:
         from unittest.mock import AsyncMock
 
         import backend.service.embedding_service as emb_mod
-
         from tests.eval.dataset import semantic_relevance_mask
 
         provider = AsyncMock()

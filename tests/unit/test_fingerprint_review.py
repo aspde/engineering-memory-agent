@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from tests.eval.dataset import SeedMemory
 from tests.eval.experiments.fingerprint_review import (
     _phrase_candidates,
