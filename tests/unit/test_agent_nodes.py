@@ -1658,8 +1658,103 @@ class TestCheckConflictNode:
         assert isinstance(result, Command)
         assert result.goto == "call_llm"
 
+    @pytest.mark.asyncio
+    async def test_resolved_conflict_note_carries_resolution_marker(
+        self, monkeypatch
+    ) -> None:
+        """Resolving a write conflict replaces the conflict ToolMessage with a
+        note that carries the ``conflict_resolution`` marker, so auto-memory
+        stands down on the resumed turn instead of re-extracting content that
+        just reached its final state (persisted or explicitly discarded)."""
+        from unittest.mock import AsyncMock
 
-class TestContextBounding:
+        from langchain_core.messages import ToolMessage
+
+        from backend.agent.graph import build_agent_graph
+        from backend.agent.tools import write_memory_tool
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
+        from tests.support.process_state import wait_auto_memory_tasks
+
+        mock_provider = AsyncMock()
+        # call_llm stream 1: the model emits the write_memory_tool call.
+        # call_llm stream 2 (after the conflict is resolved): plain answer.
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([{
+                "id": "call_rs",
+                "name": "write_memory_tool",
+                "args": {"content": "EMA uses PostgreSQL"},
+            }]),
+            content_stream("已合并"),
+        )
+        mock_provider.chat_stream = text_stream("Final.")
+
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_provider)
+        monkeypatch.setattr(
+            "backend.agent.tools.write_memory",
+            AsyncMock(return_value={
+                "action": "conflict",
+                "summary": "EMA uses PostgreSQL",
+                "existing_id": "mem-1",
+                "existing_summary": "EMA uses MySQL",
+                "entities": [],
+                "relations": [],
+                "_deferred": {
+                    "extracted": {"summary": "EMA uses PostgreSQL"},
+                    "embedding": "[0.1, 0.2]",
+                    "source_type": "conversation",
+                    "metadata": {},
+                },
+            }),
+        )
+        monkeypatch.setattr(
+            "backend.agent.nodes.resolve_conflict",
+            AsyncMock(return_value={"id": "mem-1", "action": "overwrite"}),
+        )
+        # If auto-memory wrongly re-ran, these would be awaited — they must not be.
+        mock_extract = AsyncMock()
+        mock_nodes_write = AsyncMock()
+        monkeypatch.setattr("backend.agent.nodes.extract_memory", mock_extract)
+        monkeypatch.setattr("backend.agent.nodes.write_memory", mock_nodes_write)
+
+        graph = build_agent_graph([write_memory_tool], checkpointer=None)
+        config = {"configurable": {"thread_id": "test-conflict-resolve-1"}}
+
+        # Turn 1: write_memory_tool is in the approval set → approval gate.
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="remember EMA uses PostgreSQL")]},
+            config,
+        )
+        assert "__interrupt__" in result
+
+        # Turn 2: approve the tool → it executes → conflict gate pauses.
+        result2 = await graph.ainvoke(Command(resume={"approved": True}), config)
+        assert "__interrupt__" in result2
+        assert result2["__interrupt__"][0].value["type"] == "conflict"
+
+        # Turn 3: resolve the conflict → the run completes.
+        result3 = await graph.ainvoke(Command(resume={"resolution": "merge"}), config)
+        assert "__interrupt__" not in result3
+
+        # The conflict ToolMessage was replaced by a note carrying the marker.
+        notes = [
+            m
+            for m in result3.get("messages", [])
+            if isinstance(m, ToolMessage)
+            and getattr(m, "name", "") == "write_memory_tool"
+            and "Conflict resolved" in str(m.content)
+        ]
+        assert notes
+        assert notes[-1].additional_kwargs.get("conflict_resolution") == "merge"
+
+        # Auto-memory stood down — nothing was extracted or written again.
+        await wait_auto_memory_tasks()
+        mock_extract.assert_not_awaited()
+        mock_nodes_write.assert_not_awaited()
     """Windowed history + tool-content truncation bound the LLM context."""
 
     def test_heuristic_tokens_cjk_and_ascii(self) -> None:

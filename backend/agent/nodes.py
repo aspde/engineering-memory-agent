@@ -762,14 +762,20 @@ def _write_tool_used_this_turn(messages: list[BaseMessage]) -> bool:
 
 
 def _write_succeeded_this_turn(messages: list[BaseMessage]) -> bool:
-    """True if this turn produced a *successful* ``write_memory_tool`` result.
+    """True if this turn already settled its ``write_memory_tool`` outcome.
 
-    Success means the tool's ToolMessage is JSON carrying an ``action`` key
-    (inserted / merged / duplicate).  An injected write whose execution
-    failed leaves a non-JSON error ToolMessage, and a resolved conflict's
-    ToolMessage is replaced by a plain-text resolution note — neither counts,
-    so auto-memory stays free to capture the turn's knowledge (a failed or
-    discarded write must not silently lose the content).
+    Settled means the tool's ToolMessage reports a successful write
+    (inserted / merged / duplicate) — or the write hit a conflict that a
+    human has since resolved (``check_conflict_node`` replaces the conflict
+    ToolMessage with a resolution note carrying a ``conflict_resolution``
+    marker).  In both cases the turn's knowledge has reached its final
+    state, so auto-memory stands down: re-running extraction on content
+    that was already persisted is wasted LLM calls, and re-writing content
+    the user just chose to discard (keep_existing) would override their
+    decision.  An injected write whose execution failed leaves a non-JSON
+    error ToolMessage and does NOT count, so auto-memory stays free to
+    capture the turn's knowledge (a failed or abandoned write must not
+    silently lose the content).
     """
     start = 0
     for i in range(len(messages) - 1, -1, -1):
@@ -778,11 +784,16 @@ def _write_succeeded_this_turn(messages: list[BaseMessage]) -> bool:
             break
     for m in messages[start:]:
         if isinstance(m, ToolMessage) and getattr(m, "name", "") == "write_memory_tool":
+            if getattr(m, "additional_kwargs", {}).get("conflict_resolution"):
+                return True  # conflict resolved — final state reached
             try:
                 data = json.loads(str(m.content))
             except (TypeError, ValueError):
                 continue  # error ToolMessage / resolution note — not a write
-            if isinstance(data, dict) and "action" in data:
+            if (
+                isinstance(data, dict)
+                and data.get("action") in ("inserted", "merged", "duplicate")
+            ):
                 return True
     return False
 
@@ -1613,6 +1624,11 @@ async def check_conflict_node(
         tool_call_id=str(getattr(m, "tool_call_id", "")),
         name="write_memory_tool",
         id=getattr(m, "id", None),  # same id → replaces conflict msg
+        # Marker for auto-memory suppression: the turn's write reached its
+        # final state (persisted, or explicitly discarded), so
+        # ``_write_succeeded_this_turn`` stands auto-memory down instead of
+        # re-running extraction on already-settled content.
+        additional_kwargs={"conflict_resolution": resolution},
     )
     return Command(
         goto="call_llm",

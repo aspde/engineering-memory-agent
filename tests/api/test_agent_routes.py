@@ -952,3 +952,84 @@ class TestAgentStream:
             isinstance(m, SystemMessage) and "interrupted" in str(m.content)
             for m in msgs
         )
+
+
+class TestExtractWriteResult:
+    """``_extract_write_result`` — the force-write toast payload parser.
+
+    The non-streaming /chat response derives memory_write from the turn's
+    last write_memory_tool ToolMessage.  It must tolerate any JSON the tool
+    could return — including non-object shapes — without raising, or an
+    unusual write result would 500 the whole response.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_object_json_returns_none(self) -> None:
+        """A ToolMessage whose content is valid JSON but not an object (e.g. a
+        list) must yield None, not AttributeError."""
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        import backend.api.routes.agent_routes as routes_mod
+
+        messages = [
+            HumanMessage(content="remember x"),
+            ToolMessage(
+                content='["not", "a", "write-result"]',
+                tool_call_id="c1",
+                name="write_memory_tool",
+            ),
+        ]
+        assert routes_mod._extract_write_result(messages) is None
+
+    @pytest.mark.asyncio
+    async def test_scalar_json_returns_none(self) -> None:
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        import backend.api.routes.agent_routes as routes_mod
+
+        messages = [
+            HumanMessage(content="remember x"),
+            ToolMessage(
+                content='"just a string"',
+                tool_call_id="c1",
+                name="write_memory_tool",
+            ),
+        ]
+        assert routes_mod._extract_write_result(messages) is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_json_returns_none(self) -> None:
+        """Non-JSON (error ToolMessage / resolution note) yields None."""
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        import backend.api.routes.agent_routes as routes_mod
+
+        messages = [
+            HumanMessage(content="remember x"),
+            ToolMessage(
+                content="Error: write failed (DB unavailable)",
+                tool_call_id="c1",
+                name="write_memory_tool",
+            ),
+        ]
+        assert routes_mod._extract_write_result(messages) is None
+
+    @pytest.mark.asyncio
+    async def test_returns_action_and_summary(self) -> None:
+        """A normal write result is surfaced as {action, summary}."""
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        import backend.api.routes.agent_routes as routes_mod
+
+        messages = [
+            HumanMessage(content="remember x"),
+            ToolMessage(
+                content='{"action": "inserted", "summary": "端口改为 8080"}',
+                tool_call_id="c1",
+                name="write_memory_tool",
+            ),
+        ]
+        assert routes_mod._extract_write_result(messages) == {
+            "action": "inserted",
+            "summary": "端口改为 8080",
+        }

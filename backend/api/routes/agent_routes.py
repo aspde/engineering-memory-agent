@@ -221,6 +221,8 @@ def _extract_write_result(messages: list) -> dict[str, str] | None:
                 data = json.loads(str(m.content))
             except (TypeError, ValueError):
                 return None
+            if not isinstance(data, dict):
+                return None  # valid JSON but not a write result (e.g. a list)
             action = data.get("action")
             if not isinstance(action, str):
                 return None

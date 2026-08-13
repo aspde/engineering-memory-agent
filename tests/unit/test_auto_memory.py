@@ -7,6 +7,7 @@ logged and swallowed.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock
 
 import pytest
@@ -357,6 +358,80 @@ class TestAutoMemorySuppression:
         await mod._maybe_auto_memory(state)
         mock_extract.assert_awaited_once()
         mock_write.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_conflict_result_does_not_suppress_auto_write(
+        self, monkeypatch
+    ) -> None:
+        """A write that returned ``action: conflict`` has persisted NOTHING
+        yet, so it must not suppress auto-memory — the knowledge is still up
+        for capture (the conflict gate pauses for a human before any store
+        write)."""
+        import backend.agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        state = _make_state(
+            [
+                HumanMessage(content="记住：EMA 使用 PostgreSQL 存向量"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "c1", "name": "write_memory_tool", "args": {}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content=json.dumps({
+                        "action": "conflict",
+                        "summary": "EMA uses PostgreSQL",
+                        "existing_id": "mem-1",
+                        "existing_summary": "EMA uses MySQL",
+                    }),
+                    tool_call_id="c1",
+                    name="write_memory_tool",
+                ),
+            ]
+        )
+        await mod._maybe_auto_memory(state)
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_resolved_conflict_suppresses_auto_write(
+        self, monkeypatch
+    ) -> None:
+        """A conflict that a human has RESOLVED (the conflict ToolMessage was
+        replaced by a note carrying the conflict_resolution marker) must
+        suppress auto-memory: the write reached its final state — persisted
+        for overwrite/merge/keep_both, or explicitly discarded for
+        keep_existing.  Re-running extraction would either duplicate work on
+        already-persisted content or override the user's discard choice."""
+        import backend.agent.nodes as mod
+
+        _set_auto_memory(monkeypatch, True)
+        mock_extract, mock_write = _mock_services(monkeypatch)
+
+        state = _make_state(
+            [
+                HumanMessage(content="记住：EMA 使用 PostgreSQL 存向量"),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"id": "c1", "name": "write_memory_tool", "args": {}, "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content="Conflict resolved — merged both memories together. Memory id: mem-1.",
+                    tool_call_id="c1",
+                    name="write_memory_tool",
+                    additional_kwargs={"conflict_resolution": "merge"},
+                ),
+            ]
+        )
+        await mod._maybe_auto_memory(state)
+        mock_extract.assert_not_awaited()
+        mock_write.assert_not_awaited()
 
 
 class TestAutoMemoryFailures:
