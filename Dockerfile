@@ -70,7 +70,16 @@ RUN pip install --no-cache-dir --timeout 120 --retries 5 \
 # python:*-slim image has no system libpq, so AsyncPostgresSaver would
 # silently fall back to InMemorySaver (checkpoints lost on restart) unless
 # the runtime library is installed.  libpq5 alone suffices — no headers.
-RUN apt-get update && apt-get install -y --no-install-recommends libpq5 \
+#
+# apt 走国内镜像（默认清华，与上面的 pip 镜像一致；直连 deb.debian.org
+# 在此网络下不稳定，曾导致 apt-get 下载软件包索引超时）。需要其他镜像
+# 时用 --build-arg DEBIAN_MIRROR=https://mirrors.aliyun.com 覆盖。只替换
+# host：deb.debian.org 的 /debian 与 /debian-security 在清华/阿里镜像上
+# 都有对应结构。grep 校验换源生效，防基础镜像格式漂移后静默回退官方源。
+ARG DEBIAN_MIRROR="https://mirrors.tuna.tsinghua.edu.cn"
+RUN sed -i "s|http://deb.debian.org|${DEBIAN_MIRROR}|g" /etc/apt/sources.list.d/debian.sources \
+    && grep -q "${DEBIAN_MIRROR}" /etc/apt/sources.list.d/debian.sources \
+    && apt-get update && apt-get install -y --no-install-recommends libpq5 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Embedding model: mounted at runtime, not baked ───────────────────

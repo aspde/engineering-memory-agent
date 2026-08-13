@@ -43,3 +43,53 @@ addopts = "-v --tb=short"
 # warning; we pin httpx and the fallback is fully supported, so the notice
 # is noise in every test run.
 filterwarnings = ["ignore::starlette.exceptions.StarletteDeprecationWarning"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# The rule set is explicit rather than default: keep high-value, low-noise
+# rules and exclude "advisory" simplification rules (SIM/PIE/TRY/C4/LOG are
+# too noisy on this defensive-style codebase) plus deliberate project-style
+# conflicts (see ignore). E4/E7/E9/F/W = core correctness, I = import
+# sorting, UP = modern syntax, B = bugbear, PERF = performance, rest = RUF.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "B", "PERF", "RUF"]
+ignore = [
+  # Deliberate project code style - each has a stated reason, not evasion:
+  "BLE001",  # bare except: defensive degradation in the service layer ("never
+             # bubble"), e.g. usage/connectors/patrol
+  "S110",    # try-except-pass: intentional in observability paths ("must
+             # never raise")
+  "DTZ001",  # naive datetime is the convention for Postgres timestamptz;
+             # aware cases call .astimezone() explicitly
+  "DTZ005",  # same (datetime.now without tz): scheduler attaches local tz
+             # via now().astimezone()
+  "UP047",   # PEP-695 generic syntax is style; not rewriting existing
+             # annotations
+  "B905",    # zip(strict=True) is a 3.10+ preference; existing zips are
+             # unambiguous
+  "B007",    # unused loop control variable (idiomatic unpacking, not a bug)
+  "RUF059",  # unused unpacked variable (get_prompt's version, mock unpacking)
+             # is a common pattern
+  "RUF015",  # minor: first-element iterator allocation
+  "RUF022",  # dunder ordering
+  "RUF023",  # slots ordering
+  "RUF005",  # collection-literal concatenation is style, not an error
+  "PERF102", # dict iterator selection is a micro-optimization
+  "RUF001",  # ambiguous unicode: Chinese comments + prompts trigger this
+  "RUF002",  # same (docstrings)
+  "RUF003",  # same (comments)
+  "PERF401", # manual for+append vs comprehension: readable multi-line loops
+  "E402",    # non-top imports: intentional (avoid circular imports / defer
+             # heavy provider loading)
+]
+
+[tool.mypy]
+python_version = "3.12"
+# 项目重度使用动态第三方 API(openai/langgraph SDK 签名过严,运行时正确),
+# 缺 stubs 的包不报错;历史 type: ignore 注释保留(可能有部分已不再需要)。
+ignore_missing_imports = true
+warn_unused_ignores = false
+check_untyped_defs = true
+files = ["backend"]

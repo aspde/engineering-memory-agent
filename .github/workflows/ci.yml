@@ -31,7 +31,9 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install backend dependencies
         run: |
@@ -42,6 +44,17 @@ jobs:
           # silently diverge from this workflow.
           pip install "$(grep -m1 '^torch==' requirements.txt)" --index-url https://download.pytorch.org/whl/cpu
           pip install -r requirements.txt
+          # Dev tools (ruff/mypy) stay out of the production image; install
+          # them for CI separately.
+          pip install -r requirements-dev.txt
+
+      # Static quality gates: lint + type check fail the build fast, before
+      # the (slower) test and dataset-consistency steps.
+      - name: Lint (ruff)
+        run: ruff check backend/ tests/
+
+      - name: Type check (mypy)
+        run: mypy backend/
 
       # Zero-cost gate: ground-truth ↔ seed-corpus consistency (no DB, no
       # models). Catches dataset drift before anything is seeded.
@@ -66,6 +79,14 @@ jobs:
       # which is why the service only needs to provision ema_dev).
       - name: Run backend tests
         run: python -m pytest tests/unit tests/api -q --tb=short
+
+      # The production checkpoint path is deliberately the one integration
+      # test run in CI: a real psycopg pool + AsyncPostgresSaver writing a
+      # conversation to PostgreSQL and recovering it across a simulated
+      # process restart.  Everything else in tests/integration stays out of
+      # CI (requires real providers / local models).
+      - name: Run checkpoint persistence test
+        run: python -m pytest tests/integration/test_checkpointer_persistence.py -q --tb=short
 
   frontend:
     name: Frontend tests

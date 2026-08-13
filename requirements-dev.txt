@@ -1,0 +1,8 @@
+# 开发工具锁文件 —— 生产镜像(Dockerfile)只装 requirements.txt,
+# 本文件额外引入静态质量工具,CI 与本地开发用 `pip install -r requirements-dev.txt`。
+# 版本与 requirements.txt 相同策略:锁死,保证 CI 可复现。
+-r requirements.txt
+
+mypy==2.3.0
+mypy_extensions==1.1.0
+ruff==0.16.2
