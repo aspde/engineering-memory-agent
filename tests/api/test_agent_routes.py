@@ -105,6 +105,7 @@ class TestAgentChat:
     async def test_silent_tools_excluded_from_tool_calls(self, async_client: AsyncClient, monkeypatch) -> None:
         """write_memory_tool results are excluded from tool_calls (silent tools)."""
         from unittest.mock import AsyncMock
+
         from langchain_core.messages import ToolMessage
 
         mock_agent = AsyncMock()
@@ -132,6 +133,158 @@ class TestAgentChat:
         data = response.json()
         # write_memory_tool is silent — no tool_call trace in response
         assert len(data["tool_calls"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_force_write_passes_flag_and_returns_memory_write(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """force_write=True is forwarded into the graph input, and the write's
+        outcome is surfaced as ``memory_write`` on the response."""
+        from unittest.mock import AsyncMock
+
+        from langchain_core.messages import ToolMessage
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "已记录",
+            "messages": [
+                ToolMessage(
+                    content='{"action":"inserted","summary":"端口改为 8080"}',
+                    tool_call_id="call_1",
+                    name="write_memory_tool",
+                ),
+            ],
+        }
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={
+                "message": "记住：端口改为 8080",
+                "thread_id": "fw-1",
+                "force_write": True,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["memory_write"] == {
+            "action": "inserted",
+            "summary": "端口改为 8080",
+        }
+        # The flag reached the graph input.
+        input_args = mock_agent.ainvoke.call_args.args[0]
+        assert input_args.get("force_write") is True
+
+    @pytest.mark.asyncio
+    async def test_no_force_write_no_memory_write(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """Without force_write, the response carries memory_write=None."""
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "你好",
+            "messages": [],
+        }
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={"message": "你好", "thread_id": "fw-2"},
+        )
+        assert response.status_code == 200
+        assert response.json()["memory_write"] is None
+
+    @pytest.mark.asyncio
+    async def test_previous_turn_write_not_reported(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A write_memory_tool result from an earlier turn must not be reported
+        as this turn's memory_write."""
+        from unittest.mock import AsyncMock
+
+        from langchain_core.messages import HumanMessage, ToolMessage
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "ok",
+            "messages": [
+                HumanMessage(content="old turn"),
+                ToolMessage(
+                    content='{"action":"inserted","summary":"old"}',
+                    tool_call_id="call_1",
+                    name="write_memory_tool",
+                ),
+                HumanMessage(content="this turn"),
+            ],
+        }
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={"message": "this turn", "thread_id": "fw-3", "force_write": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["memory_write"] is None
+
+    @pytest.mark.asyncio
+    async def test_force_write_conflict_status_interrupted(
+        self, async_client: AsyncClient, monkeypatch
+    ) -> None:
+        """A force-write that hits a conflict surfaces as an interrupt — the
+        same HITL path as any other write."""
+        from unittest.mock import AsyncMock
+
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "__interrupt__": [
+                type(
+                    "_I",
+                    (),
+                    {
+                        "value": {
+                            "type": "conflict",
+                            "new_summary": "EMA uses MySQL",
+                            "existing_id": "mem-1",
+                            "existing_summary": "EMA uses PostgreSQL",
+                            "options": ["keep_existing", "overwrite", "merge", "keep_both"],
+                            "deferred": {},
+                        }
+                    },
+                )()
+            ]
+        }
+
+        monkeypatch.setattr(
+            "backend.api.routes.agent_routes.get_agent_for_thread",
+            lambda *a, **k: mock_agent,
+        )
+
+        response = await async_client.post(
+            "/api/agent/chat",
+            json={
+                "message": "记住：EMA uses MySQL",
+                "thread_id": "fw-4",
+                "force_write": True,
+            },
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["status"] == "interrupted"
+        assert data["interrupt"]["type"] == "conflict"
 
     @pytest.mark.asyncio
     async def test_returns_status_field(self, async_client: AsyncClient, monkeypatch) -> None:
@@ -764,7 +917,7 @@ class TestAgentStream:
                 try:
                     return next(self._events)
                 except StopIteration:
-                    raise StopAsyncIteration
+                    raise StopAsyncIteration from None
 
             async def aclose(self):
                 if not self._closed:
