@@ -614,11 +614,10 @@ class TestCallLLMNode:
         write may still fail, and throttling then would suppress auto-memory
         on top of the failed write (content lost twice).  The throttle is
         recorded by write_memory_tool on success (see test_agent_tools)."""
-        from tests._fake_llm import content_stream, sequential_stream
-
         import backend.agent.nodes as mod
         from backend.agent.tools import write_memory_tool
         from backend.shared.config import current_thread_id
+        from tests._fake_llm import content_stream, sequential_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))

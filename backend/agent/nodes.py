@@ -1051,7 +1051,7 @@ async def call_llm_node(
             })
         aimessage = AIMessage(content=content or "", tool_calls=lc_tool_calls)  # type: ignore[arg-type]
     else:
-        lc_tool_calls = None
+        lc_tool_calls = None  # type: ignore[assignment]
         aimessage = AIMessage(content=content)
 
     # ── Force-write injection ────────────────────────────────────────────

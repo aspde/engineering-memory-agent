@@ -193,7 +193,7 @@ async def _setup_checkpointer() -> None:
                     "INSERT INTO checkpoint_migrations (v) VALUES (%s) ON CONFLICT DO NOTHING",
                     [v],
                 )
-        await _checkpointer.setup()
+        await _checkpointer.setup()  # type: ignore[union-attr]
         logger.info("AsyncPostgresSaver setup complete")
     except Exception as exc:
         logger.warning(
