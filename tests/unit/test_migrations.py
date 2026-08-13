@@ -71,7 +71,8 @@ def temp_migration_db():
     original_url = config.database_url
     parts = urlsplit(original_url)
     # 继承原 URL 的用户/密码/主机——测试不应假设数据库密码固定为
-    # ema123（本地改强密码后硬编码会认证失败；CI 的 config 密码即 ema123）。
+    # 某个值（本地改强密码后硬编码会认证失败；通过 TEST_DATABASE_URL
+    # 覆盖即可）。
     config.database_url = f"postgresql://{parts.netloc}/{name}"
     try:
         yield name
