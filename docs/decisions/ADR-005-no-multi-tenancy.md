@@ -112,6 +112,20 @@ ALTER TABLE chunks ADD COLUMN project TEXT DEFAULT 'default';
 | 迁移成本 | 所有 SQL 加 `WHERE tenant_id = ?`，所有 API 加中间件 | 已有的查询加一个可选 filter |
 | 跨项目查询 | 不可能（除非做联邦） | `?project=*` 或不传 project 查全部 |
 
+## 用户级认证的迁移路径（多租户前置条件）
+
+用户级认证（知道请求来自谁）与多租户（数据隔离）是正交问题，可独立引入。多租户需在其上绑定"用户 → 租户"，但用户级认证本身不必等拐点：单团队内出现"需要审计谁写了/删了什么"或"需要区分成员与只读者"的信号时，即可先行搭建。三步可独立停在任何一步，每步独立收益，不是"提前过度设计"：
+
+**第 1 步 · key 表**：新建 `api_keys` 表（`id` / `key_hash` 只存 SHA-256、永不存明文 / `owner` / `name` 用途标识 / `created_at` / `revoked_at`），`backend/api/auth.py` 从单 key 常量比较改为查表 + `secrets.compare_digest` 逐行比较。`APP_ENV=test` 豁免与通用 401 语义不变。此步只改认证源头，不动业务读写。
+
+**第 2 步 · 按 key 记 owner**：认证通过后把 `owner` 写入请求级 contextvar（复用 `current_thread_id` / `current_trace_id` 模式），写路径在 `memories.created_by` / `deleted_by`、`llm_usage.owner` 落 owner。审计到位：usage trace 可回答"哪个 key 花了多少钱、调了什么"，记忆变更可回答"谁删的"。
+
+**第 3 步 · 按 owner 过滤**：读路径按 `created_by = :owner` 过滤或分权限档（读全部 / 只读自己的 / 只写自己的），前端加登录/换 key 流程，`VITE_EMA_API_KEY` 构建注入退役——bundle 不再含共享 key。
+
+**与现有机制的关系**：`ratelimit.py` 已按 Bearer token 分桶，换 per-user key 后天然成为 per-user 限流，无需改造；`project` 命名空间（上文）管"分不分组"，`owner` 管"谁干的、谁能动"，两维正交。
+
+**当前保持共享 key 不是缺陷**：单团队、无审计需求、无只读成员时维持现状（威胁模型见 `docs/architecture.md`「API Security」）。
+
 ## 拐点
 
 当以下三个信号**同时**出现时，引入真正的多租户：

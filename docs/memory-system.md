@@ -137,6 +137,9 @@ extract_entities(content) ─┘
 | recall_count | INT | 累计检索次数，默认 0 |
 | meta | JSONB | 冲突标记、补充关联等 |
 | created_at | TIMESTAMPTZ | now() |
+| content_hash | TEXT | 原始内容 SHA-256，精确去重键（未软删行唯一，见 §3 内容哈希幂等） |
+| updated_at | TIMESTAMPTZ | 最近一次更新（合并/覆写时刷新） |
+| deleted_at | TIMESTAMPTZ | 软删除时间戳；非 NULL 的记忆退出检索与巡检（见 §3 巡检 peer_id 软删） |
 
 ### 维度（切换 embedding 模型）
 

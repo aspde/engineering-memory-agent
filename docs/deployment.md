@@ -186,7 +186,7 @@ EMA 日志统一走 **stdout**（容器 `docker compose logs`），格式由 `LO
 - `LLM_*` — LLM provider 配置（含传输韧性 `LLM_RETRY_*` / `LLM_CIRCUIT_BREAKER_*`、结构化重试 `LLM_STRUCTURED_*`、可选故障转移 `LLM_FALLBACK_*`——设置 `LLM_FALLBACK_PROVIDER` 后，主 provider 的可重试失败或熔断会在该次调用上改走备用 provider，留空则关闭）
 - `EMBEDDING_*` — Embedding 模型配置（含可选故障转移 `EMBEDDING_FALLBACK_*`——设置 `EMBEDDING_FALLBACK_PROVIDER` 后，主 provider 失败（重试耗尽/熔断/本地模型损坏）会在该次调用上改走备用 provider，留空则关闭；备用模型维度必须与主模型一致；另含 CPU 并发控制 `EMBEDDING_MAX_CONCURRENCY` / `EMBEDDING_TORCH_THREADS`——两者乘积≈核数时零超卖，消除并发 embed 延迟长尾，冷路径压测 10 并发 P95 19s→690ms，见 gap-remediation.md §5.3.2）
 - `EMA_API_KEY` — API 接入认证的服务端 / 管理员 key。设置后所有 `/api` 请求须携带 `Authorization: Bearer <key>`，key 为 `EMA_API_KEY` 或 `VITE_EMA_API_KEY` 之一（见下文 Authentication）；不设置时服务仍可启动，但任何 `/api` 请求都会收到 401
-- `VITE_EMA_API_KEY` — 前端专用 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）。与 `EMA_API_KEY` 刻意不同——它被打进浏览器可读的 JS bundle，任何访问前端页面的人都能提取，因此不作为管理员凭据。未配置时前端请求不携带认证头（向后兼容）
+- `VITE_EMA_API_KEY` — 前端专用 key（构建期替换 `import.meta.env.VITE_EMA_API_KEY`）。与 `EMA_API_KEY` 刻意不同——它被打进浏览器可读的 JS bundle，任何访问前端页面的人都能提取，因此不能当作机密保存；但对 API 的权限与 `EMA_API_KEY` 完全相同（无 per-key 角色，见下文 Authentication 边界）。未配置时前端请求不携带认证头（向后兼容）
 
   > **容器构建注意**：Vite 在 **build 阶段**（`docker build` Stage 1）读取该变量，而根 `.env` 被 `.dockerignore` 排除、`env_file` 只注入容器**运行时**，Vite 看不到。docker-compose 已通过 `build.args.VITE_EMA_API_KEY` 从根 `.env` 传入，直接 `docker compose build` 即可；修改 key 后须重新构建镜像，否则浏览器端仍携带旧 key 会收到 401。构建参数会留在镜像元数据（`docker history`）中，因该 key 本就是分发给前端的公开值，可接受；真正的服务端密钥（`EMA_API_KEY`）不要走 build-arg。
 - `DATABASE_URL` — PostgreSQL 连接串。本地直接运行用 localhost；compose 部署时默认由 `docker-compose.yml` 指向 `postgres` 服务名，此处设置会覆盖该默认值（改库/改口令见上方"改数据库口令"与恢复 runbook）
@@ -218,9 +218,9 @@ curl -H "Authorization: Bearer <your-key>" http://localhost:8000/api/memory/stat
 
 - `APP_ENV=test` 豁免该守卫（API 测试套件用 mock，不需 key）。
 - key 比较为常量时间（`secrets.compare_digest`），不匹配返回无细节的通用 401。
-- 两个 key 刻意分离：`VITE_EMA_API_KEY` 构建期打进前端 bundle，任何访问页面的人都能提取；拆分后它不是管理员凭据，真正的服务端密钥（`EMA_API_KEY`）只掌握在运维侧。注意两把 key 对 API 的权限目前完全相同（无 per-key 角色，见边界）——拆分隔离的是凭据而非权限。改动 `VITE_EMA_API_KEY` 后须重新构建前端镜像（见上文"容器构建注意"）。
+- 两个 key 刻意分离：`VITE_EMA_API_KEY` 构建期打进前端 bundle，任何访问页面的人都能提取，所以它不能当作机密；真正的服务端密钥（`EMA_API_KEY`）只掌握在运维侧。**拆分隔离的是凭据字符串而非权限**——两把 key 对 API 的权限完全相同（无 per-key 角色，见下方边界与 architecture.md「API Security」威胁模型），bundle key 持有者即全权持有者。改动 `VITE_EMA_API_KEY` 后须重新构建前端镜像（见上文"容器构建注意"）。
 - 开发模式未配置 `VITE_EMA_API_KEY` 时前端请求不携带认证头（后端返回 401）。
-- 边界：共享 key、无用户身份与角色——这是有意取舍（与 ADR 004 不做多租户一致），非生产多用户场景的完整认证方案。
+- 边界：共享 key、无用户身份与角色——这是有意取舍（与 ADR 005 不做多租户一致），非生产多用户场景的完整认证方案。威胁模型（防什么 / 不防什么 / 既有缓解）见 architecture.md「API Security」小节。
 
 ## Health & Startup
 
@@ -306,10 +306,9 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000
 | 状态 | 位置 | 多副本后果 |
 |------|------|-----------|
 | LLM / Embedding 熔断器（开关状态、冷却窗口） | `backend/shared/resilience.py` | 每个副本各自计数熔断、冷却窗口互相打散，一个实例熔断不保护其他实例；/health 只反映本副本状态 |
-| auto-memory 节流（per-thread 间隔/上限、进程级滚动窗口） | `backend/agent/nodes.py` | 每个副本独立计数，实际写入频率放大到上限的 N 倍 |
+| auto-memory 节流（per-thread 最小写入间隔） | `backend/agent/nodes.py` | 每个副本独立计数，实际写入频率放大到单副本限额的 N 倍 |
 | LLM usage 缓冲（`_pending`，由后台 flusher 批量入库） | `backend/service/usage.py` | 缓冲只记录本副本的调用；写入 `llm_usage` 的行不重复，但 `USAGE_BUFFER_MAX` 兜底语义按副本独立 |
 | API 限流令牌桶（per-key 的 `_buckets`） | `backend/api/ratelimit.py` | 每个副本各自计数——一个实例被限流不保护其他副本，实际允许的请求量放大到单副本限额的 N 倍 |
-| 会话压缩摘要缓存 / in-flight 去重 | `backend/agent/nodes.py` | 跨副本完全失效，每副本各自付一次压缩 LLM 调用（结果一致，仅浪费 token） |
 | 对话 checkpoint（`AsyncPostgresSaver` 连接池） | `backend/service/agent_service.py` | 唯一已持久化的状态；`checkpoints` 表在 PG 中，多副本下对话历史仍一致，但同一 `thread_id` 的并发续写由哪副本处理不可控 |
 
 巡检互斥（`patrol_logs` 中 `status='running'` 的查重）在数据库层，多副本下仍有效；其余状态均受上述约束。

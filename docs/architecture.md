@@ -25,7 +25,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 | Layer | Technology | Status |
 |-------|-----------|--------|
 | Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
-| Backend | FastAPI + Python 3.12 | 36 个 API 路由已实现（含 SSE 流式 + HITL） |
+| Backend | FastAPI + Python 3.12 | 34 个 `/api` 路由 + `/health`/`/metrics` 等应用级端点已实现（含 SSE 流式 + HITL） |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/召回统计/去重全链路已实现 |
 | Entity Graph | PostgreSQL + pgvector | 实体归一化、一度关系查询、图谱可视化已实现 |
@@ -98,8 +98,24 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 
 - **认证模型**：请求须携带 `Authorization: Bearer <EMA_API_KEY>`，缺头 / 非 Bearer 方案 / key 不匹配均返回通用 401（`WWW-Authenticate: Bearer`），响应不携带任何可辅助攻击的细节。
 - **常量时间比较**：key 校验用 `secrets.compare_digest`，避免时序侧信道；`APP_ENV=test` 完全豁免该守卫（API 测试套件依赖 mock，不需 key）。
-- **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带该 Bearer。它与服务端 `EMA_API_KEY` 刻意不同——bundle 中的 key 任何人可提取，拆分后不是管理员凭据（后端同时接受两把 key）。未配置时前端不携带认证头（向后兼容，后端返回 401）。
-- **边界与 ADR-005 的关系**：当前是"共享 key、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限（两把 key 的 API 权限完全相同），这有意与 ADR 005 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，已在 ADR-005 的拐点评估中覆盖。
+- **前端注入**：构建期将 `VITE_EMA_API_KEY` 替换进 `import.meta.env.VITE_EMA_API_KEY`，前端请求自动携带该 Bearer。它与服务端 `EMA_API_KEY` 刻意不同——拆分仅保证运维用字符串不进入前端 bundle；**两把 key 在认证上完全等价**（`auth.py` 的 `require_api_key` 是唯一认证关卡，等同接受二者），bundle key 持有者拥有完整的读/写/删权限（见下方威胁模型）。未配置时前端不携带认证头（向后兼容，后端返回 401）。
+- **边界与 ADR-005 的关系**：当前是"共享 key、无用户身份"——服务端不知请求来自谁、无登录/会话/角色/权限（两把 key 的 API 权限完全相同），这有意与 ADR 005 保持一致（不做多租户，故无用户→租户绑定）。用户级认证（JWT/session、多 key 按用户隔离）是引入多租户的前置条件，可分步引入（key 表 → 按 key 记 owner → 按 owner 过滤），迁移路径见 [ADR-005「用户级认证的迁移路径」](./decisions/ADR-005-no-multi-tenancy.md)。
+
+#### 威胁模型
+
+共享 key 认证的目标是**阻止未授权访问**，而不是**区分已授权者的权限**。边界：当前部署无公网暴露，使用方为单团队内部成员（ADR-005 前提）。
+
+**防什么**
+- 未携带有效 key 的请求（随机扫描、配置错误的客户端）——统一返回无细节 401
+- key 校验的时序侧信道——`secrets.compare_digest` 常量时间比较
+- 401 响应泄露可用于定向攻击的信息——不区分"缺 key / key 不匹配 / scheme 错误"
+
+**不防什么（已知并接受）**
+- **bundle key 持有者拥有全权**：`VITE_EMA_API_KEY` 打包进静态资源，任何拿到 bundle 的人都能提取，且与 `EMA_API_KEY` 权限完全相同——可读/写/删整个记忆库、触发巡检。两把 key 的差异仅是值不同，不是权限不同
+- **请求无身份归属**：服务端不知请求来自哪个用户，无"谁写了/删了哪条记忆"的审计
+- **key 泄漏无轮换粒度**：单 key 泄漏只能整体更换，无法按用户或按能力吊销
+
+**为什么可接受 / 既有缓解**：单团队、无公网暴露是该设计的边界。在此边界内已有轻量缓解——记忆删除是软删除（`deleted_at`，误删可恢复）；agent 路径的写操作经 HITL 审批门（`check_approval_node`），不存在无人确认的批量写。即便 bundle key 被提取（公网暴露迟早发生，下述纵深防御在暴露后仍生效）：per-key 令牌桶（`backend/api/ratelimit.py`）限制滥用方用泄漏 key 刷 LLM 调用的成本；`usage.py` 的 trace_id 链路把 key 的每次调用记入 `llm_usage`，`/api/usage/trace/{id}` 可回放审计；写库前的 `_redact` 掩码（sk-/ghp_/AKIA、Bearer 头、PEM 块）保证明文敏感信息不落库。用户级认证 / 多 key 按用户隔离是引入多租户的前置条件，可分步引入（key 表 → 按 key 记 owner → 按 owner 过滤），迁移路径见 [ADR-005](./decisions/ADR-005-no-multi-tenancy.md)。
 
 ### Agent Framework
 
@@ -178,6 +194,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 详见 [agent-design.md](agent-design.md)。核心能力：
 
 - **ReAct 工具调用循环**：9 个 tool 封装记忆检索、文档搜索、实体查询、改写检索、记忆写入、知识提取、Git 摄取、文档摄取、飞书通知
+- **自动知识捕获**：默认开启（`AUTO_MEMORY_ENABLED`），对话中涌现的实质性知识在回答交付后由后台任务自动提取入库——LLM 质量门判断"是否值得"、per-thread 间隔节流、内容哈希幂等防重复（见 [agent-design.md](agent-design.md) 自动知识捕获一节）
 - **对话连续性**：thread_id 维持跨轮次上下文
 - **容错降级**：LLM 调用失败不终止图执行
 

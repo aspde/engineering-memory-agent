@@ -44,6 +44,16 @@ Phase 4: 垂直场景（故障复盘 / 代码审查 / 新人 Onboarding，按需
 - 连接器引入的外部数据（Jira issue、CI 事件、Slack 消息）需要能关联到已有实体才有意义
 - 连接器接口设计依赖 Phase 1 确定的数据模型
 
+### Phase 2 预留：连接器批量归一化（batch 脚手架）
+
+`Connector` 基类预留了一套批量归一化接口（`backend/connectors/base.py`）：`supports_batch`（默认 `False`）、`batch_mode`（`supported` / `pending` / `not_applicable`）、`normalize_batch()`（默认逐条循环 `normalize`）。它预想的是"一次收到多条同源 payload"的场景——批量转换可共享上下文（同一批 CI job 的 repo/branch、同一批 PingCode issue 的项目），并潜在合并嵌入/提取调用。
+
+**当前状态：预留未激活。** 三个连接器（feishu / pingcode / ci）都没有 override `supports_batch`，`batch_mode` 恒为 `"pending"`；`normalize_batch` 除定义处外无调用方（webhook 路径逐条处理，`backend/api/routes/webhook_routes.py`）；唯一消费是 `GET /api/connectors` 把 `batch_mode` 透传给前端连接器页的状态徽章（`frontend/src/pages/ConnectorsPage.tsx`，恒定显示"逐条处理"）。
+
+**为何保留而不删除**：webhook 路径每条事件独立 `extract_memory`（3 次 LLM 提取），一旦出现批量回放/批量导入场景，批量归一化能在嵌入与提取层合并调用，接口预留可避免届时改动 `Connector` 契约。保留成本仅是三个未使用的属性 + 一个静态 UI 徽章，符合"每个 Phase 只做解锁下一阶段所需的最小能力"。
+
+**启用触发信号**：出现真实的批量消费场景（连接器批量回放历史事件、批量导入既有数据）时，先为第一个连接器实现 `normalize_batch` 并设 `supports_batch=True`；`not_applicable` 仅在某个源永远逐条时由该连接器 override 返回。无触发信号前不实现任何连接器的批量路径。
+
 ### Phase 3 在 Phase 1+2 之后的原因
 
 - 主动 Agent 的价值取决于知识的丰富程度和事件源的覆盖范围
