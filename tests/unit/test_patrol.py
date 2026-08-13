@@ -622,14 +622,13 @@ class TestRunPatrol:
             patch(
                 "backend.service.patrol.get_session_factory",
                 return_value=mock_factory,
-            ),
+            ),pytest.raises(asyncio.CancelledError)
         ):
-            with pytest.raises(asyncio.CancelledError):
-                await run_patrol(
-                    patrol_type="daily",
-                    trigger="cron",
-                    system_prompt="test prompt",
-                )
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
 
         # The failed status must be persisted before the cancellation
         # propagates — otherwise the row stays 'running'.

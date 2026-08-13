@@ -1,6 +1,6 @@
 """Tests for AgentState TypedDict schema."""
 
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
 
 from backend.agent.state import AgentState
 

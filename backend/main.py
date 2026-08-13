@@ -19,7 +19,6 @@ for _k, _v in {
 
 import asyncio
 import logging
-import sys
 from contextlib import asynccontextmanager
 
 # ── Windows: psycopg 3 (used by AsyncPostgresSaver) requires
@@ -29,16 +28,15 @@ from contextlib import asynccontextmanager
 #    checkpointer falls back to InMemorySaver — acceptable for dev.
 #    Production should run in a Linux container where ProactorEventLoop
 #    doesn't exist and psycopg async works natively.
-
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
-from backend.api.router import api_router
 from backend.api.ratelimit import RateLimitMiddleware
+from backend.api.router import api_router
 from backend.db import close_db, get_session_factory
 from backend.db.schema import init_db
 from backend.shared.config import config, validate_config
@@ -84,10 +82,10 @@ async def lifespan(app: FastAPI):
     # would be dead work.
     if config.connectors_active:
         try:
-            from backend.connectors.registry import register_connector
             from backend.connectors.ci import CIConnector
             from backend.connectors.feishu import FeishuConnector
             from backend.connectors.pingcode import PingCodeConnector
+            from backend.connectors.registry import register_connector
 
             _pingcode_secret = os.getenv("WEBHOOK_PINGCODE_SECRET", "")
             register_connector(
@@ -349,13 +347,13 @@ async def health_check() -> JSONResponse:
         db_ok = False
         logging.getLogger(__name__).warning("Health check: database unreachable")
 
-    from backend.shared.resilience import get_circuit_breaker
+    from backend.service.embedding_service import embedding_breaker_name
 
     # The provider classes key their circuit breaker per endpoint|model (see
     # ``primary_breaker_name``), so the health probe reads the *same* breaker
     # the primary provider guards with.
     from backend.service.llm_service import primary_breaker_name
-    from backend.service.embedding_service import embedding_breaker_name
+    from backend.shared.resilience import get_circuit_breaker
 
     llm_breaker = get_circuit_breaker(primary_breaker_name())
     # Local BGE embeddings make no remote calls and have no breaker; only the

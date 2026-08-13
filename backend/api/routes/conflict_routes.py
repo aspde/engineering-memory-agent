@@ -76,7 +76,9 @@ async def resolve_conflict(
             detail=f"Unknown resolution: {req.resolution} — expected one of {sorted(_RESOLUTIONS)}",
         )
     try:
-        return await resolve_pending_conflict(conflict_id, req.resolution)
+        return ConflictResolveResponse(
+            **await resolve_pending_conflict(conflict_id, req.resolution)
+        )
     except ValueError as exc:  # not found / already resolved
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
@@ -99,7 +101,7 @@ async def reopen_conflict(conflict_id: str) -> ConflictReopenResponse:
     since been deleted or the row is not a resolved patrol conflict.
     """
     try:
-        return await reopen_patrol_conflict(conflict_id)
+        return ConflictReopenResponse(**await reopen_patrol_conflict(conflict_id))
     except ConflictNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:

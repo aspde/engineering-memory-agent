@@ -22,7 +22,6 @@ import logging
 from typing import Any
 
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 
 from backend.db import get_session_factory
 from backend.service.memory import resolve_conflict

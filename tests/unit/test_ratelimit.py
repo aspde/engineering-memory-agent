@@ -8,8 +8,6 @@ requests, tier selection, test-env bypass) is covered in
 
 from __future__ import annotations
 
-import pytest
-
 from backend.api.ratelimit import RateLimiter
 
 

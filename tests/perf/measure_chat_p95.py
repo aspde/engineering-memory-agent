@@ -133,7 +133,9 @@ async def main(turns: int) -> None:
             # Warm the embedding model (lifespan already does, but a second
             # pass is cheap and guards against lazy first-request load).
             try:
-                from backend.service.embedding_service import get_embedding_provider_async
+                from backend.service.embedding_service import (
+                    get_embedding_provider_async,
+                )
                 await get_embedding_provider_async()
             except Exception:
                 pass

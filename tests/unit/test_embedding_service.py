@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -321,14 +321,13 @@ class TestOpenAIBreakerIsolation:
     async def test_primary_breaker_open_does_not_block_fallback(
         self, monkeypatch,
     ) -> None:
-        from backend.shared.config import config
-        from backend.shared.resilience import get_circuit_breaker
-        from tests.support.process_state import reset_circuit_breakers
-
         from backend.service.embedding_service import (
             FallbackEmbeddingProvider,
             OpenAIEmbeddingProvider,
         )
+        from backend.shared.config import config
+        from backend.shared.resilience import get_circuit_breaker
+        from tests.support.process_state import reset_circuit_breakers
 
         try:
             primary = OpenAIEmbeddingProvider(
@@ -480,8 +479,8 @@ class TestEmbeddingProviderLoadingPath:
 class TestSemaphoreCancellationSafety:
     @pytest.mark.asyncio
     async def test_cancellation_does_not_leak_semaphore_permit(self) -> None:
-        import time
         import threading
+        import time
 
         import backend.service.embedding_service as mod
 
@@ -503,7 +502,7 @@ class TestSemaphoreCancellationSafety:
                 self.releases += 1
                 self._inner.release()
 
-            def __enter__(self) -> "_SlowSemaphore":
+            def __enter__(self) -> _SlowSemaphore:
                 self.acquire()
                 return self
 

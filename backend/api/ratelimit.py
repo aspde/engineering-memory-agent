@@ -60,7 +60,7 @@ def _tier_for_path(path: str) -> str:
 
 
 class _Bucket:
-    __slots__ = ("tokens", "rate", "last_refill", "last_access")
+    __slots__ = ("last_access", "last_refill", "rate", "tokens")
 
     def __init__(self, capacity: float, rate: float, now: float) -> None:
         self.tokens = capacity

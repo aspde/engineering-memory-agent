@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from tests.support.process_state import reset_rate_limits
 from backend.shared.config import config
+from tests.support.process_state import reset_rate_limits
 
 
 @pytest.fixture(autouse=True)

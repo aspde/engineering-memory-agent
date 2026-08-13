@@ -9,8 +9,8 @@ from backend.connectors.registry import (
 )
 
 __all__ = [
-    "Connector",
     "CONNECTOR_REGISTRY",
+    "Connector",
     "get_connector",
     "list_connectors",
     "register_connector",

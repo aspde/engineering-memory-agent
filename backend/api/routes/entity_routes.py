@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy import text
 
 from backend.db import get_session_factory
@@ -113,6 +113,22 @@ async def _get_entity_profile(entity_id: str) -> dict[str, Any] | None:
         return profile
 
 
+def _to_entity_profile(profile: dict[str, Any]) -> EntityProfile:
+    """Build the response model from ``_get_entity_profile``'s raw row."""
+    return EntityProfile(
+        id=str(profile["id"]),
+        name=str(profile["name"]),
+        canonical_name=str(profile["canonical_name"]),
+        type=str(profile["type"]),
+        memory_count=profile["memory_count"],
+        source_breakdown=[
+            SourceBreakdown(source_type=s["source_type"], count=s["count"])
+            for s in profile["source_breakdown"]
+        ],
+        first_seen_at=profile["first_seen_at"].isoformat() if profile["first_seen_at"] else "",
+    )
+
+
 def _dominant_relation_type(
     relation_types: list[str],
 ) -> str:
@@ -182,18 +198,7 @@ async def get_entity(entity_id: str) -> EntityProfile:
     if profile is None:
         raise HTTPException(status_code=404, detail="Entity not found")
 
-    return EntityProfile(
-        id=str(profile["id"]),
-        name=str(profile["name"]),
-        canonical_name=str(profile["canonical_name"]),
-        type=str(profile["type"]),
-        memory_count=profile["memory_count"],
-        source_breakdown=[
-            SourceBreakdown(source_type=s["source_type"], count=s["count"])
-            for s in profile["source_breakdown"]
-        ],
-        first_seen_at=profile["first_seen_at"].isoformat() if profile["first_seen_at"] else "",
-    )
+    return _to_entity_profile(profile)
 
 
 @router.get("/{entity_id}/relations", response_model=EntityRelationsResponse)
@@ -301,20 +306,7 @@ async def get_entity_relations(entity_id: str) -> EntityRelationsResponse:
             )
 
     return EntityRelationsResponse(
-        entity=EntityProfile(
-            id=str(profile["id"]),
-            name=str(profile["name"]),
-            canonical_name=str(profile["canonical_name"]),
-            type=str(profile["type"]),
-            memory_count=profile["memory_count"],
-            source_breakdown=[
-                SourceBreakdown(source_type=s["source_type"], count=s["count"])
-                for s in profile["source_breakdown"]
-            ],
-            first_seen_at=profile["first_seen_at"].isoformat()
-            if profile["first_seen_at"]
-            else "",
-        ),
+        entity=_to_entity_profile(profile),
         related_entities=related_entities,
         recent_memories=recent_memories,
     )

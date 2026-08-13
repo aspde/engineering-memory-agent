@@ -13,8 +13,8 @@ from backend.service.usage import (
     flush_usage_buffer,
     record_call,
 )
-from tests.support.process_state import reset_usage_buffer
 from backend.shared.config import current_thread_id, current_trace_id
+from tests.support.process_state import reset_usage_buffer
 
 
 @pytest.fixture(autouse=True)

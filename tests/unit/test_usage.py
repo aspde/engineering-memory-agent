@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -948,8 +949,8 @@ class TestProviderInstrumentation:
         from backend.service.llm_service import AnthropicProvider
 
         class _ToolUseBlock:
-            type = "tool_use"
-            input = {"result": {"ok": True}}
+            type: ClassVar[str] = "tool_use"
+            input: ClassVar[dict] = {"result": {"ok": True}}
 
         class _FakeMessages:
             async def create(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -959,7 +960,7 @@ class TestProviderInstrumentation:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)

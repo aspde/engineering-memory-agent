@@ -10,7 +10,6 @@ from backend.connectors.registry import (
     register_connector,
 )
 
-
 # ── Minimal concrete connector for testing ────────────────────────────
 
 

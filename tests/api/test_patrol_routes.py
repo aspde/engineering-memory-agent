@@ -5,11 +5,12 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 from sqlalchemy import text
 
 from backend.db import get_session_factory
@@ -34,7 +35,7 @@ def _mock_session_row(
     completed_at=None,
 ):
     """Create a mock Row object."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     row = MagicMock()
     row.id = id
@@ -43,7 +44,7 @@ def _mock_session_row(
     row.status = status
     row.findings = findings
     row.dismissed_findings = dismissed_findings
-    row.started_at = started_at or datetime.now(timezone.utc)
+    row.started_at = started_at or datetime.now(UTC)
     row.completed_at = completed_at
     return row
 

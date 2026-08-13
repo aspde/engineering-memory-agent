@@ -33,12 +33,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from backend.connectors.registry import get_connector, list_connectors
 from backend.db import get_session_factory
 from backend.service.conflicts import persist_pending_conflict
 from backend.shared.config import config, current_trace_id
-from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +294,7 @@ async def receive_webhook(source: str, request: Request) -> WebhookResponse:
     try:
         body = await request.body()
     except Exception:
-        raise HTTPException(status_code=400, detail="Unable to read request body")
+        raise HTTPException(status_code=400, detail="Unable to read request body") from None
 
     # 2. Verify signature
     if not _verify_signature(source, body, request):
@@ -314,7 +314,7 @@ async def receive_webhook(source: str, request: Request) -> WebhookResponse:
         payload: dict[str, Any] = await request.json()
     except Exception:
         await _log_delivery(source, None, "failed", "", error="Invalid JSON body")
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from None
 
     # 5. Determine event_type (connector-specific — look for common keys)
     event_type: str | None = None

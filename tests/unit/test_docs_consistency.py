@@ -10,7 +10,6 @@ import re
 from pathlib import Path
 from typing import NamedTuple
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DOCS_DIR = PROJECT_ROOT / "docs"
 
@@ -138,7 +137,7 @@ def test_agent_api_route_declared() -> None:
 
     router_text = router.read_text(encoding="utf-8")
     if "agent_routes" not in router_text or "agent_router" not in router_text:
-        assert False, "docs claim /api/agent/chat but router does not register agent routes"
+        raise AssertionError("docs claim /api/agent/chat but router does not register agent routes")
 
 
 def test_pyproject_config_consistent() -> None:
@@ -147,7 +146,7 @@ def test_pyproject_config_consistent() -> None:
     if not pyproject.exists():
         return
 
-    pyproject_text = pyproject.read_text()
+    pyproject_text = pyproject.read_text(encoding="utf-8")
     architecture_text = _read_doc("architecture.md")
 
     m = re.search(r"requires-python.*?3\.(\d+)", pyproject_text, re.IGNORECASE)
@@ -158,7 +157,7 @@ def test_pyproject_config_consistent() -> None:
     if f"Python {expected}" in architecture_text or f"python {expected}" in architecture_text.lower():
         return
 
-    assert False, f"docs/architecture.md claims Python version but pyproject.toml requires {expected}"
+    raise AssertionError(f"docs/architecture.md claims Python version but pyproject.toml requires {expected}")
 
 
 def test_no_deleted_docs_referenced() -> None:

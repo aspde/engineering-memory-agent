@@ -257,7 +257,7 @@ async def _detect_conflict(existing: dict, extracted: dict) -> bool:
         json_schema=_CONFLICT_SCHEMA,
         scenario="conflict_detection",
     )
-    return bool(data.get("conflict", False))
+    return bool(data.get("conflict", False)) if isinstance(data, dict) else False
 
 
 _CONFLICT_SCHEMA = {
@@ -573,6 +573,10 @@ async def _insert_memory(extracted, embedding, source_type, metadata, content_ha
             # Lost a race to a concurrent identical write — the unique index
             # rejected our row.  Re-fetch and report the stored one.
             winner = await _find_by_content_hash(content_hash, session_factory)
+            if winner is None:
+                raise RuntimeError(
+                    f"Concurrent duplicate insert but hash not found: {content_hash[:12]}"
+                )
             logger.info("Concurrent duplicate insert for hash %s — reusing existing", content_hash[:12])
             return {
                 "id": str(winner["id"]),
@@ -622,6 +626,8 @@ async def _write_resolved_memory(
     Returns ``None`` on success, or the winner dict when the content-hash
     race was lost.
     """
+    if content_hash is None:
+        raise ValueError("content_hash required to resolve a conflict")
     try:
         async with session_factory() as session:
             if peer_id:

@@ -103,12 +103,12 @@ class TestCrossEncoderFirstLoad:
 
         offloaded: list = []
 
-        async def fake_to_thread(fn, *args, **kwargs):  # noqa: ANN001, ANN003, ANN002
+        async def fake_to_thread(fn, *args, **kwargs):
             offloaded.append(fn)
             return fn(*args, **kwargs)
 
         class FakeModel:
-            def predict(self, pairs):  # noqa: ANN001
+            def predict(self, pairs):
                 return [0.9, 0.1]
 
         monkeypatch.setattr(mod.asyncio, "to_thread", fake_to_thread)

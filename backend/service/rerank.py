@@ -28,9 +28,11 @@ def _parse_score(raw: str) -> float:
         score = float(raw.strip())
     except (ValueError, TypeError):
         match = _NUMBER_RE.search(raw)
+        if match is None:
+            return 0.0
         try:
             score = float(match.group())
-        except (AttributeError, ValueError, TypeError):
+        except (ValueError, TypeError):
             return 0.0
     return max(0.0, min(1.0, score))
 

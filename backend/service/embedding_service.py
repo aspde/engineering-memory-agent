@@ -17,9 +17,9 @@ from typing import Any
 for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
     os.environ[_k] = _v  # force-override — setdefault may leave stale values
 
-from backend.model.embedding import EmbeddingProvider  # noqa: E402
-from backend.shared.config import EMBEDDING_DIMENSIONS, config  # noqa: E402
-from backend.shared.resilience import (  # noqa: E402
+from backend.model.embedding import EmbeddingProvider
+from backend.shared.config import EMBEDDING_DIMENSIONS, config
+from backend.shared.resilience import (
     call_with_resilience,
     call_with_resilience_sync,
 )
@@ -80,9 +80,8 @@ class BGEEmbeddingProvider(EmbeddingProvider):
         max_concurrency: int | None = None,
         torch_threads: int | None = None,
     ) -> None:
-        from sentence_transformers import SentenceTransformer
-
         import torch
+        from sentence_transformers import SentenceTransformer
 
         os.environ.setdefault("HF_ENDPOINT", hf_endpoint)
 
@@ -156,8 +155,8 @@ class BGEEmbeddingProvider(EmbeddingProvider):
     def dimension(self) -> int:
         # sentence-transformers renamed this method in v4; fall back for compat.
         if hasattr(self._model, "get_embedding_dimension"):
-            return self._model.get_embedding_dimension()
-        return self._model.get_sentence_embedding_dimension()
+            return self._model.get_embedding_dimension()  # type: ignore[operator]
+        return self._model.get_sentence_embedding_dimension()  # type: ignore[return-value]
 
 
 class OpenAIEmbeddingProvider(EmbeddingProvider):

@@ -14,7 +14,6 @@ from fastapi import HTTPException
 
 from backend.api.auth import require_api_key
 
-
 # ── Dependency-level (unit) ──────────────────────────────────────────
 
 

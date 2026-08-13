@@ -311,9 +311,8 @@ class TestCompactionThroughNodes:
 
     @pytest.mark.asyncio
     async def test_call_llm_sends_summary_when_enabled(self, monkeypatch) -> None:
-        from tests._fake_llm import content_stream, sequential_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import content_stream, sequential_stream
 
         _set_compaction(monkeypatch, True)
         _set_budget(monkeypatch, 60)
@@ -336,9 +335,8 @@ class TestCompactionThroughNodes:
 
     @pytest.mark.asyncio
     async def test_generate_final_folds_summary_into_context(self, monkeypatch) -> None:
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         _set_compaction(monkeypatch, True)
         _set_budget(monkeypatch, 60)
@@ -366,9 +364,8 @@ class TestCompactionThroughNodes:
 
     @pytest.mark.asyncio
     async def test_generate_final_no_summary_when_disabled(self, monkeypatch) -> None:
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         _set_compaction(monkeypatch, False)
         mock_provider = AsyncMock()
@@ -452,9 +449,8 @@ class TestCompactionSingleSystem:
     @pytest.mark.asyncio
     async def test_call_llm_emits_single_system_with_summary(self, monkeypatch) -> None:
         """OpenAI-compatible wire shape: exactly one system message, summary folded in."""
-        from tests._fake_llm import content_stream, sequential_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import content_stream, sequential_stream
 
         _set_compaction(monkeypatch, True)
         _set_budget(monkeypatch, 60)
@@ -479,9 +475,8 @@ class TestCompactionSingleSystem:
     @pytest.mark.asyncio
     async def test_anthropic_conversion_sees_single_system(self, monkeypatch) -> None:
         """Anthropic's split/conversion must not emit a second role=system message."""
-        from tests._fake_llm import content_stream, sequential_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import content_stream, sequential_stream
 
         _set_compaction(monkeypatch, True)
         _set_budget(monkeypatch, 60)

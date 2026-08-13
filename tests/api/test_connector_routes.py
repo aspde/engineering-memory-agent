@@ -1,6 +1,5 @@
 """Tests for connector management API — GET /api/connectors and GET /api/connectors/{source}/logs."""
 
-import json
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -14,7 +13,6 @@ from backend.connectors.registry import (
 from backend.db import get_session_factory
 from backend.db.schema import init_db
 from backend.main import app
-
 
 # ── Test connector ────────────────────────────────────────────────────
 

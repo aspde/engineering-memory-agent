@@ -47,7 +47,7 @@ class LLMProvider(ABC):
 
     async def chat_raw_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         **kwargs,
     ) -> AsyncIterator[dict[str, Any]]:
@@ -70,7 +70,7 @@ class LLMProvider(ABC):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream the response text token-by-token.

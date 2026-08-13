@@ -130,7 +130,10 @@ async def normalize_entities(
                         },
                     )
                     await session.commit()
-                    entity_id = str(result.fetchone()[0])
+                    row = result.fetchone()
+                    if row is None:
+                        raise RuntimeError("INSERT RETURNING id returned no row")
+                    entity_id = str(row[0])
                 logger.info("Created new entity '%s' (%s)", name, entity_id)
 
             # 5. Link memory → entity
@@ -181,7 +184,7 @@ async def _llm_confirm_match(
         json_schema=_MATCH_SCHEMA,
         scenario="entity_normalization",
     )
-    return bool(data.get("match", False))
+    return bool(data.get("match", False)) if isinstance(data, dict) else False
 
 
 _MATCH_SCHEMA = {

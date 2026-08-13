@@ -242,7 +242,7 @@ async def call_with_resilience(
     breaker.before_call()
     retrier = AsyncRetrying(**_retry_kwargs())
     try:
-        result = await retrier(operation)
+        result: Any = await retrier(operation)
     except Exception as exc:
         if is_retryable(exc):
             breaker.record_failure()
@@ -307,7 +307,7 @@ async def resilient_stream_guard(name: str, connect: Callable[[], Awaitable[T]])
     breaker.before_call()
     retrier = AsyncRetrying(**_retry_kwargs())
     try:
-        stream = await retrier(connect)
+        stream: Any = await retrier(connect)
     except Exception as exc:
         if is_retryable(exc):
             breaker.record_failure()

@@ -872,7 +872,7 @@ async def query_memories(
         else:
             # Drop results where the reranker score is below the minimum threshold —
             # this prevents irrelevant results from appearing when no real match exists.
-            surviving: list[tuple[int, float]] = [
+            surviving = [
                 (idx, score) for idx, score in ranked if score >= _RERANK_FLOOR
             ]
     else:

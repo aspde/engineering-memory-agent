@@ -1,12 +1,14 @@
 """Integration tests for LLM service — requires valid API key."""
 
+import os
+
 import pytest
 
 from backend.model.llm import LLMProvider
 
 
 @pytest.mark.skipif(
-    condition=True,
+    condition=os.getenv("REAL_LLM_TEST") != "1",
     reason="Set REAL_LLM_TEST=1 to run against the configured LLM provider.",
 )
 class TestRealLLMProvider:

@@ -393,7 +393,7 @@ async def _purge_expired_samples() -> int:
             {"days": config.usage_sample_retention_days},
         )
         await session.commit()
-        return result.rowcount or 0
+        return result.rowcount or 0  # type: ignore[attr-defined]
 
 
 async def usage_flusher_loop() -> None:

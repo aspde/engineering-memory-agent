@@ -1,14 +1,14 @@
 """Unit tests for LLM service."""
 
-from collections.abc import AsyncIterator
 from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from backend.model.llm import LLMProvider
-from backend.shared.metrics import pop_scenario
 from backend.service.usage import pending_rows
+from backend.shared.metrics import pop_scenario
 from tests.support.process_state import reset_circuit_breakers, reset_usage_buffer
 
 
@@ -272,7 +272,7 @@ class TestOpenAICompatibleChatRaw:
     instead of crashing the call, mirroring the streaming path."""
 
     @staticmethod
-    def _make_provider(messages_with_tool_calls: list) -> "OpenAICompatibleProvider":
+    def _make_provider(messages_with_tool_calls: list):
         from backend.service.llm_service import OpenAICompatibleProvider
 
         provider = OpenAICompatibleProvider(
@@ -347,7 +347,7 @@ class TestAnthropicChatJson:
 
         class _ToolUseBlock:
             type = "tool_use"
-            input = {"result": [{"from": "a", "to": "b", "type": "depends_on"}]}
+            input: ClassVar[dict] = {"result": [{"from": "a", "to": "b", "type": "depends_on"}]}
 
         class _FakeMessages:
             async def create(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -358,7 +358,7 @@ class TestAnthropicChatJson:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -398,7 +398,7 @@ class TestAnthropicChatJson:
 
         class _ToolUseBlock:
             type = "tool_use"
-            input = {"result": {"ok": True}}
+            input: ClassVar[dict] = {"result": {"ok": True}}
 
         class _FakeMessages:
             async def create(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -409,7 +409,7 @@ class TestAnthropicChatJson:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -474,7 +474,7 @@ class TestAnthropicChatRaw:
             type = "tool_use"
             id = "toolu_1"
             name = "search_memories_tool"
-            input = {"query": "pgvector"}
+            input: ClassVar[dict] = {"query": "pgvector"}
 
         class _FakeMessages:
             async def create(self, **kwargs):  # type: ignore[no-untyped-def]
@@ -485,7 +485,7 @@ class TestAnthropicChatRaw:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -596,7 +596,7 @@ class TestAnthropicChatRaw:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -660,7 +660,7 @@ class TestAnthropicChatRaw:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -707,7 +707,7 @@ class TestAnthropicPromptCaching:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -772,7 +772,7 @@ class TestAnthropicPromptCaching:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -805,7 +805,7 @@ class TestAnthropicPromptCaching:
                 return resp
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 self.messages = _FakeMessages()
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -1132,11 +1132,11 @@ class TestSdkRetryDisabled:
         captured: dict = {}
 
         class _FakeAsyncOpenAI:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 captured["async"] = kwargs
 
         class _FakeOpenAI:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 captured["sync"] = kwargs
 
         monkeypatch.setattr(openai, "AsyncOpenAI", _FakeAsyncOpenAI)
@@ -1154,11 +1154,11 @@ class TestSdkRetryDisabled:
         captured: dict = {}
 
         class _FakeAsyncAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 captured["async"] = kwargs
 
         class _FakeAnthropic:
-            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+            def __init__(self, *args, **kwargs) -> None:
                 captured["sync"] = kwargs
 
         monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
@@ -1247,7 +1247,7 @@ class TestAttemptAccounting:
         )
         provider._async_client = mock_client  # type: ignore[assignment]
 
-        with pytest.raises(Exception):
+        with pytest.raises(self._RateLimit):
             await provider.chat(
                 [{"role": "user", "content": "hi"}], scenario="agent_chat"
             )

@@ -4,7 +4,6 @@ import pytest
 
 from backend.connectors.ci import CIConnector
 
-
 # ── Sample payloads ───────────────────────────────────────────────────
 
 

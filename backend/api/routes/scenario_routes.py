@@ -12,13 +12,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.shared.config import config
 from backend.service.scenarios import (
     SCENARIOS,
     _release_scenario_slot,
     _try_acquire_scenario_slot,
     visible_scenarios,
 )
+from backend.shared.config import config
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ async def list_scenarios():
 
 
 @router.post("/{name}/run", response_model=ScenarioRunResponse)
-async def run_scenario(name: str, body: ScenarioRunRequest = ScenarioRunRequest()):
+async def run_scenario(name: str, body: ScenarioRunRequest | None = None):
     """Trigger a scenario by name with optional *params*.
 
     The scenario's compose function is dynamically imported and called.
@@ -75,6 +75,8 @@ async def run_scenario(name: str, body: ScenarioRunRequest = ScenarioRunRequest(
     the scenario-run concurrency cap is reached, 504 if the run exceeds its
     deadline, 422 on invalid parameters, and 500 on failure.
     """
+    if body is None:
+        body = ScenarioRunRequest()
     scenario = SCENARIOS.get(name)
     if scenario is None:
         raise HTTPException(status_code=404, detail=f"Scenario '{name}' not found")

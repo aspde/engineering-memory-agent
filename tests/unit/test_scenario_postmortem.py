@@ -102,7 +102,7 @@ class TestComposePostmortemInvocation:
             "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
-            result = await compose_postmortem(
+            await compose_postmortem(
                 incident_memory_id="abc-123-def"
             )
 
@@ -127,7 +127,7 @@ class TestComposePostmortemInvocation:
             "backend.service.agent_service.get_agent",
             return_value=mock_agent,
         ):
-            result = await compose_postmortem()
+            await compose_postmortem()
 
         call_args = mock_agent.ainvoke.call_args
         messages = call_args[0][0]["messages"]

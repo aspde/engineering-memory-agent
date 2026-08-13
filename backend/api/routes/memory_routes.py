@@ -61,11 +61,6 @@ class MemoryWriteResponse(BaseModel):
     existing_id: str | None = None
 
 
-class MemorySearchRequest(BaseModel):
-    query: str
-    top_k: int = Field(default=5, ge=1, le=50)
-
-
 class MemorySearchResponse(BaseModel):
     results: list[dict[str, Any]]
 
@@ -186,7 +181,7 @@ async def memory_write(req: MemoryWriteRequest) -> MemoryWriteResponse:
 
 
 @router.post("/memories/search", response_model=MemorySearchResponse)
-async def memory_search(req: MemorySearchRequest) -> MemorySearchResponse:
+async def memory_search(req: SearchRequest) -> MemorySearchResponse:
     """Search structured memories ranked by semantic similarity.
 
     Recalls are recorded for every surfaced memory (recall_count /
@@ -284,13 +279,13 @@ async def memory_stats() -> MemoryStatsResponse:
     async with session_factory() as session:
         # ── Core counts ──
         r = await session.execute(text("SELECT COUNT(*) FROM memories WHERE deleted_at IS NULL"))
-        total_memories = r.fetchone()[0]
+        total_memories = r.one()[0]
 
         r = await session.execute(text("SELECT COUNT(*) FROM chunks"))
-        total_chunks = r.fetchone()[0]
+        total_chunks = r.one()[0]
 
         r = await session.execute(text("SELECT COUNT(*) FROM conversations"))
-        total_conversations = r.fetchone()[0]
+        total_conversations = r.one()[0]
 
         # ── Source type distribution ──
         r = await session.execute(text(
@@ -305,7 +300,7 @@ async def memory_stats() -> MemoryStatsResponse:
         r = await session.execute(text(
             "SELECT COALESCE(AVG(recall_count), 0) FROM memories WHERE deleted_at IS NULL"
         ))
-        avg_recall_count = round(float(r.fetchone()[0]), 4)
+        avg_recall_count = round(float(r.one()[0]), 4)
 
         r = await session.execute(text(
             "SELECT COALESCE(AVG("
@@ -313,7 +308,7 @@ async def memory_stats() -> MemoryStatsResponse:
             "       THEN jsonb_array_length(entities) ELSE 0 END"
             "), 0) FROM memories WHERE deleted_at IS NULL"
         ))
-        avg_entities_per_memory = round(float(r.fetchone()[0]), 2)
+        avg_entities_per_memory = round(float(r.one()[0]), 2)
 
         r = await session.execute(text(
             "SELECT COALESCE(AVG("
@@ -321,14 +316,14 @@ async def memory_stats() -> MemoryStatsResponse:
             "       THEN jsonb_array_length(relations) ELSE 0 END"
             "), 0) FROM memories WHERE deleted_at IS NULL"
         ))
-        avg_relations_per_memory = round(float(r.fetchone()[0]), 2)
+        avg_relations_per_memory = round(float(r.one()[0]), 2)
 
         # ── Recent 7-day count ──
         r = await session.execute(text(
             "SELECT COUNT(*) FROM memories "
             "WHERE deleted_at IS NULL AND created_at >= NOW() - INTERVAL '7 days'"
         ))
-        recent_count_7d = r.fetchone()[0]
+        recent_count_7d = r.one()[0]
 
         # ── Top 10 entities (skip null / non-array rows defensively) ──
         r = await session.execute(text(
@@ -354,18 +349,18 @@ async def memory_stats() -> MemoryStatsResponse:
                 "LEFT JOIN memory_entities me ON me.memory_id = m.id "
                 "WHERE m.deleted_at IS NULL"
             ))
-            coverage_ratio = round(float(r.fetchone()[0]), 4)
+            coverage_ratio = round(float(r.one()[0]), 4)
 
             # total_entities
             r = await session.execute(text("SELECT COUNT(*) FROM entities"))
-            total_entities = r.fetchone()[0]
+            total_entities = r.one()[0]
 
             # growth_rate_7d: new entities in past 7 days / total entities
             r = await session.execute(text(
                 "SELECT COUNT(*) FROM entities "
                 "WHERE first_seen_at >= NOW() - INTERVAL '7 days'"
             ))
-            new_7d = r.fetchone()[0]
+            new_7d = r.one()[0]
             growth_rate_7d = round(
                 new_7d / total_entities if total_entities > 0 else 0.0, 4
             )
@@ -378,7 +373,7 @@ async def memory_stats() -> MemoryStatsResponse:
                 "    / NULLIF(COUNT(DISTINCT me.memory_id), 0), 0) "
                 "FROM memory_entities me"
             ))
-            density = round(float(r.fetchone()[0]), 2)
+            density = round(float(r.one()[0]), 2)
 
             entity_graph = EntityGraphStats(
                 coverage_ratio=coverage_ratio,

@@ -27,7 +27,6 @@ from backend.shared.config import config
 from backend.shared.resilience import CircuitBreaker, CircuitOpenError, is_retryable
 from tests.support.process_state import reset_circuit_breakers
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
 
 

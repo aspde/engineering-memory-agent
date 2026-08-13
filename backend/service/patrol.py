@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.types import Command
@@ -171,7 +171,7 @@ async def run_patrol(
         of the same type was already in flight (the run was skipped).
     """
     patrol_id = patrol_id or str(uuid.uuid4())
-    started_at = datetime.now(timezone.utc)
+    started_at = datetime.now(UTC)
 
     # Build the user message for the agent
     user_message_parts = [
@@ -366,7 +366,7 @@ async def run_patrol(
         logger.warning("Patrol %s (%s) cancelled mid-run", patrol_id, patrol_type)
 
     # ── Update log entry with results ──
-    completed_at = datetime.now(timezone.utc)
+    completed_at = datetime.now(UTC)
     try:
         findings_json = json.dumps(findings) if findings else None
     except (TypeError, ValueError) as exc:
@@ -461,7 +461,7 @@ async def mark_stale_patrols_failed() -> int:
             ),
         )
         await session.commit()
-    count = result.rowcount or 0
+    count = result.rowcount or 0  # type: ignore[attr-defined]
     if count:
         logger.info("Marked %d stale patrol(s) as failed", count)
     return count

@@ -248,9 +248,8 @@ class TestPersistPatrolConflict:
         with patch(
             "backend.service.conflicts.get_session_factory",
             return_value=_make_session_factory(mock_session),
-        ):
-            with pytest.raises(ValueError, match="not found or already deleted"):
-                await persist_patrol_conflict("log-1", _patrol_finding())
+        ), pytest.raises(ValueError, match="not found or already deleted"):
+            await persist_patrol_conflict("log-1", _patrol_finding())
 
     @pytest.mark.asyncio
     async def test_missing_ids_raise(self) -> None:
@@ -431,11 +430,10 @@ class TestResolvePatrolConflict:
         with patch(
             "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
-        ):
-            with pytest.raises(ValueError, match="Surviving memory .* no longer exists"):
-                await resolve_conflict(
-                    "keep_existing", A_ID, _patrol_deferred(), peer_id=B_ID
-                )
+        ), pytest.raises(ValueError, match=r"Surviving memory .* no longer exists"):
+            await resolve_conflict(
+                "keep_existing", A_ID, _patrol_deferred(), peer_id=B_ID
+            )
         # B must not have been touched.
         assert mock_session.execute.await_count == 1
 
@@ -457,11 +455,10 @@ class TestResolvePatrolConflict:
         with patch(
             "backend.service.memory.get_session_factory",
             return_value=_make_session_factory(mock_session),
-        ):
-            with pytest.raises(ValueError, match="Surviving memory .* no longer exists"):
-                await resolve_conflict(
-                    "overwrite", A_ID, _patrol_deferred(), peer_id=B_ID
-                )
+        ), pytest.raises(ValueError, match=r"Surviving memory .* no longer exists"):
+            await resolve_conflict(
+                "overwrite", A_ID, _patrol_deferred(), peer_id=B_ID
+            )
 
     @pytest.mark.asyncio
     async def test_unknown_resolution_defaults_to_keep_existing(self) -> None:
@@ -709,9 +706,8 @@ class TestReopenPatrolConflict:
             return_value=_make_session_factory(
                 mock_session, side_effect=[select_result, survivor_result, peer_result]
             ),
-        ):
-            with pytest.raises(ValueError, match="Losing memory .* no longer exists"):
-                await reopen_patrol_conflict("c1")
+        ), pytest.raises(ValueError, match=r"Losing memory .* no longer exists"):
+            await reopen_patrol_conflict("c1")
 
     @pytest.mark.asyncio
     async def test_refuses_reopen_when_survivor_deleted(self) -> None:
@@ -734,6 +730,5 @@ class TestReopenPatrolConflict:
             return_value=_make_session_factory(
                 mock_session, side_effect=[select_result, survivor_result]
             ),
-        ):
-            with pytest.raises(ValueError, match="Surviving memory .* no longer exists"):
-                await reopen_patrol_conflict("c1")
+        ), pytest.raises(ValueError, match=r"Surviving memory .* no longer exists"):
+            await reopen_patrol_conflict("c1")

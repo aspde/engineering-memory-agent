@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from backend.model.llm import LLMProvider
+from backend.service.usage import begin_call, record_call
 from backend.shared.config import config
 from backend.shared.metrics import pop_scenario
 from backend.shared.resilience import (
@@ -18,7 +19,6 @@ from backend.shared.resilience import (
     is_retryable,
     resilient_stream_guard,
 )
-from backend.service.usage import begin_call, record_call
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +134,7 @@ class OpenAICompatibleProvider(LLMProvider):
         async def _op() -> Any:
             nonlocal attempts
             attempts += 1
-            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[call-overload]
 
         try:
             response = await call_with_resilience(self._breaker_name, _op)
@@ -247,7 +247,7 @@ class OpenAICompatibleProvider(LLMProvider):
             }
             if use_json_format:
                 create_kwargs["response_format"] = {"type": "json_object"}
-            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[call-overload]
 
         try:
             async with circuit_breaker_guard(self._breaker_name):
@@ -312,7 +312,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def chat_raw_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, object]] | None = None,
         **kwargs,
     ) -> AsyncIterator[dict[str, object]]:
@@ -352,7 +352,7 @@ class OpenAICompatibleProvider(LLMProvider):
         async def _op() -> Any:
             nonlocal attempts
             attempts += 1
-            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[arg-type]
+            return await self._async_client.chat.completions.create(**create_kwargs)  # type: ignore[call-overload]
 
         content_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, str]] = {}
@@ -422,7 +422,7 @@ class OpenAICompatibleProvider(LLMProvider):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream response text token-by-token (no tools)."""
@@ -523,7 +523,7 @@ class AnthropicProvider(LLMProvider):
             attempts += 1
             return await self._async_client.messages.create(
                 model=self._model,
-                system=self._maybe_cache_system(system),
+                system=self._maybe_cache_system(system),  # type: ignore[arg-type]
                 messages=user_messages,  # type: ignore[arg-type]
                 **kwargs,
             )
@@ -570,7 +570,7 @@ class AnthropicProvider(LLMProvider):
         async def _op() -> Any:
             nonlocal attempts
             attempts += 1
-            return await self._async_client.messages.create(**create_kwargs)  # type: ignore[arg-type]
+            return await self._async_client.messages.create(**create_kwargs)  # type: ignore[call-overload]
 
         try:
             response = await call_with_resilience(self._breaker_name, _op)
@@ -623,7 +623,7 @@ class AnthropicProvider(LLMProvider):
             attempts += 1
             return self._sync_client.messages.create(
                 model=self._model,
-                system=self._maybe_cache_system(system),
+                system=self._maybe_cache_system(system),  # type: ignore[arg-type]
                 messages=user_messages,  # type: ignore[arg-type]
                 **kwargs,
             )
@@ -691,9 +691,9 @@ class AnthropicProvider(LLMProvider):
                     },
                 }
             ]
-            return await self._async_client.messages.create(
+            return await self._async_client.messages.create(  # type: ignore[call-overload]
                 model=self._model,
-                system=self._maybe_cache_system(system),
+                system=self._maybe_cache_system(system),  # type: ignore[arg-type]
                 messages=self._to_anthropic_messages(user_messages),  # type: ignore[arg-type]
                 tools=self._maybe_cache_tools(self._to_anthropic_tools(emit_tool)),
                 tool_choice={"type": "tool", "name": "emit_json"},
@@ -728,7 +728,7 @@ class AnthropicProvider(LLMProvider):
 
     async def chat_raw_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, object]] | None = None,
         **kwargs,
     ) -> AsyncIterator[dict[str, object]]:
@@ -773,8 +773,8 @@ class AnthropicProvider(LLMProvider):
                             block = event.content_block
                             if getattr(block, "type", "") == "tool_use":
                                 tool_buf[event.index] = {
-                                    "id": block.id,
-                                    "name": block.name,
+                                    "id": getattr(block, "id", ""),
+                                    "name": getattr(block, "name", ""),
                                     "input_parts": [],
                                 }
                         elif event.type == "content_block_delta":
@@ -823,7 +823,7 @@ class AnthropicProvider(LLMProvider):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         **kwargs,
     ) -> AsyncIterator[str]:
         """Stream response text token-by-token (no tools)."""
@@ -1073,7 +1073,7 @@ class FallbackLLMProvider(LLMProvider):
 
     async def chat_raw_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         tools: list[dict[str, object]] | None = None,
         **kwargs,
     ) -> AsyncIterator[dict[str, object]]:
@@ -1101,7 +1101,7 @@ class FallbackLLMProvider(LLMProvider):
 
     async def chat_stream(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         **kwargs,
     ) -> AsyncIterator[str]:
         async for event in self.chat_raw_stream(messages, **kwargs):

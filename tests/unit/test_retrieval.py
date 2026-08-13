@@ -631,8 +631,8 @@ class TestQueryMemoriesRecall:
         }
 
     def _patch(self, monkeypatch, candidates, ranked, recall_raises=False):
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1]])
@@ -662,8 +662,8 @@ class TestQueryMemoriesRecall:
         sequential commits (the N+1 fix).  Exercises the explicit cross-encoder
         path: the reranker ranks, floor passes both, then recalls are recorded
         in one batch."""
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         cands = [self._candidate("m1"), self._candidate("m2", 0.5)]
         self._patch(
@@ -683,8 +683,8 @@ class TestQueryMemoriesRecall:
         raise) — candidates rank by raw similarity and the batch recall write
         still runs.  Regression guard for the eval finding that the 568M
         reranker costs ~90x latency without recall gain."""
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
@@ -796,8 +796,8 @@ class TestQueryMemoriesRecall:
         """An LLM rerank channel failure must not empty memory search —
         candidates fall back to the similarity ranking, and the recall batch
         still records them."""
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
@@ -819,8 +819,8 @@ class TestQueryMemoriesRecall:
         """Same honesty on the memory path: an all-below-floor LLM verdict is
         kept as an empty result, not silently replaced by the similarity
         ranking — and no recall is recorded for an empty result."""
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.5)])
@@ -841,8 +841,8 @@ class TestQueryMemoriesRecall:
         """query_memories must embed through ``embed_query``'s LRU cache — a
         repeat query (SSE reconnect / re-ask / eval re-run) skips the provider
         after the first call."""
-        from backend.service import retrieval as mod
         from backend.service import recall as recall_mod
+        from backend.service import retrieval as mod
 
         clear_embed_query_cache()
         provider = MagicMock()

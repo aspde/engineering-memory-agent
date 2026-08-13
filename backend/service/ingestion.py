@@ -91,7 +91,7 @@ async def ingest_repo(
     head = _resolve_head(repo, branch)
 
     results: list[dict[str, Any]] = []
-    walker = repo.walk(head.id, pygit2.GIT_SORT_TIME | pygit2.GIT_SORT_TOPOLOGICAL)
+    walker = repo.walk(head.id, pygit2.GIT_SORT_TIME | pygit2.GIT_SORT_TOPOLOGICAL)  # type: ignore[arg-type]
 
     for i, commit in enumerate(walker):
         if i >= max_commits:
