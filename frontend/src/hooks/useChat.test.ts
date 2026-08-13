@@ -62,7 +62,7 @@ describe('useChat', () => {
 
       const { result } = renderHook(() => useChat());
 
-      let sendPromise: Promise<void>;
+      let sendPromise: Promise<unknown>;
       await act(async () => {
         sendPromise = result.current.sendMessage('hello');
       });
@@ -106,7 +106,7 @@ describe('useChat', () => {
 
       const { result } = renderHook(() => useChat());
 
-      let sendPromise: Promise<void>;
+      let sendPromise: Promise<unknown>;
       await act(async () => {
         sendPromise = result.current.sendMessage('hello');
       });
@@ -250,7 +250,7 @@ describe('useChat', () => {
       const toolCalls = [{ tool: 'search', content: 'x' }];
       const sources = [{ type: 'memory' as const, id: 'm1' }];
       (chatStream as unknown as Mock).mockReturnValue(
-        mockSSE([{ type: 'meta', tool_calls: toolCalls, sources }]),
+        mockSSE([{ type: 'meta', tool_calls: toolCalls, sources, memory_write: null }]),
       );
 
       const { result } = renderHook(() => useChat());
@@ -262,6 +262,40 @@ describe('useChat', () => {
         type: 'UPDATE_LAST_MESSAGE',
         meta: { toolCalls, sources },
       });
+    });
+
+    it('resolves the force-write outcome from a meta memory_write event', async () => {
+      (chatStream as unknown as Mock).mockReturnValue(
+        mockSSE([
+          { type: 'meta', tool_calls: [], sources: [], memory_write: { action: 'inserted', summary: '端口改为 8080' } },
+        ]),
+      );
+
+      const { result } = renderHook(() => useChat());
+      let outcome: unknown;
+      await act(async () => {
+        outcome = await result.current.sendMessage('记住：端口改为 8080', true);
+      });
+
+      expect(outcome).toEqual({ action: 'inserted', summary: '端口改为 8080' });
+    });
+
+    it('sends force_write on the chat request when forceWrite is set', async () => {
+      const { stream, resolve } = makeStream([]);
+      (chatStream as unknown as Mock).mockReturnValue(stream);
+
+      const { result } = renderHook(() => useChat());
+      await act(async () => {
+        result.current.sendMessage('记住这个决定', true);
+      });
+
+      expect(chatStream).toHaveBeenCalledWith({
+        message: '记住这个决定',
+        thread_id: 'test-thread',
+        force_write: true,
+      });
+
+      act(() => resolve());
     });
 
     it('adds a SEPARATE error message (not appended to the assistant body) when chatStream throws', async () => {
@@ -295,7 +329,7 @@ describe('useChat', () => {
       const abortSpy = vi.spyOn(AbortController.prototype, 'abort');
       const { result, rerender } = renderHook(() => useChat());
 
-      let p1: Promise<void>;
+      let p1: Promise<unknown>;
       await act(async () => {
         p1 = result.current.sendMessage('first');
       });
@@ -312,7 +346,7 @@ describe('useChat', () => {
       });
       abortSpy.mockClear(); // isolate sendMessage's own abort call
 
-      let p2: Promise<void>;
+      let p2: Promise<unknown>;
       await act(async () => {
         p2 = result.current.sendMessage('second');
       });
@@ -333,14 +367,14 @@ describe('useChat', () => {
 
       const { result } = renderHook(() => useChat());
 
-      let p1: Promise<void>;
+      let p1: Promise<unknown>;
       await act(async () => {
         p1 = result.current.sendMessage('first');
       });
 
       dispatch.mockClear();
 
-      let p2: Promise<void>;
+      let p2: Promise<unknown>;
       await act(async () => {
         p2 = result.current.sendMessage('second');
       });
@@ -362,7 +396,7 @@ describe('useChat', () => {
         mockSSE([
           { type: 'token', content: '记忆' },
           { type: 'token', content: '已写入。' },
-          { type: 'meta', tool_calls: [], sources: [{ type: 'memory', id: 'm1' }] },
+          { type: 'meta', tool_calls: [], sources: [{ type: 'memory', id: 'm1' }], memory_write: null },
           { type: 'done' },
         ]),
       );
@@ -506,7 +540,7 @@ describe('useChat', () => {
       const abortSpy = vi.spyOn(AbortController.prototype, 'abort');
       const { result, unmount } = renderHook(() => useChat());
 
-      let p: Promise<void>;
+      let p: Promise<unknown>;
       await act(async () => {
         p = result.current.sendMessage('hello');
       });

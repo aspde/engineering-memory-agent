@@ -217,9 +217,9 @@ class TestAutoMemorySubstance:
         assert len(user_content) > 200
 
         class _DownLLM:
-            async def chat(self, messages, **kwargs):  # noqa: ANN001, ANN003, ANN002
+            async def chat(self, messages, **kwargs):
                 raise RuntimeError("LLM down")
-            async def chat_json(self, messages, **kwargs):  # noqa: ANN001, ANN003, ANN002
+            async def chat_json(self, messages, **kwargs):
                 raise RuntimeError("LLM down")
 
         down = _DownLLM()
@@ -262,12 +262,17 @@ class TestAutoMemorySubstance:
 
 
 class TestAutoMemorySuppression:
-    """When the agent already wrote a memory this turn, auto memory stands down."""
+    """When the agent already wrote a memory this turn, auto memory stands down
+    — but only for a *successful* write.  A write that failed or was abandoned
+    must not suppress auto-memory, or the content is lost twice."""
 
     @pytest.mark.asyncio
-    async def test_write_tool_call_this_turn_suppresses_auto_write(
+    async def test_failed_write_tool_result_does_not_suppress_auto_write(
         self, monkeypatch
     ) -> None:
+        """A write_memory_tool call whose execution failed (non-JSON error
+        ToolMessage) must NOT suppress auto-memory — the content was never
+        persisted, so auto-memory is the only capture left."""
         import backend.agent.nodes as mod
 
         _set_auto_memory(monkeypatch, True)
@@ -282,11 +287,16 @@ class TestAutoMemorySuppression:
                         {"id": "c1", "name": "write_memory_tool", "args": {}, "type": "tool_call"}
                     ],
                 ),
+                ToolMessage(
+                    content="Error: write failed (DB unavailable)",
+                    tool_call_id="c1",
+                    name="write_memory_tool",
+                ),
             ]
         )
         await mod._maybe_auto_memory(state)
-        mock_extract.assert_not_awaited()
-        mock_write.assert_not_awaited()
+        mock_extract.assert_awaited_once()
+        mock_write.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_write_tool_result_this_turn_suppresses_auto_write(
@@ -385,7 +395,6 @@ class TestAutoMemoryWiring:
     @pytest.mark.asyncio
     async def test_plain_chat_path_auto_writes_when_enabled(self, monkeypatch) -> None:
         import backend.agent.nodes as mod
-        from tests._fake_llm import text_stream
 
         _set_auto_memory(monkeypatch, True)
         mock_extract, mock_write = _mock_services(monkeypatch)
@@ -759,7 +768,6 @@ class TestAutoMemoryBackgrounding:
         import asyncio
 
         import backend.agent.nodes as mod
-        from tests._fake_llm import text_stream
 
         _set_auto_memory(monkeypatch, True)
 

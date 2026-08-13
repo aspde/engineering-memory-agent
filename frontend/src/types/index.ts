@@ -1,10 +1,22 @@
 // ── SSE streaming events ──────────────────────────────────────────
 
+/** Result of a force-write (inserted / merged / conflict), surfaced on the
+ * meta SSE event so the UI can toast what the write did. */
+export interface MemoryWriteResult {
+  action: string;
+  summary: string;
+}
+
 export type SSEEvent =
   | { type: 'token'; content: string }
   | { type: 'node'; node: string }
   | { type: 'interrupt'; data: Interrupt }
-  | { type: 'meta'; tool_calls: ToolCall[]; sources: Source[] }
+  | {
+      type: 'meta';
+      tool_calls: ToolCall[];
+      sources: Source[];
+      memory_write: MemoryWriteResult | null;
+    }
   | { type: 'error'; message: string }
   | { type: 'done' };
 
@@ -14,6 +26,7 @@ export interface ChatRequest {
   message: string;
   thread_id: string;
   resume_data?: Record<string, unknown>;
+  force_write?: boolean;
 }
 
 export interface ChatResponse {
@@ -145,18 +158,6 @@ export interface SearchResult {
 
 export interface SearchResponse {
   results: SearchResult[];
-}
-
-export interface MemoryWriteRequest {
-  content: string;
-  source_type?: string;
-  metadata?: Record<string, unknown>;
-}
-
-export interface MemoryWriteResponse {
-  id: string;
-  action: 'inserted' | 'merged' | 'conflict';
-  summary: string;
 }
 
 export interface MemorySearchRequest {

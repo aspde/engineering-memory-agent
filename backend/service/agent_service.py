@@ -20,14 +20,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.state import CompiledStateGraph
 
 from backend.agent.graph import build_agent_graph
+from backend.agent.nodes import APPROVAL_REQUIRED_TOOLS
 from backend.agent.tools import ALL_TOOLS
 from backend.shared.config import config
+from backend.shared.runtime_metrics import (
+    inc_agent_slots_rejected,
+    set_agent_slots_in_use,
+)
+from backend.shared.slots import SlotLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +51,16 @@ def _active_tools() -> list:
     logger.info("MEMORY_ENABLED=false — agent running in chat-only mode (no tools)")
     return []
 
+
+# Chat exposes every tool to the LLM except ``write_memory_tool`` — explicit
+# memory writes are triggered by the frontend's 强制写入记忆 checkbox and
+# injected by ``call_llm_node`` as a server-side tool_call, never chosen by
+# the model itself.  The tool stays on the execution roster (``ALL_TOOLS``)
+# so ToolNode can run the injected call, ``check_conflict`` can gate its
+# conflicts, and ``_write_tool_used_this_turn`` can suppress auto-memory for
+# the same turn — it is simply absent from the schemas the LLM may pick from.
+CHAT_LLM_TOOLS: list = [t for t in ALL_TOOLS if t.name != "write_memory_tool"]
+
 _checkpointer: InMemorySaver | object | None = None
 _pool = None  # psycopg AsyncConnectionPool, closed on shutdown
 
@@ -56,35 +71,23 @@ _pool = None  # psycopg AsyncConnectionPool, closed on shutdown
 # together saturate the provider rate limit and trip the circuit breaker
 # for everyone.  Backed by a plain counter (not an ``asyncio.Semaphore``)
 # so it stays event-loop-agnostic like the webhook extraction cap — safe
-# across pytest's function-scoped event loops.
-_agent_active = 0
-_agent_slots_lock = threading.Lock()
+# across pytest's function-scoped event loops.  The metrics hooks report
+# the in-flight gauge and the 503-rejection counter (see runtime_metrics).
+_agent_slots = SlotLimiter(
+    lambda: config.max_agent_concurrency,
+    on_reject=inc_agent_slots_rejected,
+    on_change=set_agent_slots_in_use,
+)
 
 
 def _try_acquire_agent_slot() -> bool:
     """Reserve one in-flight agent run; False when the cap is hit."""
-    global _agent_active
-    with _agent_slots_lock:
-        if _agent_active >= config.max_agent_concurrency:
-            from backend.shared.runtime_metrics import inc_agent_slots_rejected
-
-            inc_agent_slots_rejected()
-            return False
-        _agent_active += 1
-        from backend.shared.runtime_metrics import set_agent_slots_in_use
-
-        set_agent_slots_in_use(_agent_active)
-        return True
+    return _agent_slots.try_acquire()
 
 
 def _release_agent_slot() -> None:
     """Release an agent run slot acquired by :func:`_try_acquire_agent_slot`."""
-    global _agent_active
-    with _agent_slots_lock:
-        _agent_active = max(_agent_active - 1, 0)
-        from backend.shared.runtime_metrics import set_agent_slots_in_use
-
-        set_agent_slots_in_use(_agent_active)
+    _agent_slots.release()
 
 
 # ── Trigger offline flags before SentenceTransformer sees them ──────
@@ -133,7 +136,7 @@ async def _setup_checkpointer() -> None:
         # startup instead of reaching the InMemorySaver fallback below.
         await asyncio.wait_for(_pool.wait(), timeout=10)
 
-        _checkpointer = AsyncPostgresSaver(_pool)
+        _checkpointer = AsyncPostgresSaver(_pool)  # type: ignore[arg-type]
         async with _pool.connection() as conn:
             await conn.set_autocommit(True)
             await conn.execute(
@@ -212,6 +215,7 @@ async def _close_checkpointer() -> None:
 def get_agent(
     approval_required_tools: frozenset[str] | None = None,
     max_steps: int | None = None,
+    llm_tools: list | None = None,
 ) -> CompiledStateGraph:
     """Return a compiled agent graph with active tools per config.
 
@@ -231,12 +235,18 @@ def get_agent(
     ``CHAT_APPROVAL_TOOLS`` so the notification tool also requires approval,
     while automated patrol/scenario runs keep the default and notify
     autonomously.
+
+    ``llm_tools`` narrows the tool schemas shown to the model (default: the
+    full execution roster).  Chat passes ``CHAT_LLM_TOOLS`` so the model
+    cannot choose ``write_memory_tool`` itself — force-write injections still
+    execute because the tool remains on the execution roster.
     """
     return build_agent_graph(
         tools=_active_tools(),
         checkpointer=_get_checkpointer(),
         max_steps=max_steps if max_steps is not None else config.max_agent_steps,
-        approval_required_tools=approval_required_tools,
+        approval_required_tools=approval_required_tools or APPROVAL_REQUIRED_TOOLS,
+        llm_tools=llm_tools,
     )
 
 

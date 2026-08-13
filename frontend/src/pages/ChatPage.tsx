@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { getThreadMessages } from '../api/agent';
-import { writeMemory } from '../api/memory';
 import { runScenario } from '../api/scenarios';
 import { useChat } from '../hooks/useChat';
 import ChatArea from '../components/ChatArea';
@@ -11,8 +10,10 @@ import ChatInput from '../components/ChatInput';
  * Chat page: lazy-loads message history for the active thread, then renders
  * the scrollable message area plus a pinned chat input.
  *
- * When "强制写入记忆" is checked, the user's message is also sent directly
- * to the memory write API, bypassing the LLM's tool-calling judgement.
+ * When "强制写入记忆" is checked, the send carries ``force_write`` so the
+ * server injects a write_memory_tool call for this turn — the memory is
+ * written inside the agent flow (LLM extraction + on-the-spot conflict
+ * handling), and the write's outcome surfaces as a toast via the meta event.
  */
 export default function ChatPage() {
   const { threadId, loadedThreadId, messages, pendingInterrupt, waitingForApproval, activeScenario } =
@@ -148,24 +149,24 @@ export default function ChatPage() {
 
   const handleSend = useCallback(
     (text: string, forceWrite: boolean) => {
-      // Always send the chat message (Agent will respond normally)
-      sendMessage(text);
-
-      // When force-write is checked, also persist via the direct API
-      if (forceWrite) {
-        writeMemory(text, 'conversation', { thread_id: threadId })
-          .then((res) => {
-            const labels: Record<string, string> = {
-              inserted: '已写入新记忆',
-              merged: '已合并到已有记忆',
-              conflict: '检测到冲突，请在记忆库中处理',
-            };
-            setWriteToast(labels[res.action] ?? `记忆${res.action}`);
-          })
-          .catch(() => {
-            setWriteToast('记忆写入失败');
-          });
-      }
+      // Send the chat message with the force-write flag; the write runs inside
+      // the agent flow (server-injected write_memory_tool call).  sendMessage
+      // resolves the force-write outcome from the meta event so the toast
+      // reflects what actually happened — including the distilled summary the
+      // LLM extracted, so the user can verify what was stored.
+      sendMessage(text, forceWrite).then((memoryWrite) => {
+        if (!memoryWrite) return;
+        const summary = (memoryWrite.summary || '').slice(0, 60);
+        if (memoryWrite.action === 'inserted') {
+          setWriteToast(summary ? `已写入：${summary}` : '已写入新记忆');
+        } else if (memoryWrite.action === 'merged') {
+          setWriteToast(summary ? `已合并：${summary}` : '已合并到已有记忆');
+        } else if (memoryWrite.action === 'conflict') {
+          setWriteToast('检测到冲突，请在记忆库中处理');
+        } else {
+          setWriteToast(`记忆${memoryWrite.action}`);
+        }
+      });
     },
     [sendMessage],
   );

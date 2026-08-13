@@ -8,8 +8,8 @@
     "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b"
   },
   "agent.system": {
-    "version": "4",
-    "sha256": "fe84c4860dd9c2572c6993f05123f724e7bf737818ef0c40e9b35583e49b7c68"
+    "version": "5",
+    "sha256": "37a76130c025ed2110ba537fda8d52762fba08a04025c262cbb220b7c947c1fd"
   },
   "extraction.entities": {
     "version": "4",

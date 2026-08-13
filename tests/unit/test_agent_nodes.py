@@ -1,15 +1,15 @@
 """Tests for agent node functions — mock LLM provider."""
 
 import json
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock
 
 import pytest
-from langgraph.types import Command
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.types import Command
 
 from backend.agent.nodes import (
-    APPROVAL_REQUIRED_TOOLS,
     _MAX_TOOL_CONTENT_CHARS,
+    APPROVAL_REQUIRED_TOOLS,
     _estimate_tokens,
     _heuristic_tokens,
     _messages_to_dicts,
@@ -291,7 +291,7 @@ class TestCallLLMNode:
 
         from backend.agent.tools import ALL_TOOLS
 
-        result = await mod.call_llm_node(
+        await mod.call_llm_node(
             _make_state([HumanMessage(content="hi")]), tools=ALL_TOOLS
         )
         call_args = mock_provider.chat_raw_stream.call_args
@@ -464,9 +464,8 @@ class TestCallLLMNode:
         later replayed to the LLM as assistant history.  It is now marked and
         skipped by serialization (and by synthesis/compaction transcripts).
         """
-        from tests._fake_llm import raise_stream, sequential_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import raise_stream, sequential_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(
@@ -489,6 +488,192 @@ class TestCallLLMNode:
         assert stub.additional_kwargs.get(mod._LLM_ERROR_MARKER) is True
         # The stub is dropped from the tool-selection history sent to the LLM.
         assert mod._messages_to_dicts([stub]) == []
+
+    @pytest.mark.asyncio
+    async def test_force_write_injects_write_tool_call(self, monkeypatch) -> None:
+        """force_write=True turns a plain-chat AIMessage into a tool-call
+        AIMessage carrying the injected write_memory_tool call, and clears the
+        flag so it fires exactly once."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            content_stream("OK, noted.")
+        )
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from backend.agent.tools import ALL_TOOLS
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[HumanMessage(content="记住：端口改为 8080")],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=None,
+                force_write=True,
+            ),
+            tools=ALL_TOOLS,
+        )
+
+        assert result["force_write"] is False
+        msg = result["messages"][0]
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls
+        injected = msg.tool_calls[0]
+        assert injected["name"] == "write_memory_tool"
+        assert injected["args"]["content"] == "记住：端口改为 8080"
+        assert injected["args"]["metadata"] == {"forced": True}
+
+    @pytest.mark.asyncio
+    async def test_force_write_merges_with_llm_tool_calls(self, monkeypatch) -> None:
+        """When the LLM already called a tool this turn, the injected write is
+        appended to the same AIMessage's tool_calls — both run via ToolNode."""
+        from tests._fake_llm import sequential_stream, tool_call_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([
+                {"id": "call_1", "name": "search_memories_tool",
+                 "args": {"query": "port"}, "type": "tool_call"}
+            ])
+        )
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from backend.agent.tools import ALL_TOOLS
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[HumanMessage(content="记住：端口改为 8080")],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=None,
+                force_write=True,
+            ),
+            tools=ALL_TOOLS,
+        )
+
+        msg = result["messages"][0]
+        names = [tc["name"] for tc in msg.tool_calls]
+        assert names == ["search_memories_tool", "write_memory_tool"]
+
+    @pytest.mark.asyncio
+    async def test_force_write_skips_when_tool_already_used(self, monkeypatch) -> None:
+        """A turn where the model already called write_memory_tool must not get
+        a second injected write (no double extraction)."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            content_stream("Done.")
+        )
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from backend.agent.tools import ALL_TOOLS
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[
+                    HumanMessage(content="remember x"),
+                    AIMessage(content="", tool_calls=[
+                        {"id": "c1", "name": "write_memory_tool",
+                         "args": {"content": "x"}, "type": "tool_call"}]),
+                    ToolMessage(
+                        content='{"action": "inserted", "summary": "x"}',
+                        tool_call_id="c1",
+                        name="write_memory_tool",
+                    ),
+                ],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=None,
+                force_write=True,
+            ),
+            tools=ALL_TOOLS,
+        )
+
+        msg = result["messages"][0]
+        # No injected write — the turn already wrote via the tool.
+        assert not getattr(msg, "tool_calls", None)
+        assert result["force_write"] is False
+
+    @pytest.mark.asyncio
+    async def test_force_write_injection_does_not_throttle(self, monkeypatch) -> None:
+        """Injection alone must NOT record the auto-memory throttle — the
+        write may still fail, and throttling then would suppress auto-memory
+        on top of the failed write (content lost twice).  The throttle is
+        recorded by write_memory_tool on success (see test_agent_tools)."""
+        from tests._fake_llm import content_stream, sequential_stream
+
+        import backend.agent.nodes as mod
+        from backend.agent.tools import write_memory_tool
+        from backend.shared.config import current_thread_id
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(content_stream("ok"))
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+        monkeypatch.setattr(mod, "_auto_memory_last_write", {})
+
+        token = current_thread_id.set("thread-fw")
+        try:
+            await mod.call_llm_node(
+                AgentState(
+                    messages=[HumanMessage(content="记住：端口改为 8080")],
+                    final_response=None,
+                    final_prompt=None,
+                    error=None,
+                    pending_approval=None,
+                    step_count=None,
+                    force_write=True,
+                ),
+                tools=[write_memory_tool],
+            )
+        finally:
+            current_thread_id.reset(token)
+
+        assert "thread-fw" not in mod._auto_memory_last_write
+
+    @pytest.mark.asyncio
+    async def test_force_write_error_path_clears_flag(self, monkeypatch) -> None:
+        """A failed LLM call must clear force_write so the flag can't leak
+        into the next user turn."""
+        from tests._fake_llm import raise_stream, sequential_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            raise_stream(RuntimeError("API down"))
+        )
+
+        import backend.agent.nodes as mod
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        from backend.agent.tools import ALL_TOOLS
+
+        result = await mod.call_llm_node(
+            AgentState(
+                messages=[HumanMessage(content="remember x")],
+                final_response=None,
+                final_prompt=None,
+                error=None,
+                pending_approval=None,
+                step_count=None,
+                force_write=True,
+            ),
+            tools=ALL_TOOLS,
+        )
+
+        assert result["force_write"] is False
 
 
 class TestGenerateFinalNode:
@@ -693,9 +878,8 @@ class TestGenerateFinalNode:
         """
         import json
 
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -738,9 +922,8 @@ class TestGenerateFinalNode:
         though the role loop below was windowed, so a long thread resubmitted
         every tool result from every turn into each synthesis prompt.
         """
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -787,9 +970,8 @@ class TestGenerateFinalNode:
         without the chunks it had retrieved.
         """
         import backend.agent.nodes as mod
-        from tests._fake_llm import text_stream
-
         from backend.agent.tool_envelope import build_tool_envelope
+        from tests._fake_llm import text_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")
@@ -871,9 +1053,8 @@ class TestGenerateFinalNode:
     async def test_tool_results_this_turn_still_synthesizes(self, monkeypatch) -> None:
         """A ToolMessage in the current turn forces the synthesis path, so the
         tool output can be folded into the final-answer context."""
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Synthesized from tool output.")
@@ -1193,7 +1374,12 @@ class TestCheckApprovalNode:
         """
         from langchain_core.tools import tool
 
-        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
 
         @tool
         async def write_memory_tool(content: str) -> str:
@@ -1345,14 +1531,12 @@ class TestCheckConflictNode:
         We use a write_memory_tool that returns a conflict and verify the
         graph reaches the conflict interrupt (past check_approval).
         """
-        import json as _json
 
         # Step 1: approve the write_memory_tool header
         # Step 2: write_memory_tool returns conflict → check_conflict interrupt
-        from tests._fake_llm import sequential_stream, tool_call_stream
-
         from backend.agent.graph import build_agent_graph
         from backend.agent.tools import write_memory_tool
+        from tests._fake_llm import sequential_stream, tool_call_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_raw_stream = sequential_stream(
@@ -1660,9 +1844,8 @@ class TestContextBounding:
     @pytest.mark.asyncio
     async def test_generate_final_windows_history(self, monkeypatch) -> None:
         """The synthesis prompt carries a windowed history, not all of it."""
-        from tests._fake_llm import text_stream
-
         import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
 
         mock_provider = AsyncMock()
         mock_provider.chat_stream = text_stream("Final.")

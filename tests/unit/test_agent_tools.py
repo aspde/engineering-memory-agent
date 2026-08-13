@@ -57,7 +57,6 @@ class TestRetrieveChunksTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
         from backend.agent import tools as mod
-
         from backend.service.retrieval import RetrievalResult
 
         async def mock_retrieve(*args, **kwargs):
@@ -167,6 +166,59 @@ class TestWriteMemoryTool:
         assert data["existing_id"] == "mem-456"
         assert data["existing_summary"] == "EMA uses PostgreSQL"
         assert "_deferred" in data
+
+    @pytest.mark.asyncio
+    async def test_success_records_auto_memory_throttle(self, monkeypatch) -> None:
+        """A successful write records the thread in the auto-memory throttle
+        table, so an auto-capture within the interval skips — the user just
+        explicitly wrote."""
+        from backend.agent import nodes as nodes_mod
+        from backend.agent import tools as mod
+        from backend.shared.config import current_thread_id
+
+        async def mock_write(content, source_type, metadata):
+            return {"id": "abc-123", "action": "inserted", "summary": "A new memory."}
+
+        monkeypatch.setattr(mod, "write_memory", mock_write)
+        monkeypatch.setattr(nodes_mod, "_auto_memory_last_write", {})
+
+        token = current_thread_id.set("thread-tool")
+        try:
+            await write_memory_tool.ainvoke({"content": "some text"})
+        finally:
+            current_thread_id.reset(token)
+
+        assert "thread-tool" in nodes_mod._auto_memory_last_write
+
+    @pytest.mark.asyncio
+    async def test_conflict_does_not_record_throttle(self, monkeypatch) -> None:
+        """A conflict persists nothing until a human resolves it, so it must
+        not throttle auto-memory — the knowledge is still up for capture."""
+        from backend.agent import nodes as nodes_mod
+        from backend.agent import tools as mod
+        from backend.shared.config import current_thread_id
+
+        async def mock_write(content, source_type, metadata):
+            return {
+                "action": "conflict",
+                "summary": "EMA uses MySQL",
+                "existing_id": "mem-456",
+                "existing_summary": "EMA uses PostgreSQL",
+                "entities": [],
+                "relations": [],
+                "_deferred": {},
+            }
+
+        monkeypatch.setattr(mod, "write_memory", mock_write)
+        monkeypatch.setattr(nodes_mod, "_auto_memory_last_write", {})
+
+        token = current_thread_id.set("thread-conflict")
+        try:
+            await write_memory_tool.ainvoke({"content": "EMA uses MySQL"})
+        finally:
+            current_thread_id.reset(token)
+
+        assert "thread-conflict" not in nodes_mod._auto_memory_last_write
 
 
 class TestExtractMemoryTool:

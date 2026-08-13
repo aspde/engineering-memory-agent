@@ -5,10 +5,14 @@ const fetchMock = vi.fn();
 
 beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
+  // Pin the auth env so the default-request assertions don't depend on
+  // whether VITE_EMA_API_KEY happens to be injected from a .env file.
+  vi.stubEnv('VITE_EMA_API_KEY', '');
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   fetchMock.mockReset();
 });
 
@@ -79,10 +83,14 @@ describe('normalizeSSEEvent', () => {
   it('normalizes a meta event', () => {
     const toolCalls = [{ tool: 'search', content: 'q' }];
     const sources = [{ type: 'memory', summary: 's' }];
-    expect(normalizeSSEEvent({ type: 'meta', tool_calls: toolCalls, sources })).toEqual({
+    const memoryWrite = { action: 'inserted', summary: '端口改为 8080' };
+    expect(
+      normalizeSSEEvent({ type: 'meta', tool_calls: toolCalls, sources, memory_write: memoryWrite }),
+    ).toEqual({
       type: 'meta',
       tool_calls: toolCalls,
       sources,
+      memory_write: memoryWrite,
     });
   });
 
@@ -116,6 +124,7 @@ describe('normalizeSSEEvent', () => {
       type: 'meta',
       tool_calls: [],
       sources: [],
+      memory_write: null,
     });
   });
 });

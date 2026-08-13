@@ -15,6 +15,7 @@ from typing import Any
 from langchain_core.tools import tool
 from pydantic import Field
 
+from backend.agent.nodes import _record_auto_memory_write
 from backend.agent.tool_envelope import build_tool_envelope
 from backend.service.chunk import chunk_code, chunk_text
 from backend.service.entity import (
@@ -26,7 +27,9 @@ from backend.service.extraction import extract_memory
 from backend.service.ingestion import ingest_repo
 from backend.service.memory import write_memory
 from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
+from backend.shared.config import current_thread_id
 
+# ── Retrieval tools ──────────────────────────────────────────────────
 
 # ── Retrieval tools ──────────────────────────────────────────────────
 
@@ -203,8 +206,10 @@ async def write_memory_tool(
     then check for duplicates before inserting.  Returns the action
     taken (inserted, merged, or conflict).
 
-    Use this when the user explicitly asks to remember something, or
-    when important knowledge emerges in conversation.
+    Invoked by the system when the user checks the 强制写入记忆 box
+    (the tool_call is injected by call_llm_node), or when the user
+    explicitly asks to remember something.  Do not call it on your
+    own initiative.
 
     Args:
         content: The text to extract a memory from.
@@ -225,6 +230,15 @@ async def write_memory_tool(
             },
             ensure_ascii=False,
         )
+    # A successful write (inserted / merged / duplicate) records the thread in
+    # the auto-memory throttle table — the user just explicitly wrote, so an
+    # auto-capture within the interval would likely duplicate it.  Recorded
+    # HERE (after success) rather than at injection: an injected write that
+    # fails must not throttle auto-memory, or the turn's knowledge could be
+    # lost twice (forced write failed + auto-memory suppressed).  A conflict
+    # is deliberately excluded too — nothing was persisted until a human
+    # resolves it, so auto-memory must stay free to capture the knowledge.
+    _record_auto_memory_write(current_thread_id.get("") or "_")
     return json.dumps(
         {
             "id": result["id"],

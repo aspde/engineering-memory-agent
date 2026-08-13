@@ -17,16 +17,16 @@ from langgraph.types import Command
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
-from backend.db import get_session_factory
 from backend.agent.nodes import CHAT_APPROVAL_TOOLS
 from backend.agent.tool_envelope import parse_tool_envelope
+from backend.db import get_session_factory
 from backend.service.agent_service import (
+    CHAT_LLM_TOOLS,
     _release_agent_slot,
     _try_acquire_agent_slot,
     get_agent_for_thread,
 )
 from backend.shared.config import config, current_thread_id, current_trace_id
-from backend.service.llm_service import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,31 @@ def _extract_tool_traces(
     return tool_call_traces, unique_sources
 
 
+def _extract_write_result(messages: list) -> dict[str, str] | None:
+    """Return ``{"action", "summary"}`` from this turn's last
+    ``write_memory_tool`` result, or ``None`` when this turn wrote nothing.
+
+    Drives the frontend's force-write toast (inserted / merged / conflict).
+    Only the current turn counts — a previous turn's write must not re-trigger
+    a toast on a later reply.  A rejected/cancelled write is a non-JSON
+    ``[REJECTED]``/``[CANCELLED]`` ToolMessage and yields ``None``.
+    """
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return None
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "write_memory_tool":
+            try:
+                data = json.loads(str(m.content))
+            except (TypeError, ValueError):
+                return None
+            action = data.get("action")
+            if not isinstance(action, str):
+                return None
+            summary = data.get("summary", "")
+            return {"action": action, "summary": str(summary) if summary else ""}
+    return None
+
+
 # ── Request / Response models ────────────────────────────────────────
 
 
@@ -211,6 +236,10 @@ class ChatRequest(BaseModel):
     message: str = Field(default="", max_length=10000)
     thread_id: str = Field(default_factory=lambda: str(uuid4()))
     resume_data: dict[str, Any] | None = None
+    force_write: bool = False
+    """User checked 强制写入记忆 — the turn's message is written to the
+    memory store regardless of the model's judgement (the write is injected
+    into the agent run, not a separate REST call)."""
 
 
 class ChatResponse(BaseModel):
@@ -220,6 +249,9 @@ class ChatResponse(BaseModel):
     interrupt: dict[str, Any] | None = None
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     sources: list[dict[str, Any]] = Field(default_factory=list)
+    memory_write: dict[str, Any] | None = None
+    """``{"action", "summary"}`` when this turn's force-write actually wrote
+    (inserted / merged / conflict), else ``None``."""
 
 
 class ThreadInfo(BaseModel):
@@ -398,7 +430,10 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     ``{"approved": true}`` or ``{"approved": false, "reason": "..."}``)
     to resume.
     """
-    agent = get_agent_for_thread(approval_required_tools=CHAT_APPROVAL_TOOLS)
+    agent = get_agent_for_thread(
+        approval_required_tools=CHAT_APPROVAL_TOOLS,
+        llm_tools=CHAT_LLM_TOOLS,
+    )
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
@@ -431,13 +466,16 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     try:
         async with asyncio.timeout(config.agent_timeout):
             if req.resume_data is not None:
-                result = await agent.ainvoke(
+                result = await agent.ainvoke(  # type: ignore[call-overload]
                     Command(resume=req.resume_data),
                     config=run_config,
                 )
             else:
-                result = await agent.ainvoke(
-                    {"messages": [HumanMessage(content=req.message)]},
+                result = await agent.ainvoke(  # type: ignore[call-overload]
+                    {
+                        "messages": [HumanMessage(content=req.message)],
+                        "force_write": req.force_write,
+                    },
                     config=run_config,
                 )
     except TimeoutError:
@@ -456,7 +494,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
                 f"Agent 处理超时（超过 {config.agent_timeout} 秒），已停止本轮处理，"
                 "请重试或简化问题。"
             ),
-        )
+        ) from None
     except Exception:
         # Internal exception text (provider keys, DB URLs, stack details) must
         # not leak to the client — log it server-side and return a generic
@@ -474,7 +512,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
         raise HTTPException(
             status_code=502,
             detail="Agent 处理出错，请稍后重试或简化问题。",
-        )
+        ) from None
     finally:
         # Release the concurrency slot on every exit path — success, timeout,
         # or internal error.  The graph run is complete at this point; the
@@ -510,6 +548,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
 
     # Extract tool call traces and sources in a single pass
     tool_call_traces, sources = _extract_tool_traces(result.get("messages", []))
+    memory_write = _extract_write_result(result.get("messages", []))
 
     # Count AIMessages with tool_calls to estimate ReAct steps
     tool_call_count = sum(
@@ -539,6 +578,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
         response=final_response,
         tool_calls=tool_call_traces,
         sources=sources,
+        memory_write=memory_write,
     )
 
 
@@ -559,7 +599,10 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
     The whole run is bounded by ``AGENT_TIMEOUT``; a disconnected SSE
     client aborts the stream so later tool/LLM steps don't burn tokens.
     """
-    agent = get_agent_for_thread(approval_required_tools=CHAT_APPROVAL_TOOLS)
+    agent = get_agent_for_thread(
+        approval_required_tools=CHAT_APPROVAL_TOOLS,
+        llm_tools=CHAT_LLM_TOOLS,
+    )
     run_config = {"configurable": {"thread_id": req.thread_id}}
 
     # Tag memories written during this turn with the conversation thread.
@@ -601,7 +644,10 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                     # client sees live token deltas — not a replayed answer.
                     graph_input: dict | Command = Command(resume=req.resume_data)
                 else:
-                    graph_input = {"messages": [HumanMessage(content=req.message)]}
+                    graph_input = {
+                        "messages": [HumanMessage(content=req.message)],
+                        "force_write": req.force_write,
+                    }
 
                 # Stream through the graph.  Two modes:
                 #   updates — node-completion events, interrupts
@@ -610,7 +656,7 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                 #             final answer is generated, not replayed).
                 # With subgraphs=True + a mode list, events arrive as
                 # (namespace, mode, data) tuples.
-                stream = agent.astream(
+                stream = agent.astream(  # type: ignore[call-overload]
                     graph_input,
                     config=run_config,
                     stream_mode=["updates", "custom"],
@@ -673,13 +719,13 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
                 # the same over-call signal the task eval measures on live
                 # traffic.  One checkpointer read serves both.
                 try:
-                    final_state = await agent.aget_state(run_config)
+                    final_state = await agent.aget_state(run_config)  # type: ignore[arg-type]
                     if final_state and final_state.values:
-                        tool_traces, sources = _extract_tool_traces(
-                            final_state.values.get("messages", [])
-                        )
-                        if tool_traces or sources:
-                            yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources}, ensure_ascii=False)}\n\n"
+                        messages = final_state.values.get("messages", [])
+                        tool_traces, sources = _extract_tool_traces(messages)
+                        memory_write = _extract_write_result(messages)
+                        if tool_traces or sources or memory_write:
+                            yield f"data: {json.dumps({'type': 'meta', 'tool_calls': tool_traces, 'sources': sources, 'memory_write': memory_write}, ensure_ascii=False)}\n\n"
 
                         from backend.shared.runtime_metrics import observe_agent_steps
 

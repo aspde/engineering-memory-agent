@@ -9,8 +9,10 @@ interface ChatInputProps {
 /**
  * Chat input box: Enter to send, Shift+Enter for a newline.
  * Disabled while the agent is busy (streaming / awaiting approval).
- * Optional "强制写入" checkbox bypasses LLM judgement and writes a
- * memory via the direct API path.
+ * Optional "强制写入记忆" checkbox writes this message into the memory store
+ * (server-side LLM extraction + on-the-spot conflict handling) regardless of
+ * the model's own judgement.  It is a single-action toggle — it resets after
+ * each send, so only the current message is affected, never future ones.
  */
 export default function ChatInput({
   onSend,
@@ -34,7 +36,9 @@ export default function ChatInput({
     if (!text || disabled) return;
     onSend(text, forceWrite);
     setValue('');
-    // Keep forceWrite checked until user unchecks — don't reset.
+    // Single-action toggle: force-write applies to THIS message only, so it
+    // resets after sending instead of staying sticky for every later message.
+    setForceWrite(false);
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {

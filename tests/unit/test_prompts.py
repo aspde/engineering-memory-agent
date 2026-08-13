@@ -76,8 +76,9 @@ class TestAgentSystemTemplate:
         _, text = get_prompt("agent.system")
         # call_llm SYSTEM_PROMPT content — persona, sources, write guidance
         assert "You are EMA, the Engineering Memory Agent for development teams." in text
-        assert "search_memories_tool" not in text  # tools are described, not named in prose
-        assert "write_memory_tool" in text
+        # tools are described generically, never named in prose
+        assert "search_memories_tool" not in text
+        assert "write_memory_tool" not in text
         assert "简体中文" in text
         assert "PingCode" in text and "飞书" in text
 
@@ -127,9 +128,11 @@ class TestModuleReExports:
         assert TECH_DEBT_SYSTEM_PROMPT == get_prompt("scenario.tech_debt")[1]
 
     def test_service_prompts_match_registry(self) -> None:
-        from backend.service.extraction import _ENTITIES_SCHEMA  # noqa: F401  (module imports fine)
         import backend.service.memory as memory_mod
         import backend.service.query_rewrite as qr_mod
+        from backend.service.extraction import (
+            _ENTITIES_SCHEMA,  # noqa: F401  (module imports fine)
+        )
 
         # The old module-level constants are gone; call sites use the registry.
         assert not hasattr(memory_mod, "_MERGE_PROMPT")

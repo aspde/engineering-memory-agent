@@ -1,4 +1,4 @@
-import type { Interrupt, Source, SSEEvent, ToolCall } from '../types';
+import type { Interrupt, MemoryWriteResult, Source, SSEEvent, ToolCall } from '../types';
 
 const BASE_URL = ''; // Vite proxy handles /api/* → http://localhost:8000
 
@@ -212,6 +212,10 @@ export function normalizeSSEEvent(data: Record<string, unknown>): SSEEvent {
         type: 'meta',
         tool_calls: Array.isArray(data.tool_calls) ? (data.tool_calls as ToolCall[]) : [],
         sources: Array.isArray(data.sources) ? (data.sources as Source[]) : [],
+        memory_write:
+          data.memory_write && typeof data.memory_write === 'object'
+            ? (data.memory_write as MemoryWriteResult)
+            : null,
       };
     case 'error':
       return { type: 'error', message: String(data.message ?? 'Unknown error') };

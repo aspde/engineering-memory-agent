@@ -48,7 +48,7 @@ def _make_route_after_call_llm(max_steps: int):
         steps = state.get("step_count", 0) or 0
         if steps >= max_steps:
             return "generate_final"
-        return tools_condition(state)
+        return tools_condition(state)  # type: ignore[arg-type]
 
     return _route_after_call_llm
 
@@ -58,11 +58,14 @@ def build_agent_graph(
     checkpointer: object | None = None,
     max_steps: int = 5,
     approval_required_tools: frozenset[str] = APPROVAL_REQUIRED_TOOLS,
+    llm_tools: list | None = None,
 ) -> CompiledStateGraph:
     """Build and compile the EMA agent graph.
 
     Args:
-        tools: List of ``@tool``-decorated async functions.
+        tools: List of ``@tool``-decorated async functions.  This is the
+            **execution** roster — every tool here can be executed by
+            ``ToolNode``.
         checkpointer: Checkpointer for state persistence
             (InMemorySaver, PostgresSaver, etc.).  Defaults to InMemorySaver.
         max_steps: Maximum ReAct loop iterations before the graph
@@ -71,6 +74,12 @@ def build_agent_graph(
             before execution.  Defaults to ``APPROVAL_REQUIRED_TOOLS`` (the
             write/ingest set); the interactive chat path passes
             ``CHAT_APPROVAL_TOOLS`` to also gate the notification tool.
+        llm_tools: Tool schemas shown to the LLM for autonomous calling.
+            Defaults to ``tools``.  When it is a strict subset (chat passes
+            ``CHAT_LLM_TOOLS``, which drops ``write_memory_tool``), the
+            omitted tools are still executable — a system-injected tool_call
+            (the force-write path) reaches ToolNode without ever being a
+            tool the model can choose.
 
     Returns:
         A compiled LangGraph ``StateGraph`` ready for ``ainvoke()``.
@@ -80,7 +89,7 @@ def build_agent_graph(
     _call_llm = partial(
         call_llm_node,
         tools=tools,
-        tool_schemas=_to_openai_tools(tools),
+        tool_schemas=_to_openai_tools(llm_tools or tools),
     )
     _check_approval = partial(
         check_approval_node,
@@ -127,7 +136,7 @@ def build_agent_graph(
 
     builder.add_edge("generate_final", END)
 
-    return builder.compile(checkpointer=checkpointer or InMemorySaver())
+    return builder.compile(checkpointer=checkpointer or InMemorySaver())  # type: ignore[arg-type]
 
 
 # ── Convenience: pre-built with default tools ────────────────────────

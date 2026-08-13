@@ -44,3 +44,10 @@ class AgentState(TypedDict):
     pending_approval: dict[str, Any] | None
     """Non-None when the graph is paused waiting for human approval.
     Set by check_approval_node before ``interrupt()``; cleared on resume."""
+
+    force_write: bool | None
+    """True when this turn's user message must be written to the memory store
+    (the frontend's 强制写入记忆 checkbox).  ``call_llm_node`` injects a
+    ``write_memory_tool`` call into the AIMessage it returns and clears the
+    flag, so the write runs through the normal ReAct pipeline (ToolNode +
+    check_conflict) exactly once.  ``None``/``False`` = no forced write."""

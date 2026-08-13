@@ -12,9 +12,16 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langgraph.config import get_stream_writer
 from langgraph.types import Command, interrupt
 
@@ -174,7 +181,7 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict[str, object]]:
                     }
                     for tc in answered
                 ]
-                emitted_tool_call_ids.update(tc["id"] for tc in answered)
+                emitted_tool_call_ids.update(str(tc["id"]) for tc in answered)
             elif not content.strip():
                 # Orphaned tool_calls with no content — supply a placeholder
                 # so the API sees a valid assistant message.
@@ -678,7 +685,7 @@ async def _llm_gate_worthy(content: str) -> bool:
             scenario="auto_memory_gate",
             temperature=0.0,
         )
-        return bool(data.get("worthy", False))
+        return bool(data.get("worthy", False)) if isinstance(data, dict) else False
     except Exception:
         logger.warning(
             "Auto-memory LLM gate failed — defaulting to allow", exc_info=True
@@ -754,6 +761,32 @@ def _write_tool_used_this_turn(messages: list[BaseMessage]) -> bool:
     return False
 
 
+def _write_succeeded_this_turn(messages: list[BaseMessage]) -> bool:
+    """True if this turn produced a *successful* ``write_memory_tool`` result.
+
+    Success means the tool's ToolMessage is JSON carrying an ``action`` key
+    (inserted / merged / duplicate).  An injected write whose execution
+    failed leaves a non-JSON error ToolMessage, and a resolved conflict's
+    ToolMessage is replaced by a plain-text resolution note — neither counts,
+    so auto-memory stays free to capture the turn's knowledge (a failed or
+    discarded write must not silently lose the content).
+    """
+    start = 0
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            start = i
+            break
+    for m in messages[start:]:
+        if isinstance(m, ToolMessage) and getattr(m, "name", "") == "write_memory_tool":
+            try:
+                data = json.loads(str(m.content))
+            except (TypeError, ValueError):
+                continue  # error ToolMessage / resolution note — not a write
+            if isinstance(data, dict) and "action" in data:
+                return True
+    return False
+
+
 def _has_substance(extracted: dict, source_content: str | None = None) -> bool:
     """Heuristic: does the extracted memory carry real knowledge?
 
@@ -783,8 +816,10 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     memories behind the scenes).  A turn is captured only when (1) it passes
     the length fast-path, (2) capture is not throttled
     (``_auto_memory_throttled``), (3) the LLM quality gate judges it durable
-    knowledge, (4) the agent did not already call ``write_memory_tool`` this
-    turn, and (5) extraction yields substantive content.  Any failure is
+    knowledge, (4) the turn did not already *successfully* write a memory via
+    ``write_memory_tool`` (a failed or conflict-aborted write still lets
+    auto-memory capture the knowledge, so content is never lost twice), and
+    (5) extraction yields substantive content.  Any failure is
     logged and swallowed — auto memory must never break the chat response.
     """
     from backend.shared.config import config, current_thread_id
@@ -795,7 +830,7 @@ async def _maybe_auto_memory(state: AgentState) -> None:
     user_content = _last_human_content(state["messages"])
     if not user_content:
         return
-    if _write_tool_used_this_turn(state["messages"]):
+    if _write_succeeded_this_turn(state["messages"]):
         return
 
     # Length fast-path — the only zero-cost pre-filter.  Everything deeper
@@ -978,9 +1013,11 @@ async def call_llm_node(
             writer({"type": "token", "content": error_text})
         # The error stub is marked so later turns never re-send it as assistant
         # history (see ``_is_llm_error_message``); ``state.error`` keeps the
-        # exception detail.
+        # exception detail.  The force-write flag is cleared so a failed turn
+        # can't leak it into the next user turn.
         return {
             "error": str(exc),
+            "force_write": False,
             "messages": [
                 AIMessage(
                     content=error_text,
@@ -1003,9 +1040,46 @@ async def call_llm_node(
             })
         aimessage = AIMessage(content=content or "", tool_calls=lc_tool_calls)  # type: ignore[arg-type]
     else:
+        lc_tool_calls = None
         aimessage = AIMessage(content=content)
 
+    # ── Force-write injection ────────────────────────────────────────────
+    # When the user checked 强制写入记忆, inject a write_memory_tool call into
+    # this AIMessage's tool_calls.  The write runs through the normal ReAct
+    # pipeline — ToolNode executes it, check_conflict gates a conflict for
+    # on-the-spot resolution, and _write_succeeded_this_turn suppresses
+    # auto-memory only once the write actually succeeded (no double
+    # extraction; a failed write still lets auto-memory capture the turn).
+    # write_memory itself runs the LLM extraction, so what lands in the store
+    # is the distilled knowledge, not the raw user text.  The auto-memory
+    # throttle is recorded by write_memory_tool itself on success, not here —
+    # recording at injection would suppress auto-memory even when the write
+    # fails.  Skipped when the model already called the write tool this turn
+    # (e.g. MEMORY_ENABLED=false restores the explicit write tool) or when the
+    # tool is not on the execution roster (chat-only mode).  The flag is
+    # cleared so it fires exactly once.
+    if (
+        state.get("force_write")
+        and not _write_tool_used_this_turn(state["messages"])
+        and any(t.name == "write_memory_tool" for t in tools)
+    ):
+        fw_content = _last_human_content(state["messages"])
+        if fw_content:
+            lc_tool_calls = (lc_tool_calls or []) + [{
+                "id": f"force_write_{len(lc_tool_calls or []) + 1}",
+                "name": "write_memory_tool",
+                "args": {
+                    "content": fw_content,
+                    "source_type": "conversation",
+                    "metadata": {"forced": True},
+                },
+                "type": "tool_call",
+            }]
+            aimessage = AIMessage(content=content or "", tool_calls=lc_tool_calls)  # type: ignore[arg-type]
+
     update: dict[str, Any] = {"messages": [aimessage], "step_count": step_base + 1}
+    if state.get("force_write"):
+        update["force_write"] = False
     return update
 
 
@@ -1058,7 +1132,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     context_parts: list[str] = []
     # Compaction summaries (SystemMessages) become <summary> context items.
     for m in windowed:
-        if isinstance(m, SystemMessage) and (m.content or "").strip():
+        if isinstance(m, SystemMessage) and str(m.content or "").strip():
             context_parts.append(f"<summary>\n{str(m.content).strip()}\n</summary>")
     for m in windowed:
         if not isinstance(m, ToolMessage):
@@ -1096,7 +1170,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     context_block = f"\n\nContext:\n{context_str}" if context_str else ""
     system_content = system_text.format(context=context_block)
 
-    messages: list[dict[str, str]] = [
+    final_messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},
     ]
 
@@ -1111,7 +1185,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         content = m.content if isinstance(m.content, str) else str(m.content)
         if role == "assistant" and content == "":
             continue  # skip tool_call-only AIMessages
-        messages.append({"role": role, "content": content})
+        final_messages.append({"role": role, "content": content})
 
     # ── Call LLM here (once) so the response is persisted ──
     # Streamed: text deltas are forwarded to the SSE client live via the
@@ -1129,7 +1203,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
         if max_tokens:
             final_kwargs["max_tokens"] = max_tokens
         async for token in provider.chat_stream(
-            messages, scenario="agent_final", **final_kwargs
+            final_messages, scenario="agent_final", **final_kwargs
         ):
             response_parts.append(token)
             writer({"type": "token", "content": token})
@@ -1159,7 +1233,7 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     _schedule_auto_memory(state)
 
     return {
-        "final_prompt": messages,
+        "final_prompt": final_messages,
         "final_response": response,
         "messages": [aimessage],
     }
@@ -1177,13 +1251,20 @@ APPROVAL_REQUIRED_TOOLS: frozenset[str] = frozenset({
 
 # The interactive chat path additionally gates the external-notification tool
 # (posting to the team's 飞书 group is a side effect an injected instruction
-# in retrieved content could otherwise trigger).  Automated flows (patrol,
-# scenarios) keep the default set so they can still notify the team
-# autonomously — see ``build_agent_graph(approval_required_tools=...)``.
-CHAT_APPROVAL_TOOLS: frozenset[str] = APPROVAL_REQUIRED_TOOLS | {"notify_feishu_tool"}
+# in retrieved content could otherwise trigger).  ``write_memory_tool`` is
+# deliberately NOT gated in chat: the only way it fires there is the
+# force-write injection, which the user already confirmed by checking
+# 强制写入记忆 — asking for a second approval would be double confirmation.
+# (Automated flows keep the default set so ``write_memory_tool`` still pauses
+# if the model ever chooses it.)  Automated flows (patrol, scenarios) keep
+# the default set so they can still notify the team autonomously — see
+# ``build_agent_graph(approval_required_tools=...)``.
+CHAT_APPROVAL_TOOLS: frozenset[str] = (
+    APPROVAL_REQUIRED_TOOLS - {"write_memory_tool"}
+) | {"notify_feishu_tool"}
 
 
-def _tool_call_id(call: dict) -> str:
+def _tool_call_id(call: Mapping[str, Any]) -> str:
     """Extract the stable tool_call id from a raw tool_call dict.
 
     Tool_calls appear in two shapes — LangChain's native
@@ -1264,7 +1345,7 @@ def _build_partial_approval_command(
             f"NOT executed: {rejected_desc}. Reason: {reason}"
         )
     exec_msg = AIMessage(
-        content=(last_ai.content if last_ai else "") + rejection_note,
+        content=(str(last_ai.content) if last_ai else "") + rejection_note,
         tool_calls=exec_tool_calls,
         id=last_ai.id if last_ai else None,
     )
@@ -1330,11 +1411,12 @@ async def check_approval_node(
     safe: list[dict] = []
     sensitive: list[dict] = []
     for tc in tool_calls:
-        name = str(tc.get("name", tc.get("function", {}).get("name", "")))
+        tcd: dict[str, Any] = dict(tc)
+        name = str(tcd.get("name", tcd.get("function", {}).get("name", "")))
         if name in approval_required_tools:
-            sensitive.append(dict(tc))
+            sensitive.append(tcd)
         else:
-            safe.append(dict(tc))
+            safe.append(tcd)
 
     # If everything is safe, go straight to ToolNode
     if not sensitive:
@@ -1513,7 +1595,7 @@ async def check_conflict_node(
 
     try:
         outcome = await resolve_conflict(resolution, existing_id, deferred)
-    except Exception as exc:
+    except Exception:
         logger.exception("Conflict resolution failed")
         outcome = {"id": existing_id, "action": "conflict_resolved", "resolution": "keep_existing"}
 

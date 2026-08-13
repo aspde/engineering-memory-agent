@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { chatStream } from '../api/agent';
 import { invalidateStatsCache } from './useMemories';
+import type { MemoryWriteResult } from '../types';
 
 /** SSE `node` event → Chinese status label (mirrors frontend/app.py `_node_labels`). */
 const NODE_LABELS: Record<string, string> = {
@@ -77,9 +78,14 @@ export function useChat() {
    * 2. Marks the current thread as loaded (so the page won't re-fetch history).
    * 3. Adds an empty assistant placeholder that tokens stream into.
    * 4. Consumes the SSE stream, handling token/node/interrupt/meta/error/done.
+   *
+   * When *forceWrite* is true, the request carries ``force_write`` so the
+   * server injects a write_memory_tool call for this turn — the write runs
+   * inside the agent flow (LLM extraction + on-the-spot conflict handling),
+   * and its outcome arrives on the meta event as ``memory_write``.
    */
   const sendMessage = useCallback(
-    async (rawInput: string) => {
+    async (rawInput: string, forceWrite = false) => {
       const text = rawInput.trim();
       if (!text || isStreamingRef.current) return;
       isStreamingRef.current = true;
@@ -99,9 +105,16 @@ export function useChat() {
 
       tokenBufferRef.current = '';
       const yieldedNodes = new Set<string>();
+      // Force-write outcome (action + summary) from the meta event — resolved
+      // by sendMessage so the caller can toast what the write did.
+      let memoryWrite: MemoryWriteResult | null = null;
 
       try {
-        const stream = chatStream({ message: text, thread_id: threadId });
+        const stream = chatStream({
+          message: text,
+          thread_id: threadId,
+          force_write: forceWrite,
+        });
         for await (const event of stream) {
           switch (event.type) {
             case 'token':
@@ -149,6 +162,9 @@ export function useChat() {
                 type: 'UPDATE_LAST_MESSAGE',
                 meta: { toolCalls: event.tool_calls, sources: event.sources },
               });
+              if (event.memory_write) {
+                memoryWrite = event.memory_write;
+              }
               break;
 
             case 'error': {
@@ -191,6 +207,8 @@ export function useChat() {
         invalidateStatsCache();
         abortRef.current = null;
       }
+
+      return memoryWrite;
     },
     [dispatch, threadId, flushTokens, stopTokenTimer],
   );
@@ -213,6 +231,9 @@ export function useChat() {
 
       tokenBufferRef.current = '';
       const yieldedNodes = new Set<string>();
+      // Force-write outcome from the meta event, resolved by resume just like
+      // sendMessage (a resumed conflict resolution can itself persist a write).
+      let memoryWrite: MemoryWriteResult | null = null;
 
       try {
         const stream = chatStream({
@@ -267,6 +288,9 @@ export function useChat() {
                 type: 'UPDATE_LAST_MESSAGE',
                 meta: { toolCalls: event.tool_calls, sources: event.sources },
               });
+              if (event.memory_write) {
+                memoryWrite = event.memory_write;
+              }
               break;
 
             case 'error': {
@@ -308,6 +332,8 @@ export function useChat() {
         dispatch({ type: 'INVALIDATE_THREADS' });
         invalidateStatsCache();
       }
+
+      return memoryWrite;
     },
     [dispatch, threadId, flushTokens, stopTokenTimer],
   );

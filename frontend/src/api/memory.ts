@@ -4,7 +4,6 @@ import type {
   MemoryGetResponse,
   MemorySearchResponse,
   MemoryStatsResponse,
-  MemoryWriteResponse,
 } from '../types';
 import { apiDelete, apiGet, apiPost } from './client';
 
@@ -22,19 +21,6 @@ async function ingest(documentId: string, content: string): Promise<IngestRespon
 }
 
 /** Write structured memory from text — extraction + similarity check + persist. */
-async function writeMemory(
-  content: string,
-  sourceType: string = 'conversation',
-  metadata?: Record<string, unknown>,
-): Promise<MemoryWriteResponse> {
-  return apiPost<MemoryWriteResponse>('/api/memory/memories/write', {
-    content,
-    source_type: sourceType,
-    ...(metadata ? { metadata } : {}),
-  });
-}
-
-/** Semantic search over structured memories ranked by similarity. */
 async function searchMemories(query: string, topK: number): Promise<MemorySearchResponse> {
   return apiPost<MemorySearchResponse>('/api/memory/memories/search', {
     query,
@@ -52,4 +38,4 @@ async function deleteMemory(id: string): Promise<MemoryDeleteResponse> {
   return apiDelete<MemoryDeleteResponse>(`/api/memory/memories/${encodeURIComponent(id)}`);
 }
 
-export { getStats, ingest, writeMemory, searchMemories, getMemory, deleteMemory };
+export { getStats, ingest, searchMemories, getMemory, deleteMemory };

@@ -3,7 +3,7 @@
 from unittest.mock import AsyncMock
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import HumanMessage
 from langgraph.graph.state import CompiledStateGraph
 
 from backend.agent.graph import build_agent_graph
@@ -65,8 +65,8 @@ class TestGraphStructure:
         rejection (``Command(goto="call_llm")``) must not also route to
         ``tools`` and execute the rejected tool_calls.
         """
-        from langgraph.types import Command
         from langchain_core.tools import tool
+        from langgraph.types import Command
 
         from tests._fake_llm import (
             content_stream,
@@ -155,7 +155,12 @@ class TestGraphRouting:
     @pytest.mark.asyncio
     async def test_tool_calling_path(self, monkeypatch) -> None:
         """When LLM returns tool_calls, execute tools and loop back."""
-        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
 
         tools = [_make_fake_tool()]
 
@@ -192,9 +197,12 @@ class TestGraphHITLRouting:
     @pytest.mark.asyncio
     async def test_safe_tool_passes_through_check_approval(self, monkeypatch) -> None:
         """Safe tools route through check_approval → tools without interrupt."""
-        from tests._fake_llm import content_stream, sequential_stream, text_stream, tool_call_stream
-
-        from backend.agent.nodes import check_approval_node
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
 
         tools = [_make_fake_tool()]
 
@@ -239,12 +247,10 @@ class TestGraphHITLRouting:
         We verify the full flow by sending in a pre-written conflict
         ToolMessage and confirming check_conflict fires.
         """
-        import json as _json
-
-        from tests._fake_llm import sequential_stream, tool_call_stream
 
         from backend.agent.graph import build_agent_graph
         from backend.agent.tools import write_memory_tool
+        from tests._fake_llm import sequential_stream, tool_call_stream
 
         mock_provider = AsyncMock()
         # First call_llm: approve the tool call
@@ -276,16 +282,15 @@ class TestGraphHITLRouting:
         """notify_feishu_tool requires approval on the chat set; the default
         (patrol/scenario) set passes it through so automated flows notify
         autonomously."""
+        from backend.agent.nodes import CHAT_APPROVAL_TOOLS
+        from backend.agent.tools import notify_feishu_tool
+        from backend.shared.config import config
         from tests._fake_llm import (
             content_stream,
             sequential_stream,
             text_stream,
             tool_call_stream,
         )
-
-        from backend.agent.nodes import CHAT_APPROVAL_TOOLS
-        from backend.agent.tools import notify_feishu_tool
-        from backend.shared.config import config
 
         monkeypatch.setattr(config, "feishu_webhook_url", "")
 
@@ -329,6 +334,72 @@ class TestGraphHITLRouting:
         first_interrupt = result_chat["__interrupt__"][0].value
         assert first_interrupt["tool_name"] == "notify_feishu_tool"
 
+    @pytest.mark.asyncio
+    async def test_llm_tools_separates_schemas_from_execution_roster(
+        self, monkeypatch
+    ) -> None:
+        """``llm_tools`` narrows the schemas the model may pick, while the
+        execution roster still runs a tool that is hidden from the LLM.
+
+        Chat passes ``CHAT_LLM_TOOLS`` (no ``write_memory_tool``): the model
+        must never be able to *choose* a memory write, but a system-injected
+        write_memory_tool call (the force-write path) still executes via
+        ToolNode.
+        """
+        from langchain_core.tools import tool
+
+        from tests._fake_llm import (
+            content_stream,
+            sequential_stream,
+            text_stream,
+            tool_call_stream,
+        )
+
+        @tool
+        async def write_memory_tool(content: str) -> str:
+            """Write a memory — hidden from the LLM schemas."""
+            return '{"action": "inserted", "summary": "x"}'
+
+        @tool
+        async def search_memories_tool(query: str) -> str:
+            """Search memories."""
+            return "Found 1 memory"
+
+        tools = [write_memory_tool, search_memories_tool]
+        llm_tools = [search_memories_tool]
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_raw_stream = sequential_stream(
+            tool_call_stream([{
+                "id": "call_1",
+                "name": "write_memory_tool",
+                "args": {"content": "记住端口 8080"},
+            }]),
+            content_stream("已记录，无需更多工具"),
+        )
+        mock_provider.chat_stream = text_stream("Final.")
+        monkeypatch.setattr("backend.agent.nodes.get_llm_provider", lambda: mock_provider)
+
+        graph = build_agent_graph(
+            tools,
+            checkpointer=None,
+            approval_required_tools=frozenset(),
+            llm_tools=llm_tools,
+        )
+        result = await graph.ainvoke(
+            {"messages": [HumanMessage(content="remember x")]},
+            {"configurable": {"thread_id": "test-llm-tools-sep"}},
+        )
+
+        # The first tool-selection call saw only the visible tool's schema.
+        first_call = mock_provider.chat_raw_stream.call_args_list[0]
+        sent_tools = first_call.kwargs["tools"]
+        assert [t["function"]["name"] for t in sent_tools] == ["search_memories_tool"]
+
+        # The hidden tool still executed (ToolNode ran it) and the run
+        # completed with a final answer.
+        assert result.get("final_response") == "Final."
+
 
 class TestStepCountResetAcrossTurns:
     """The ReAct step budget restarts each user turn — a thread whose first
@@ -343,14 +414,14 @@ class TestStepCountResetAcrossTurns:
         so once a thread hit max_steps, every later turn's first call_llm
         routed straight to generate_final and tools were silently disabled.
         """
+        from langchain_core.tools import tool
+
         from tests._fake_llm import (
             content_stream,
             sequential_stream,
             text_stream,
             tool_call_stream,
         )
-
-        from langchain_core.tools import tool
 
         calls: list[str] = []
 
