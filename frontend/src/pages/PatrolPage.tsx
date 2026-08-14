@@ -496,12 +496,12 @@ export default function PatrolPage() {
                           >
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0">
-                                <p className="text-sm font-medium text-gray-800 truncate">
+                                <p className="text-sm font-medium text-gray-800">
                                   {card.title ??
                                     String(f.title ?? f.summary ?? `#${i + 1}`)}
                                 </p>
                                 {card.description && (
-                                  <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">
+                                  <p className="text-xs text-gray-500 mt-0.5">
                                     {card.description}
                                   </p>
                                 )}
