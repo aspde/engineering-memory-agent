@@ -255,6 +255,7 @@ async def lifespan(app: FastAPI):
                     day=config.patrol_weekly_day,
                     hour=config.patrol_weekly_hour + 2,
                     callback=_run_tech_debt_scan,
+                    name="Tech debt scan",
                 )
 
             await _scheduler.start()

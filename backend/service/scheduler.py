@@ -64,15 +64,26 @@ class PatrolScheduler:
         self._tasks.append(asyncio.create_task(_loop()))
 
     def schedule_weekly(
-        self, day: int, hour: int, callback: ScheduleCallback
+        self,
+        day: int,
+        hour: int,
+        callback: ScheduleCallback,
+        *,
+        name: str = "Weekly patrol",
     ) -> None:
         """Run *callback* once per week on the given *day* (0=Mon, 6=Sun)
-        at the given *hour* (0-23)."""
+        at the given *hour* (0-23).
+
+        *name* labels the task in the startup log — callers register more
+        than one weekly task (patrol scan, tech-debt radar), and without a
+        name they all log as "Weekly patrol", which reads like a duplicate
+        registration.
+        """
 
         async def _loop() -> None:
             days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             label = days[day] if 0 <= day <= 6 else f"day={day}"
-            logger.info("Weekly patrol scheduled on %s at %02d:00", label, hour)
+            logger.info("%s scheduled on %s at %02d:00", name, label, hour)
             while True:
                 now = datetime.now().astimezone()
                 next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
