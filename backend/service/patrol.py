@@ -44,6 +44,15 @@ _PATROL_MAX_STEPS: dict[str, int] = {
     "weekly": 20,
 }
 
+# LangGraph's default recursion_limit (50) counts *graph node executions*, not
+# ReAct call-LLM iterations.  Each loop pass is ~4 nodes (call_llm →
+# check_approval → tools → check_conflict), so a weekly patrol's 20
+# max_steps ≈ 80 node executions — the default 50 cut every patrol mid-scan
+# with GraphRecursionError.  This must stay comfortably above
+# max(_PATROL_MAX_STEPS) × nodes-per-loop (20 × 4 = 80); 200 leaves headroom
+# for the conflict-auto-resolve resume loop (each ainvoke restarts the count).
+_PATROL_RECURSION_LIMIT = 200
+
 
 def _interrupt_payload(interrupt: Any) -> Any:
     """The payload carried by a LangGraph interrupt object."""
@@ -270,7 +279,7 @@ async def run_patrol(
                     },
                     config={
                         "configurable": {"thread_id": patrol_thread_id},
-                        "recursion_limit": 50,  # higher limit for patrol scans
+                        "recursion_limit": _PATROL_RECURSION_LIMIT,
                     },
                 )
                 # A write conflict pauses the graph (check_conflict_node), and
@@ -296,7 +305,7 @@ async def run_patrol(
                         Command(resume={"resolution": "keep_both"}),
                         config={
                             "configurable": {"thread_id": patrol_thread_id},
-                            "recursion_limit": 50,
+                            "recursion_limit": _PATROL_RECURSION_LIMIT,
                         },
                     )
 
