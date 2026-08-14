@@ -82,3 +82,11 @@
 {"id": "q083", "query": "召回次数是一次查询就要发一大堆更新请求吗，这也太浪费了", "seed_ids": ["seed-061"], "relevant_fingerprints": ["N+1 写法"], "category": "代码实现", "difficulty": "medium", "notes": "问实现效率，目标是 record_recalls 批量更新"}
 {"id": "q084", "query": "那几个去重阈值是拍脑袋定的，还是真跑数据跑出来的", "seed_ids": ["seed-077"], "relevant_fingerprints": ["拍板值"], "category": "历史背景", "difficulty": "medium", "notes": "问数字来源，目标是阈值标定演进"}
 {"id": "q085", "query": "加了重排之后，反而把原来排在前面的正确答案给弄丢了，这正常吗", "seed_ids": ["seed-041"], "relevant_fingerprints": ["q015 的正确答案"], "category": "故障复盘", "difficulty": "hard", "notes": "问反常现象，目标是 cross-encoder 小语料有害复盘"}
+{"id": "q086", "query": "评估报告里的相似度数字靠谱吗，会不会是样本数据自己有问题，把结果带偏了", "seed_ids": ["seed-079"], "relevant_fingerprints": ["污染 merge 带"], "category": "历史背景", "difficulty": "hard", "notes": "真实口吻问标定可靠性，目标是假 paraphrase 方法论修复"}
+{"id": "q087", "query": "代码仓库里怎么会混进真实的数据库密码", "seed_ids": ["seed-080"], "relevant_fingerprints": ["占位密码"], "category": "故障复盘", "difficulty": "medium", "notes": "问安全事故，目标是凭据误提交复盘"}
+{"id": "q088", "query": "界面那个强制记住的按钮，写进记忆走的是哪条路，不会绕过审批吧", "seed_ids": ["seed-081"], "relevant_fingerprints": ["注入 write_memory_tool"], "category": "架构设计", "difficulty": "medium", "notes": "问 force-write 重构，目标是统一工具通道"}
+{"id": "q089", "query": "并发上限的计数逻辑是不是在好几个地方各写了一遍", "seed_ids": ["seed-082"], "relevant_fingerprints": ["SlotLimiter"], "category": "代码实现", "difficulty": "medium", "notes": "口语化问重复实现，目标是 SlotLimiter 重构"}
+{"id": "q090", "query": "连接器、场景、巡检这些功能为什么不默认全开", "seed_ids": ["seed-083"], "relevant_fingerprints": ["按 *_ENABLED flag 挂载"], "category": "架构设计", "difficulty": "medium", "notes": "问广度层 flag 设计，目标是 ADR-011"}
+{"id": "q091", "query": "没配 API key 的时候，那些评测和迁移测试还能跑吗", "seed_ids": ["seed-084"], "relevant_fingerprints": ["stub get_judge_provider"], "category": "代码实现", "difficulty": "easy", "notes": "问测试免凭据改进"}
+{"id": "q092", "query": "熔断器那个东西后来是不是改简单了", "seed_ids": ["seed-085"], "relevant_fingerprints": ["熔断器简化"], "category": "代码实现", "difficulty": "medium", "notes": "问熔断器重构"}
+{"id": "q093", "query": "接口要是被人一直刷，系统有没有什么自我保护", "seed_ids": ["seed-086"], "relevant_fingerprints": ["token-bucket"], "category": "架构设计", "difficulty": "medium", "notes": "问限流设计，目标是 per-key token bucket"}

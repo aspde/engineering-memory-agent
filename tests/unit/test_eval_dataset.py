@@ -82,9 +82,12 @@ class TestSeedLoading:
     def test_seed_file_exists(self) -> None:
         assert SEED_FILE.exists(), f"missing seed file: {SEED_FILE}"
 
-    def test_loads_70_seeds(self) -> None:
+    def test_loads_seed_corpus(self) -> None:
         seeds = load_seed_memories()
-        assert len(seeds) == 70
+        # Floor, not an exact count — the seed corpus grows as real data
+        # (git history, doc extraction) is distilled into seeds.  Pinning an
+        # exact number would force a test edit on every corpus update.
+        assert len(seeds) >= 70
 
     def test_seed_ids_match_ground_truth(self) -> None:
         seeds = load_seed_memories()
