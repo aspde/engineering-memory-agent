@@ -2,14 +2,57 @@
 
 import os
 from collections.abc import AsyncGenerator
+from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+# Test-DB URL precedence: explicit TEST_DATABASE_URL > derived from the
+# project .env (real ema credentials) > ema123 placeholder (matches a dev box
+# whose ema password was left at the .env.example default, or a CI postgres
+# service whose password is the placeholder).
+_PLACEHOLDER_TEST_URL = "postgresql://ema:ema123@127.0.0.1:5432/ema_test"
+
+
+def _default_test_database_url() -> str:
+    """Test-DB URL derived from the project ``.env`` DATABASE_URL.
+
+    A pytest session always talks to the local/CI PostgreSQL on
+    127.0.0.1:5432 with the fixed database name ``ema_test``; only the
+    ``user:password`` pair is taken from ``.env``.  Hard-coding the ema123
+    placeholder here (as this did before) breaks local pytest on any box whose
+    ema password differs from the .env.example default — the password lives in
+    ``.env``, so the test bootstrap should read it from there instead of
+    guessing.  Falls back to the placeholder when no ``.env`` DATABASE_URL
+    exists (fresh clone, CI without a .env).
+    """
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    dsn = ""
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line.startswith("DATABASE_URL="):
+                continue
+            dsn = line.split("=", 1)[1].strip().strip("\"'")
+            break
+    except OSError:
+        dsn = ""
+    if not dsn:
+        return _PLACEHOLDER_TEST_URL
+    netloc = urlsplit(dsn).netloc
+    userinfo, _, _hostport = netloc.rpartition("@")
+    if not userinfo or "@" in userinfo:
+        # A raw @ inside the password would make rpartition ambiguous — fall
+        # back rather than connect with a mis-split credential.
+        return _PLACEHOLDER_TEST_URL
+    return f"postgresql://{userinfo}@127.0.0.1:5432/ema_test"
+
+
 # Set test environment before any imports
 os.environ["APP_ENV"] = "test"
 os.environ["DATABASE_URL"] = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://ema:ema123@127.0.0.1:5432/ema_test"
+    "TEST_DATABASE_URL", _default_test_database_url()
 )
 
 # Force offline before SentenceTransformer imports are triggered
