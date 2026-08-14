@@ -85,24 +85,25 @@ jobs:
           # below the thresholds.  Manually dispatched non-memory retrievers
           # (experiments/baselines) are not gated.
           #
-          # Calibrated 2026-08-12 on the seeded 84-query memory corpus with
-          # the semantic channel OFF (the default): recall@5=0.917 / mrr=0.787
+          # Calibrated 2026-08-12 on the seeded 92-query memory corpus with
+          # the semantic channel OFF (the default): recall@5=0.891 / mrr=0.782
           # (deterministic lexical baseline — the semantic channel is a
           # self-scored opt-in and never gates, see run_eval --help).  The
-          # corpus was reworked 2026-08-12: 15 real-user-phrased queries
-          # added, 5 stale seeds rewritten to match the current code, and a
-          # content-only-fingerprint bug fixed (12 queries whose fingerprints
-          # lived only in `content` could never match the memory retriever's
-          # `summary` field).  See tests/eval/reports/baseline/README.md for
-          # the full baseline table and per-query miss analysis.
+          # corpus grew 2026-08-12 from 70 → 78 seeds and 84 → 92 queries:
+          # 15 real-user-phrased queries added, 5 stale seeds rewritten to
+          # match the current code, 12 content-only fingerprints fixed (the
+          # memory retriever matches `summary`; content-only fingerprints were
+          # unanswerable on it), and 8 seeds distilled from the real git
+          # history via `ingest_repo` (seed-079..086).  See
+          # tests/eval/reports/baseline/README.md for the full baseline table.
           #
-          # recall@5 0.85 allows up to ~13 misses (84 × 0.15) against the
-          # measured 7, leaving room for single-run noise; mrr 0.72 sits
-          # ~0.07 below the measured 0.787 so it trips on a real ranking
-          # regression but not a noise blip.
+          # recall@5 0.84 = measured 0.891 − ~0.05: allows ~15 misses
+          # (92 × 0.16) against the measured 10, leaving headroom for
+          # single-run noise; mrr 0.72 sits ~0.06 below the measured 0.782 so
+          # it trips on a real ranking regression but not a noise blip.
           GATE_ARGS=""
           if [ "$RETRIEVER" = "memory" ]; then
-            GATE_ARGS="--min-recall@5 0.85 --min-mrr 0.72"
+            GATE_ARGS="--min-recall@5 0.84 --min-mrr 0.72"
           fi
           python -m tests.eval.run_eval --retriever "$RETRIEVER" \
             --report-md tests/eval/reports/eval-report.md \
