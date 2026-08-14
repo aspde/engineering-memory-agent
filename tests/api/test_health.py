@@ -60,3 +60,74 @@ class TestSpaFallbackApiBoundary:
         resp = await async_client.get("/memories")
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_index_html_is_not_cached(self, async_client) -> None:
+        # index.html must revalidate on every load so a new deploy's HTML
+        # (which references new hashed asset filenames) is picked up
+        # immediately instead of serving the stale bundle.
+        resp = await async_client.get("/memories")
+        assert resp.status_code == 200
+        assert resp.headers.get("cache-control") == "no-cache"
+
+    @pytest.mark.asyncio
+    async def test_index_html_revalidates_to_304(self, async_client) -> None:
+        # no-cache means "revalidate every load": a matching If-None-Match
+        # must yield 304 (the fallback uses a FileResponse, which — unlike
+        # StaticFiles — doesn't emit 304 itself, so main.py handles it).
+        resp = await async_client.get("/memories")
+        assert resp.status_code == 200
+        etag = resp.headers.get("etag")
+        assert etag
+        resp304 = await async_client.get(
+            "/memories", headers={"If-None-Match": etag}
+        )
+        assert resp304.status_code == 304
+
+    @pytest.mark.asyncio
+    async def test_built_assets_are_long_cached(self, async_client) -> None:
+        # Vite hashes asset filenames, so each asset URL is immutable — the
+        # browser may cache it for a year and never revalidate; a code change
+        # produces a new filename that fetches fresh.  Use the first real
+        # built asset (the hash changes every build, so pick it at runtime).
+        from pathlib import Path
+
+        assets_dir = (
+            Path(__file__).resolve().parents[2] / "frontend" / "dist" / "assets"
+        )
+        files = sorted(assets_dir.glob("index-*.js"))
+        if not files:
+            import pytest
+
+            pytest.skip("frontend/dist/assets has no built JS")
+        url = f"/assets/{files[0].name}"
+        resp = await async_client.get(url)
+        assert resp.status_code == 200
+        assert (
+            resp.headers.get("cache-control") == "public, max-age=31536000, immutable"
+        )
+
+    @pytest.mark.asyncio
+    async def test_built_assets_revalidate_to_304(self, async_client) -> None:
+        from pathlib import Path
+
+        assets_dir = (
+            Path(__file__).resolve().parents[2] / "frontend" / "dist" / "assets"
+        )
+        files = sorted(assets_dir.glob("index-*.js"))
+        if not files:
+            import pytest
+
+            pytest.skip("frontend/dist/assets has no built JS")
+        url = f"/assets/{files[0].name}"
+        resp = await async_client.get(url)
+        assert resp.status_code == 200
+        etag = resp.headers.get("etag")
+        assert etag
+        resp304 = await async_client.get(url, headers={"If-None-Match": etag})
+        assert resp304.status_code == 304
+        # The 304 keeps the cache directive so the browser honors the policy.
+        assert (
+            resp304.headers.get("cache-control")
+            == "public, max-age=31536000, immutable"
+        )
+

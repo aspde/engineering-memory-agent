@@ -30,8 +30,8 @@ from contextlib import asynccontextmanager
 #    doesn't exist and psycopg async works natively.
 from pathlib import Path
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
@@ -408,8 +408,32 @@ async def metrics_endpoint() -> PlainTextResponse:
 # other static assets) live under frontend/public — Vite's convention — and
 # are copied verbatim into frontend/dist at build time; the dev server serves
 # them at / directly, so no mount is needed for them here.
+
+
+class _ImmutableAssets(StaticFiles):
+    """StaticFiles that serves built assets with a long cache lifetime.
+
+    Vite hashes every asset filename (``index-<hash>.js``), so an asset URL
+    is immutable — its content never changes under the same name.  A
+    ``public, max-age=31536000, immutable`` header lets the browser cache
+    assets for a year without revalidating, while a code change produces a
+    *new* filename that fetches fresh.  Without this header Starlette's
+    heuristic caching (based on last-modified) can hold a stale bundle well
+    past a deploy.
+    """
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        return response
+
+
 if _FRONTEND_DIST.joinpath("assets").is_dir():
-    app.mount("/assets", StaticFiles(directory=str(_FRONTEND_DIST / "assets")), name="assets")
+    app.mount(
+        "/assets",
+        _ImmutableAssets(directory=str(_FRONTEND_DIST / "assets")),
+        name="assets",
+    )
 
 
 @app.get("/brain_favicon.png", include_in_schema=False)
@@ -422,7 +446,7 @@ async def favicon():
 
 
 @app.get("/{full_path:path}", include_in_schema=False)
-async def spa_fallback(full_path: str):
+async def spa_fallback(full_path: str, request: Request):
     """Catch-all: serve index.html for non-API paths (SPA client-side routing).
 
     ``api/...`` paths are excluded: an unmounted or misspelled API route must
@@ -435,5 +459,21 @@ async def spa_fallback(full_path: str):
         return JSONResponse({"detail": "Not Found"}, status_code=404)
     index_path = _FRONTEND_DIST / "index.html"
     if index_path.is_file():
-        return FileResponse(str(index_path))
+        # index.html must not be heuristically cached: it references the
+        # hashed asset filenames, and a stale index.html keeps serving the
+        # old bundle after a deploy.  no-cache revalidates on every load.
+        # FileResponse generates its etag at send time (so reading
+        # response.headers after construction gets nothing) and doesn't emit
+        # 304 on an If-None-Match hit — unlike StaticFiles — so compute the
+        # same stat-derived etag here and serve 304 when it matches.
+        import hashlib
+
+        stat = index_path.stat()
+        etag = f'"{hashlib.md5(f"{stat.st_mtime}-{stat.st_size}".encode(), usedforsecurity=False).hexdigest()}"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304)
+        return FileResponse(
+            str(index_path),
+            headers={"Cache-Control": "no-cache", "ETag": etag},
+        )
     return {"detail": "Frontend not built — run: cd frontend && npm run build"}
