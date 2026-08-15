@@ -183,6 +183,83 @@ class TestSoftDeleteEffects:
         assert after_total == before_total - 1
 
 
+class TestStatsEntityNormalization:
+    """GET /api/memory/stats top_entities must rank *normalized* entities.
+
+    Regression: top_entities scanned the raw memories.entities JSONB names,
+    so "PG"/"PostgreSQL"/"Postgres" ranked as three separate entries and
+    diverged from total_entities (which counts the normalized entities
+    table).  The endpoint now ranks the normalized entities via
+    memory_entities, so the two numbers share one source.
+    """
+
+    async def _link_entity(
+        self, session_factory, memory_id: str, name: str, canonical: str
+    ) -> None:
+        async with session_factory() as session:
+            entity_id = await session.execute(
+                text(
+                    "INSERT INTO entities (name, canonical_name, type) "
+                    "VALUES (:name, :canonical, 'technology') RETURNING id"
+                ),
+                {"name": name, "canonical": canonical},
+            )
+            eid = entity_id.fetchone()[0]
+            await session.execute(
+                text(
+                    "INSERT INTO memory_entities (memory_id, entity_id) "
+                    "VALUES (:mid, :eid)"
+                ),
+                {"mid": memory_id, "eid": eid},
+            )
+            await session.commit()
+
+    @pytest.mark.asyncio
+    async def test_top_entities_uses_normalized_names(
+        self, async_client: AsyncClient
+    ) -> None:
+        session_factory = get_session_factory()
+        # The memory's raw JSONB carries the un-normalized name "postgres";
+        # the normalized entities table stores it as "PostgreSQL".  The
+        # endpoint must report the normalized name — and rank by link count.
+        memory_id = await insert_test_memory(
+            session_factory, entities=[{"name": "postgres", "type": "technology"}]
+        )
+        await self._link_entity(session_factory, memory_id, "postgres", "PostgreSQL")
+
+        resp = await async_client.get("/api/memory/stats")
+        assert resp.status_code == 200
+        top = resp.json()["top_entities"]
+        names = [e["name"] for e in top]
+
+        assert "PostgreSQL" in names, f"normalized name missing from {names}"
+        # The raw JSONB spelling must NOT appear (that is the divergence the
+        # regression fixes).
+        assert "postgres" not in names, f"raw name leaked into {names}"
+        entry = next(e for e in top if e["name"] == "PostgreSQL")
+        assert entry["count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_top_entities_excludes_deleted_memories(
+        self, async_client: AsyncClient
+    ) -> None:
+        # A soft-deleted memory's entity link must not count toward the rank.
+        session_factory = get_session_factory()
+        memory_id = await insert_test_memory(
+            session_factory, entities=[{"name": "BGE-M3", "type": "technology"}]
+        )
+        await self._link_entity(session_factory, memory_id, "BGE-M3", "BGE-M3")
+        delete_resp = await async_client.delete(f"/api/memory/memories/{memory_id}")
+        assert delete_resp.status_code == 200
+
+        resp = await async_client.get("/api/memory/stats")
+        top = resp.json()["top_entities"]
+        entry = next((e for e in top if e["name"] == "BGE-M3"), None)
+        # The JOIN filters m.deleted_at IS NULL, so the only memory linking
+        # this entity is soft-deleted and the entity cannot appear.
+        assert entry is None, f"deleted memory's entity leaked into {top}"
+
+
 class TestWriteConflict:
     """POST /api/memory/memories/write must not 500 when the new content lands
     in the conflict-detection band.

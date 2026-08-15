@@ -325,15 +325,20 @@ async def memory_stats() -> MemoryStatsResponse:
         ))
         recent_count_7d = r.one()[0]
 
-        # ── Top 10 entities (skip null / non-array rows defensively) ──
+        # ── Top 10 entities (normalized) ──
+        # Rank distinct *normalized* entities by how many live memories they
+        # link to (memory_entities + entities tables), NOT by scanning the raw
+        # memories.entities JSONB names.  The raw names are un-normalized —
+        # "PG"/"PostgreSQL"/"Postgres" would rank as three separate entries
+        # and diverge from the total_entities count, which the same
+        # normalized table already drives.
         r = await session.execute(text(
-            "SELECT e->>'name' AS name, COUNT(*) AS cnt "
-            "FROM memories, jsonb_array_elements(entities) AS e "
-            "WHERE deleted_at IS NULL "
-            "  AND entities IS NOT NULL "
-            "  AND jsonb_typeof(entities) = 'array' "
-            "  AND e->>'name' IS NOT NULL "
-            "GROUP BY e->>'name' ORDER BY cnt DESC LIMIT 10"
+            "SELECT e.canonical_name AS name, COUNT(DISTINCT me.memory_id) AS cnt "
+            "FROM entities e "
+            "JOIN memory_entities me ON me.entity_id = e.id "
+            "JOIN memories m ON m.id = me.memory_id AND m.deleted_at IS NULL "
+            "GROUP BY e.id "
+            "ORDER BY cnt DESC LIMIT 10"
         ))
         top_entities = [{"name": row[0], "count": row[1]} for row in r.fetchall()]
 
