@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from backend.service.scheduler import (
+    _SLOT_GRACE_SECONDS,
+    _seconds_until,
+    _slot_overshoot,
     PatrolScheduler,
     previous_daily_slot,
     previous_weekly_slot,
@@ -52,6 +55,61 @@ class _FakeFactory:
 
     def __call__(self):
         return self._session
+
+
+class TestSleepTiming:
+    """Pure time math behind ``_sleep_until`` — no real sleeping involved.
+
+    The only untestable surface of ``_sleep_until`` is ``asyncio.sleep``; its
+    decisions (how long to sleep, whether a wake missed the slot) are the pure
+    arithmetic of ``_seconds_until`` / ``_slot_overshoot``, tested here with
+    fixed wall-clock inputs.
+    """
+
+    def test_seconds_until_slot_in_future(self) -> None:
+        # 10:00 → 10:30 = 30 minutes of sleep.
+        now = datetime(2026, 1, 15, 10, 0, 0)
+        slot = datetime(2026, 1, 15, 10, 30, 0)
+        assert _seconds_until(slot, now=now) == 1800.0
+
+    def test_seconds_until_slot_due_is_zero(self) -> None:
+        # Exactly on the slot → no sleep, fire immediately.
+        now = datetime(2026, 1, 15, 10, 0, 0)
+        assert _seconds_until(now, now=now) == 0.0
+
+    def test_seconds_until_slot_already_past(self) -> None:
+        # Caught up after a restart → negative, still no sleep.
+        now = datetime(2026, 1, 15, 10, 30, 0)
+        slot = datetime(2026, 1, 15, 10, 0, 0)
+        assert _seconds_until(slot, now=now) == -1800.0
+
+    def test_seconds_until_aware_inputs(self) -> None:
+        # Aware inputs (as the loops always produce) subtract correctly.
+        now = datetime(2026, 1, 15, 10, 0, 0).astimezone()
+        slot = now + timedelta(minutes=5)
+        assert _seconds_until(slot, now=now) == 300.0
+
+    def test_slot_overshoot_woke_early(self) -> None:
+        # Woke 1s before the slot (spurious wakeup) → negative, not a miss.
+        slot = datetime(2026, 1, 15, 10, 0, 0)
+        assert _slot_overshoot(slot, woke_at=slot - timedelta(seconds=1)) == -1.0
+
+    def test_slot_overshoot_within_grace_is_jitter(self) -> None:
+        # 59s late: ordinary jitter — not a missed slot.
+        slot = datetime(2026, 1, 15, 10, 0, 0)
+        assert _slot_overshoot(slot, woke_at=slot + timedelta(seconds=59)) == 59.0
+
+    def test_slot_overshoot_at_grace_boundary_is_not_missed(self) -> None:
+        # The grace check is strict ``>``, so exactly 300s is still jitter.
+        slot = datetime(2026, 1, 15, 10, 0, 0)
+        woke_at = slot + timedelta(seconds=_SLOT_GRACE_SECONDS)
+        assert _slot_overshoot(slot, woke_at=woke_at) <= _SLOT_GRACE_SECONDS
+
+    def test_slot_overshoot_past_grace_is_missed(self) -> None:
+        # Host suspended for 2 hours → the wake missed its slot.
+        slot = datetime(2026, 1, 15, 10, 0, 0)
+        woke_at = slot + timedelta(hours=2)
+        assert _slot_overshoot(slot, woke_at=woke_at) > _SLOT_GRACE_SECONDS
 
 
 class TestSchedulerTimeCalculation:

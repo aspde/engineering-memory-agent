@@ -29,9 +29,35 @@ logger = logging.getLogger(__name__)
 ScheduleCallback = Callable[[], Awaitable[None]]
 
 # Sleep-precision allowance: a wake that overshoots its slot by more than
-# this (seconds) is a missed slot, not scheduler jitter.  Only used for the
-# catch-up log line below.
+# this (seconds) is a missed slot, not scheduler jitter.  ``_sleep_until``
+# logs the catch-up; the threshold lives here so ``_slot_overshoot``'s tests
+# can assert the boundary.
 _SLOT_GRACE_SECONDS = 300
+
+
+def _seconds_until(target: datetime, *, now: datetime | None = None) -> float:
+    """Signed seconds from *now* until *target* (negative when already past).
+
+    The scheduler's wall clock is the local timezone at call time, so both
+    inputs are normalized to aware local datetimes before the subtraction — a
+    naive *target* gets the same local offset as *now*.  The sleep loop only
+    waits when the result is positive; zero or negative means the slot is due
+    and the callback fires immediately.
+    """
+    now = (now or datetime.now()).astimezone()
+    return (target.astimezone() - now).total_seconds()
+
+
+def _slot_overshoot(slot: datetime, *, woke_at: datetime | None = None) -> float:
+    """Seconds the wake landed past *slot* (negative when it woke early).
+
+    An overshoot beyond ``_SLOT_GRACE_SECONDS`` means the wake missed the
+    slot — host suspend/hibernate, a long event-loop stall — rather than
+    ordinary scheduler jitter.  The caller logs that case but still fires the
+    callback, since a late scan beats a dropped one.
+    """
+    woke_at = (woke_at or datetime.now()).astimezone()
+    return (woke_at - slot.astimezone()).total_seconds()
 
 
 async def _sleep_until(next_run: datetime, what: str) -> float:
@@ -44,11 +70,10 @@ async def _sleep_until(next_run: datetime, what: str) -> float:
     still fires the callback — a late scan beats a dropped one, and
     ``run_patrol``'s overlap guard dedups against a concurrent run.
     """
-    now = datetime.now().astimezone()
-    wait = (next_run - now).total_seconds()
+    wait = _seconds_until(next_run)
     if wait > 0:
         await asyncio.sleep(wait)
-    overshoot = (datetime.now().astimezone() - next_run).total_seconds()
+    overshoot = _slot_overshoot(next_run)
     if overshoot > _SLOT_GRACE_SECONDS:
         logger.warning(
             "%s woke %.0fs past its %s slot — firing catch-up",
