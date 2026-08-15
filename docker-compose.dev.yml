@@ -1,0 +1,32 @@
+# Development override — bind-mount backend source + uvicorn auto-reload.
+#
+# The production compose (docker-compose.yml) bakes backend code into the
+# image, so every source change requires `docker compose build backend`.
+# This override makes the dev backend read the host source directly and
+# reload on file change — no rebuild for Python edits.
+#
+# USE:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+#
+# PRODUCTION MUST NOT load this file:
+#   docker compose up -d
+# (the default `docker compose up` auto-loads only a file named
+# docker-compose.override.yml — this file is deliberately NOT named that, so
+# the plain command stays production-safe without loading this override.)
+
+services:
+  backend:
+    volumes:
+      # Host backend source shadows the image copy — the reload watcher and
+      # the running process both read from here.
+      - ./backend:/app/backend
+    command:
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/backend
