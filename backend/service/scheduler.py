@@ -28,6 +28,36 @@ logger = logging.getLogger(__name__)
 
 ScheduleCallback = Callable[[], Awaitable[None]]
 
+# Sleep-precision allowance: a wake that overshoots its slot by more than
+# this (seconds) is a missed slot, not scheduler jitter.  Only used for the
+# catch-up log line below.
+_SLOT_GRACE_SECONDS = 300
+
+
+async def _sleep_until(next_run: datetime, what: str) -> float:
+    """Sleep until *next_run*; return the overshoot seconds when woken.
+
+    A single long ``asyncio.sleep`` stalls while the host suspends /
+    hibernates (Windows freezes the event loop's monotonic clock), so a wake
+    can land hours past the slot and the loop would silently push the run to
+    the next cycle.  Logging the overshoot surfaces the miss; the caller
+    still fires the callback — a late scan beats a dropped one, and
+    ``run_patrol``'s overlap guard dedups against a concurrent run.
+    """
+    now = datetime.now().astimezone()
+    wait = (next_run - now).total_seconds()
+    if wait > 0:
+        await asyncio.sleep(wait)
+    overshoot = (datetime.now().astimezone() - next_run).total_seconds()
+    if overshoot > _SLOT_GRACE_SECONDS:
+        logger.warning(
+            "%s woke %.0fs past its %s slot — firing catch-up",
+            what,
+            overshoot,
+            next_run.isoformat(),
+        )
+    return overshoot
+
 
 class PatrolScheduler:
     """Manages recurring patrol tasks via asyncio background loops.
@@ -49,13 +79,12 @@ class PatrolScheduler:
                 next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
                 if next_run <= now:
                     next_run += timedelta(days=1)
-                wait_seconds = (next_run - now).total_seconds()
                 logger.debug(
                     "Daily patrol next run: %s (in %.0f seconds)",
                     next_run.isoformat(),
-                    wait_seconds,
+                    (next_run - now).total_seconds(),
                 )
-                await asyncio.sleep(wait_seconds)
+                await _sleep_until(next_run, "Daily patrol")
                 try:
                     await callback()
                 except Exception:
@@ -92,13 +121,13 @@ class PatrolScheduler:
                 if days_ahead < 0 or (days_ahead == 0 and next_run <= now):
                     days_ahead += 7
                 next_run += timedelta(days=days_ahead)
-                wait_seconds = (next_run - now).total_seconds()
                 logger.debug(
-                    "Weekly patrol next run: %s (in %.0f seconds)",
+                    "%s next run: %s (in %.0f seconds)",
+                    name,
                     next_run.isoformat(),
-                    wait_seconds,
+                    (next_run - now).total_seconds(),
                 )
-                await asyncio.sleep(wait_seconds)
+                await _sleep_until(next_run, name)
                 try:
                     await callback()
                 except Exception:

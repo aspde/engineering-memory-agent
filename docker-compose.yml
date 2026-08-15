@@ -38,6 +38,12 @@ services:
       # resolve inside the container, so deployments must leave this unset or
       # point it at the ``postgres`` service.
       DATABASE_URL: ${DATABASE_URL:-postgresql://ema:ema123@postgres:5432/ema_dev}
+      # The scheduler computes patrol slots with ``datetime.now().astimezone()``,
+      # which follows the container's TZ.  Without this the container defaults
+      # to UTC and a PATROL_DAILY_HOUR=8 fires at 16:00 local (not 08:00).
+      # Pin to the project's local zone so daily/weekly patrols run at their
+      # wall-clock times.
+      TZ: ${TZ:-Asia/Shanghai}
       # .env 里的 REPO_ALLOW_ROOT 是宿主机 Windows 路径，容器内不存在，
       # validate_config 的 fail-fast 检查会拒绝启动。容器不挂载仓库目录，
       # ingest_git_repo 本就用不了，置空让它 fail-closed（拒绝所有 ingest）。

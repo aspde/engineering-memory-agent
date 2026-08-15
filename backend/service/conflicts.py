@@ -232,6 +232,42 @@ async def resolve_pending_conflict(
     }
 
 
+async def _resolve_patrol_ids(session, a_id: str, b_id: str) -> tuple[str, str]:
+    """Resolve patrol-finding memory ids to full UUIDs.
+
+    Patrol contradiction findings carry the *short* id the search tool
+    displays (``(memory: 4828fb0d)`` — the LLM copies it from the display
+    line), while the memories table is keyed by full UUID.  A short id
+    matches nothing and would surface as a bogus "memory not found / already
+    deleted" conflict.  Full UUIDs (tests, a future prompt change) pass
+    through unchanged.  Raises ValueError when a short id resolves to no
+    live memory or to more than one (ambiguous prefix).
+    """
+    from uuid import UUID
+
+    resolved: list[str] = []
+    for raw in (a_id, b_id):
+        try:
+            UUID(raw)  # full UUID — use as-is
+            resolved.append(raw)
+        except ValueError:
+            row = await session.execute(
+                text(
+                    """SELECT id FROM memories
+                       WHERE left(id::text, 8) = :prefix AND deleted_at IS NULL"""
+                ),
+                {"prefix": raw},
+            )
+            hits = row.fetchall()
+            if len(hits) != 1:
+                raise ValueError(
+                    f"memory id {raw!r} does not uniquely resolve to a stored "
+                    "memory (stale patrol finding or ambiguous 8-char prefix)"
+                )
+            resolved.append(str(hits[0][0]))
+    return resolved[0], resolved[1]
+
+
 async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[str, Any]:
     """Queue a patrol contradiction for later HITL arbitration.
 
@@ -260,6 +296,9 @@ async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[
 
     session_factory = get_session_factory()
     async with session_factory() as session:
+        # Patrol findings carry 8-char short ids (the search tool's display);
+        # resolve them to full UUIDs before the row query / uuid-column insert.
+        a_id, b_id = await _resolve_patrol_ids(session, a_id, b_id)
         rows = await session.execute(
             text(
                 """\

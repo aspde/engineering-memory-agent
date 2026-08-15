@@ -162,6 +162,54 @@ class TestPersistPatrolConflict:
         assert deferred["metadata"]["patrol_log_id"] == "log-1"
 
     @pytest.mark.asyncio
+    async def test_resolves_short_memory_ids(self) -> None:
+        """Patrol findings carry 8-char short ids (the search tool's display);
+        they must resolve to full UUIDs before the row query / uuid insert."""
+        from backend.service.conflicts import persist_patrol_conflict
+
+        new_id = "22222222-2222-2222-2222-222222222222"
+        created = datetime(2026, 8, 8, 12, 0, 0)
+
+        def _id_row(mid: str) -> MagicMock:
+            r = MagicMock()
+            r.__getitem__.return_value = mid  # row[0] is the UUID string
+            return r
+
+        insert_result = MagicMock()
+        insert_result.fetchone.return_value = [new_id, created]
+        resolved_result = MagicMock()
+        resolved_result.fetchone.return_value = None
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _memory_query_result(_id_row(A_ID)),   # resolve a's 8-char prefix
+            _memory_query_result(_id_row(B_ID)),   # resolve b's 8-char prefix
+            _memory_query_result(
+                _memory_row(A_ID, "Use PostgreSQL for storage", content_hash="hash-a"),
+                _memory_row(B_ID, "Migrate away from PostgreSQL", content_hash="hash-b"),
+            ),
+            resolved_result,
+            insert_result,
+        ]
+
+        finding = _patrol_finding()
+        finding["memory_a_id"] = A_ID[:8]
+        finding["memory_b_id"] = B_ID[:8]
+
+        with patch(
+            "backend.service.conflicts.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ):
+            result = await persist_patrol_conflict("log-1", finding)
+
+        assert result["status"] == "queued"
+        # The INSERT still writes full UUIDs into the uuid columns.
+        sql, params = mock_session.execute.call_args_list[4][0]
+        assert params["existing_id"] == A_ID
+        assert params["peer_id"] == B_ID
+        assert params["existing_summary"] == "Use PostgreSQL for storage"
+
+    @pytest.mark.asyncio
     async def test_reverse_pair_dedups_to_one_pending(self) -> None:
         """Inserting (B, A) after (A, B) reuses the pending row — one queue entry."""
         from backend.service.conflicts import persist_patrol_conflict
