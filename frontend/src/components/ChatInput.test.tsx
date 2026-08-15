@@ -82,7 +82,7 @@ describe('ChatInput', () => {
     const user = userEvent.setup();
     const onSend = vi.fn();
     render(<ChatInput onSend={onSend} />);
-    const checkbox = screen.getByLabelText('强制写入记忆');
+    const checkbox = screen.getByLabelText('记住这条');
 
     await user.click(checkbox);
     expect(checkbox).toBeChecked();

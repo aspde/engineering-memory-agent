@@ -53,7 +53,7 @@ def _active_tools() -> list:
 
 
 # Chat exposes every tool to the LLM except ``write_memory_tool`` — explicit
-# memory writes are triggered by the frontend's 强制写入记忆 checkbox and
+# memory writes are triggered by the frontend's 记住这条 checkbox and
 # injected by ``call_llm_node`` as a server-side tool_call, never chosen by
 # the model itself.  The tool stays on the execution roster (``ALL_TOOLS``)
 # so ToolNode can run the injected call, ``check_conflict`` can gate its

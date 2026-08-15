@@ -10,7 +10,7 @@ import ChatInput from '../components/ChatInput';
  * Chat page: lazy-loads message history for the active thread, then renders
  * the scrollable message area plus a pinned chat input.
  *
- * When "强制写入记忆" is checked, the send carries ``force_write`` so the
+ * When "记住这条" is checked, the send carries ``force_write`` so the
  * server injects a write_memory_tool call for this turn — the memory is
  * written inside the agent flow (LLM extraction + on-the-spot conflict
  * handling), and the write's outcome surfaces as a toast via the meta event.

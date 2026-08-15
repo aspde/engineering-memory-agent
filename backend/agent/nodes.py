@@ -1055,7 +1055,7 @@ async def call_llm_node(
         aimessage = AIMessage(content=content)
 
     # ── Force-write injection ────────────────────────────────────────────
-    # When the user checked 强制写入记忆, inject a write_memory_tool call into
+    # When the user checked 记住这条, inject a write_memory_tool call into
     # this AIMessage's tool_calls.  The write runs through the normal ReAct
     # pipeline — ToolNode executes it, check_conflict gates a conflict for
     # on-the-spot resolution, and _write_succeeded_this_turn suppresses
@@ -1265,7 +1265,7 @@ APPROVAL_REQUIRED_TOOLS: frozenset[str] = frozenset({
 # in retrieved content could otherwise trigger).  ``write_memory_tool`` is
 # deliberately NOT gated in chat: the only way it fires there is the
 # force-write injection, which the user already confirmed by checking
-# 强制写入记忆 — asking for a second approval would be double confirmation.
+# 记住这条 — asking for a second approval would be double confirmation.
 # (Automated flows keep the default set so ``write_memory_tool`` still pauses
 # if the model ever chooses it.)  Automated flows (patrol, scenarios) keep
 # the default set so they can still notify the team autonomously — see

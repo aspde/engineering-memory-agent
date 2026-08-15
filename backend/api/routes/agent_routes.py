@@ -239,7 +239,7 @@ class ChatRequest(BaseModel):
     thread_id: str = Field(default_factory=lambda: str(uuid4()))
     resume_data: dict[str, Any] | None = None
     force_write: bool = False
-    """User checked 强制写入记忆 — the turn's message is written to the
+    """User checked 记住这条 — the turn's message is written to the
     memory store regardless of the model's judgement (the write is injected
     into the agent run, not a separate REST call)."""
 

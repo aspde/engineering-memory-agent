@@ -206,7 +206,7 @@ async def write_memory_tool(
     then check for duplicates before inserting.  Returns the action
     taken (inserted, merged, or conflict).
 
-    Invoked by the system when the user checks the 强制写入记忆 box
+    Invoked by the system when the user checks the 记住这条 box
     (the tool_call is injected by call_llm_node), or when the user
     explicitly asks to remember something.  Do not call it on your
     own initiative.

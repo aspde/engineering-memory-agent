@@ -47,7 +47,7 @@ class AgentState(TypedDict):
 
     force_write: bool | None
     """True when this turn's user message must be written to the memory store
-    (the frontend's 强制写入记忆 checkbox).  ``call_llm_node`` injects a
+    (the frontend's 记住这条 checkbox).  ``call_llm_node`` injects a
     ``write_memory_tool`` call into the AIMessage it returns and clears the
     flag, so the write runs through the normal ReAct pipeline (ToolNode +
     check_conflict) exactly once.  ``None``/``False`` = no forced write."""

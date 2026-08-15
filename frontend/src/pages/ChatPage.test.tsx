@@ -133,13 +133,13 @@ describe('ChatPage', () => {
     expect(sendMessage).toHaveBeenCalledWith('hello', false);
   });
 
-  it('force-writes the message and toasts the write outcome when "强制写入记忆" is checked', async () => {
+  it('force-writes the message and toasts the write outcome when "记住这条" is checked', async () => {
     sendMessage.mockResolvedValue({ action: 'inserted', summary: '端口改为 8080' });
     const user = userEvent.setup();
     renderPage();
     await screen.findByPlaceholderText('向 EMA 提问…');
 
-    await user.click(screen.getByLabelText('强制写入记忆'));
+    await user.click(screen.getByLabelText('记住这条'));
     await user.type(screen.getByLabelText('聊天输入'), '记住这个决定');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -155,7 +155,7 @@ describe('ChatPage', () => {
     renderPage();
     await screen.findByPlaceholderText('向 EMA 提问…');
 
-    await user.click(screen.getByLabelText('强制写入记忆'));
+    await user.click(screen.getByLabelText('记住这条'));
     await user.type(screen.getByLabelText('聊天输入'), 'x');
     await user.click(screen.getByRole('button', { name: '发送' }));
 
@@ -168,7 +168,7 @@ describe('ChatPage', () => {
     renderPage();
     await screen.findByPlaceholderText('向 EMA 提问…');
 
-    await user.click(screen.getByLabelText('强制写入记忆'));
+    await user.click(screen.getByLabelText('记住这条'));
     await user.type(screen.getByLabelText('聊天输入'), 'x');
     await user.click(screen.getByRole('button', { name: '发送' }));
 

@@ -9,7 +9,7 @@ interface ChatInputProps {
 /**
  * Chat input box: Enter to send, Shift+Enter for a newline.
  * Disabled while the agent is busy (streaming / awaiting approval).
- * Optional "强制写入记忆" checkbox writes this message into the memory store
+ * Optional "记住这条" checkbox writes this message into the memory store
  * (server-side LLM extraction + on-the-spot conflict handling) regardless of
  * the model's own judgement.  It is a single-action toggle — it resets after
  * each send, so only the current message is affected, never future ones.
@@ -80,7 +80,7 @@ export default function ChatInput({
             className="h-3.5 w-3.5 rounded border-gray-300 text-amber-500 focus:ring-amber-500"
           />
           <span className={forceWrite ? 'font-medium text-amber-600' : ''}>
-            强制写入记忆
+            记住这条
           </span>
         </label>
         <span>Enter 发送 · Shift+Enter 换行</span>
