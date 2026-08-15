@@ -346,6 +346,15 @@ export interface QueuePatrolConflictResponse {
   message?: string | null;
 }
 
+/** Response of the daily pattern-match merge action (PatrolPage button). */
+export interface MergePatrolFindingResponse {
+  ok: boolean;
+  kept_id: string;
+  merged_id: string;
+  action?: string;
+  summary?: string;
+}
+
 export interface PatrolLogDetail {
   id: string;
   patrol_type: PatrolType;

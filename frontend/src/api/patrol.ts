@@ -1,6 +1,7 @@
 import { apiGet, apiPost } from './client';
 import type {
   DismissFindingResponse,
+  MergePatrolFindingResponse,
   PatrolFinding,
   PatrolLogDetail,
   PatrolLogList,
@@ -49,6 +50,17 @@ export function queuePatrolConflict(
 ): Promise<QueuePatrolConflictResponse> {
   return apiPost<QueuePatrolConflictResponse>(
     `/api/patrol/findings/${logId}/conflict`,
+    finding,
+  );
+}
+
+/** Immediately merge a daily pattern-match pair (no HITL queue). */
+export function mergePatrolFinding(
+  logId: string,
+  finding: PatrolFinding,
+): Promise<MergePatrolFindingResponse> {
+  return apiPost<MergePatrolFindingResponse>(
+    `/api/patrol/findings/${logId}/merge`,
     finding,
   );
 }

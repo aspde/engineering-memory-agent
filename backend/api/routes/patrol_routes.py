@@ -13,7 +13,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.service.conflicts import persist_patrol_conflict
+from backend.service.conflicts import (
+    build_patrol_deferred,
+    load_patrol_pair,
+    persist_patrol_conflict,
+)
+from backend.service.memory import resolve_conflict
 from backend.service.patrol import (
     VALID_PATROL_TYPES,
     get_patrol_prompt,
@@ -256,6 +261,60 @@ async def dismiss_finding(log_id: str, body: FindingDismissRequest):
         await session.commit()
 
     return {"ok": True, "log_id": log_id, "dismissed_finding_id": body.finding_id}
+
+
+@router.post("/findings/{log_id}/merge")
+async def merge_patrol_finding(log_id: str, finding: dict[str, Any]):
+    """Immediately merge a daily pattern-match memory pair (no HITL queue).
+
+    A daily pattern finding carries ``new_memory_id`` (the freshly-written
+    duplicate) and ``matched_memory_id`` (the historical memory it duplicates).
+    This merges both into the matched memory — LLM-merged summary / deduped
+    entities & relations, re-embedded — and soft-deletes the new memory in the
+    same transaction, via ``resolve_conflict(merge, ..., peer_id=...)``.  A
+    duplicate is not a contradiction, so it needs no human verdict: the button
+    here is the counterpart to a contradiction's 转入仲裁.
+
+    The finding's 8-char short ids are resolved to full UUIDs by the shared
+    patrol-pair loader (same logic the arbitration queue uses).
+    """
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        exists = await session.execute(
+            text("SELECT id FROM patrol_logs WHERE id = :id"),
+            {"id": log_id},
+        )
+        if exists.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Patrol log not found")
+
+    # Map the daily-pattern field names onto the shared patrol-pair shape.
+    # The matched (historical) memory is the survivor; the new one is merged
+    # into it and soft-deleted.  reason → conflict_description carries the
+    # LLM's rationale into the resolution.
+    mapped = {
+        "memory_a_id": str(finding.get("matched_memory_id") or "").strip(),
+        "memory_b_id": str(finding.get("new_memory_id") or "").strip(),
+        "conflict_description": str(finding.get("reason") or ""),
+        "severity": finding.get("severity", "warning"),
+    }
+    try:
+        a_id, b_id, memory_a, memory_b = await load_patrol_pair(mapped)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    deferred = build_patrol_deferred(a_id, b_id, memory_a, memory_b, mapped, log_id)
+    try:
+        outcome = await resolve_conflict("merge", a_id, deferred, peer_id=b_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return {
+        "ok": True,
+        "kept_id": a_id,
+        "merged_id": b_id,
+        "action": outcome.get("action"),
+        "summary": outcome.get("summary", ""),
+    }
 
 
 @router.post("/findings/{log_id}/conflict", response_model=PatrolConflictQueueResponse)

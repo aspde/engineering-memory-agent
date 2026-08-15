@@ -3,6 +3,7 @@ import {
   dismissFinding,
   getPatrolLog,
   listPatrolLogs,
+  mergePatrolFinding,
   queuePatrolConflict,
   triggerPatrol,
 } from './patrol';
@@ -102,6 +103,25 @@ describe('queuePatrolConflict', () => {
     fetchMock.mockResolvedValue(okJson({ log_id: 'p-4', conflict_id: 'c-1' }));
     await queuePatrolConflict('p-4', finding);
     expect(fetchMock).toHaveBeenCalledWith('/api/patrol/findings/p-4/conflict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(finding),
+    });
+  });
+});
+
+describe('mergePatrolFinding', () => {
+  it('POSTs the finding payload to the merge endpoint', async () => {
+    const finding = {
+      matched_memory_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      new_memory_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      reason: 'duplicate of historical memory',
+    };
+    fetchMock.mockResolvedValue(
+      okJson({ ok: true, kept_id: 'a', merged_id: 'b', action: 'conflict_resolved' }),
+    );
+    await mergePatrolFinding('p-5', finding);
+    expect(fetchMock).toHaveBeenCalledWith('/api/patrol/findings/p-5/merge', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       body: JSON.stringify(finding),

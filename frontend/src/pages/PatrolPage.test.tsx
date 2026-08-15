@@ -8,16 +8,18 @@ vi.mock('../api/patrol', () => ({
   dismissFinding: vi.fn(),
   getPatrolLog: vi.fn(),
   listPatrolLogs: vi.fn(),
+  mergePatrolFinding: vi.fn(),
   queuePatrolConflict: vi.fn(),
   triggerPatrol: vi.fn(),
 }));
 
-import { dismissFinding, getPatrolLog, listPatrolLogs, queuePatrolConflict } from '../api/patrol';
+import { dismissFinding, getPatrolLog, listPatrolLogs, mergePatrolFinding, queuePatrolConflict } from '../api/patrol';
 
 const mockListPatrolLogs = listPatrolLogs as ReturnType<typeof vi.fn>;
 const mockGetPatrolLog = getPatrolLog as ReturnType<typeof vi.fn>;
 const mockQueuePatrolConflict = queuePatrolConflict as ReturnType<typeof vi.fn>;
 const mockDismissFinding = dismissFinding as ReturnType<typeof vi.fn>;
+const mockMergePatrolFinding = mergePatrolFinding as ReturnType<typeof vi.fn>;
 
 const logSummary = {
   id: 'log-1',
@@ -48,6 +50,17 @@ const contradictionFinding = {
   severity: 'warning',
 };
 
+/** A daily pattern-match finding: the new memory duplicates a historical one.
+ *  Keyed by finding index (no memory-pair key), like the backend emits. */
+const patternFinding = {
+  matched_memory_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+  matched_summary: 'PostgreSQL is the store',
+  new_memory_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+  new_summary: 'Use PostgreSQL for persistence',
+  reason: 'same content, newer write',
+  severity: 'warning',
+};
+
 function renderPage() {
   return render(
     <MemoryRouter>
@@ -68,6 +81,12 @@ describe('PatrolPage', () => {
     mockQueuePatrolConflict.mockResolvedValue({
       conflict_id: 'conflict-1',
       status: 'queued',
+    });
+    mockMergePatrolFinding.mockResolvedValue({
+      ok: true,
+      kept_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      merged_id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      action: 'conflict_resolved',
     });
   });
 
@@ -265,5 +284,63 @@ describe('PatrolPage', () => {
     });
     expect(screen.getByText(/# 矛盾扫描巡逻报告/)).toBeDefined();
     expect(screen.queryByText('未发现需关注事项')).toBeNull();
+  });
+
+  it('merges a daily pattern finding from the card', async () => {
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      findings: { pattern_matches: [patternFinding] },
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/1 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/1 个发现/));
+
+    await waitFor(() => {
+      expect(screen.getByText('合并')).toBeDefined();
+    });
+    await user.click(screen.getByText('合并'));
+
+    // The full finding reaches the merge endpoint.
+    await waitFor(() => {
+      expect(mockMergePatrolFinding).toHaveBeenCalledWith('log-1', patternFinding);
+    });
+    // The card flips to "已合并" so the pair cannot be re-merged.
+    await waitFor(() => {
+      expect(screen.getByText('已合并')).toBeDefined();
+    });
+    // Merging auto-dismisses the finding from the patrol view.
+    await waitFor(() => {
+      expect(mockDismissFinding).toHaveBeenCalledWith('log-1', expect.any(String));
+    });
+  });
+
+  it('shows a merge error when the pair was already processed', async () => {
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      findings: { pattern_matches: [patternFinding] },
+      dismissed_findings: [],
+    });
+    mockMergePatrolFinding.mockRejectedValue(new Error('409 Conflict: pair already merged'));
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/1 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/1 个发现/));
+
+    await waitFor(() => {
+      expect(screen.getByText('合并')).toBeDefined();
+    });
+    await user.click(screen.getByText('合并'));
+
+    await waitFor(() => {
+      expect(screen.getByText('合并失败：记忆可能已被处理或删除')).toBeDefined();
+    });
   });
 });

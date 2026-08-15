@@ -393,6 +393,133 @@ class TestQueuePatrolConflict:
             assert resp.status_code == 409
 
 
+class TestMergePatrolFinding:
+    """POST /api/patrol/findings/{log_id}/merge"""
+
+    A_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+    B_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+    @staticmethod
+    def _exists_factory(log_exists: bool):
+        """A session factory whose first query reports whether the log exists."""
+        mock_session = AsyncMock()
+        exists_result = MagicMock()
+        exists_result.fetchone.return_value = MagicMock() if log_exists else None
+        mock_session.execute.return_value = exists_result
+
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=mock_session)
+        ctx.__aexit__ = AsyncMock(return_value=None)
+        factory = MagicMock(return_value=ctx)
+        return factory
+
+    def test_merge_success_maps_daily_pattern_fields(self, client):
+        """matched/new memory ids map onto the shared pair shape and the pair
+        is merged via the shared resolution pipeline, B as the peer."""
+        deferred = {"kind": "patrol", "metadata": {"patrol_log_id": "log-1"}}
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=self._exists_factory(True),
+        ), patch(
+            "backend.api.routes.patrol_routes.load_patrol_pair",
+            new_callable=AsyncMock,
+            return_value=(
+                self.A_ID,
+                self.B_ID,
+                {"id": self.A_ID, "summary": "历史记忆"},
+                {"id": self.B_ID, "summary": "新记忆"},
+            ),
+        ) as mock_load, patch(
+            "backend.api.routes.patrol_routes.build_patrol_deferred",
+            return_value=deferred,
+        ) as mock_build, patch(
+            "backend.api.routes.patrol_routes.resolve_conflict",
+            new_callable=AsyncMock,
+            return_value={
+                "id": self.A_ID,
+                "action": "conflict_resolved",
+                "resolution": "merge",
+            },
+        ) as mock_resolve:
+            resp = client.post(
+                "/api/patrol/findings/log-1/merge",
+                json={
+                    "matched_memory_id": self.A_ID,
+                    "new_memory_id": self.B_ID,
+                    "reason": "duplicate of historical memory",
+                },
+            )
+
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["ok"] is True
+            assert data["kept_id"] == self.A_ID
+            assert data["merged_id"] == self.B_ID
+            assert data["action"] == "conflict_resolved"
+
+            # The daily-pattern field names are mapped onto the shared shape:
+            # matched (historical) → survivor A, new → losing B, reason →
+            # conflict_description.
+            mapped = mock_load.await_args.args[0]
+            assert mapped["memory_a_id"] == self.A_ID
+            assert mapped["memory_b_id"] == self.B_ID
+            assert mapped["conflict_description"] == "duplicate of historical memory"
+            assert mapped["severity"] == "warning"  # daily findings default
+            # The merge is applied through the same pipeline as arbitration.
+            assert mock_resolve.await_args.args == ("merge", self.A_ID, deferred)
+            assert mock_resolve.await_args.kwargs == {"peer_id": self.B_ID}
+
+    def test_merge_missing_log_returns_404(self, client):
+        """Merging on a nonexistent log returns 404."""
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=self._exists_factory(False),
+        ):
+            resp = client.post("/api/patrol/findings/missing-log/merge", json={})
+            assert resp.status_code == 404
+
+    def test_merge_stale_finding_returns_409(self, client):
+        """A stale finding (memory deleted) is a 409, not a crash."""
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=self._exists_factory(True),
+        ), patch(
+            "backend.api.routes.patrol_routes.load_patrol_pair",
+            new_callable=AsyncMock,
+            side_effect=ValueError(
+                "memory_a or memory_b not found or already deleted — patrol finding is stale"
+            ),
+        ):
+            resp = client.post(
+                "/api/patrol/findings/log-1/merge",
+                json={"matched_memory_id": "a", "new_memory_id": "b"},
+            )
+            assert resp.status_code == 409
+
+    def test_merge_resolution_failure_returns_409(self, client):
+        """A resolution refusal (e.g. survivor deleted at write time) is a 409."""
+        with patch(
+            "backend.api.routes.patrol_routes.get_session_factory",
+            return_value=self._exists_factory(True),
+        ), patch(
+            "backend.api.routes.patrol_routes.load_patrol_pair",
+            new_callable=AsyncMock,
+            return_value=(self.A_ID, self.B_ID, {}, {}),
+        ), patch(
+            "backend.api.routes.patrol_routes.build_patrol_deferred",
+            return_value={},
+        ), patch(
+            "backend.api.routes.patrol_routes.resolve_conflict",
+            new_callable=AsyncMock,
+            side_effect=ValueError("Surviving memory ... no longer exists"),
+        ):
+            resp = client.post(
+                "/api/patrol/findings/log-1/merge",
+                json={"matched_memory_id": "a", "new_memory_id": "b"},
+            )
+            assert resp.status_code == 409
+
+
 class TestDismissFindingRealDB:
     """Real-DB regression: dismissal is keyed by *finding key*, not a UUID.
 

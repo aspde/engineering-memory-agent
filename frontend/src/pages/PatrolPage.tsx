@@ -3,6 +3,7 @@ import {
   dismissFinding,
   getPatrolLog,
   listPatrolLogs,
+  mergePatrolFinding,
   queuePatrolConflict,
   triggerPatrol,
 } from '../api/patrol';
@@ -128,6 +129,8 @@ export default function PatrolPage() {
   const [dismissedIds, setDismissedIds] = useState<Set<string>>(new Set());
   const [arbitratingKey, setArbitratingKey] = useState<string | null>(null);
   const [arbitratedKeys, setArbitratedKeys] = useState<Set<string>>(new Set());
+  const [mergingKey, setMergingKey] = useState<string | null>(null);
+  const [mergedKeys, setMergedKeys] = useState<Set<string>>(new Set());
   const [arbitrateError, setArbitrateError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string>('');
   // Latest run *today* per patrol type (for the "已执行过" hint under the
@@ -256,6 +259,47 @@ export default function PatrolPage() {
         );
       } finally {
         setArbitratingKey(null);
+      }
+    },
+    [selectedId],
+  );
+
+  /** Merge a daily pattern-match pair in place (matched memory absorbs the
+   *  new one; the new memory is soft-deleted).  No HITL queue — a duplicate
+   *  is not a contradiction, so it needs no human verdict. */
+  const handleMerge = useCallback(
+    async (finding: PatrolFinding, findingKey: string) => {
+      if (!selectedId) return;
+      setMergingKey(findingKey);
+      setArbitrateError(null);
+      try {
+        await mergePatrolFinding(selectedId, finding);
+        // 即时反馈：先标记已合并，防重复点击
+        setMergedKeys((prev) => new Set(prev).add(findingKey));
+        // The pair is merged — dismiss it so it stops showing as open.
+        try {
+          await dismissFinding(selectedId, findingKey);
+        } catch {
+          // ignore — the merge already happened
+        }
+        // 自动刷新：重新拉详情，让 UI 反映后端真值（该 finding 已被忽略）
+        try {
+          const data = await getPatrolLog(selectedId);
+          setDetail(data);
+          setDismissedIds(new Set(data.dismissed_findings ?? []));
+        } catch {
+          // 刷新失败不阻塞——本地 state 已反映合并结果
+        }
+      } catch (err) {
+        setArbitrateError(
+          err instanceof Error && /409|conflict|Conflict/.test(err.message)
+            ? '合并失败：记忆可能已被处理或删除'
+            : err instanceof Error
+              ? err.message
+              : '合并失败，请重试',
+        );
+      } finally {
+        setMergingKey(null);
       }
     },
     [selectedId],
@@ -485,7 +529,9 @@ export default function PatrolPage() {
                         const dismissed = dismissedIds.has(fKey);
                         const arbitrateKey = patrolFindingKey(f);
                         const arbitrated = arbitrateKey ? arbitratedKeys.has(arbitrateKey) : false;
+                        const merged = mergedKeys.has(fKey);
                         const isContradiction = groupKey === 'contradictions';
+                        const isPattern = groupKey === 'pattern_matches';
                         const card = findingCardText(f, groupKey);
                         return (
                           <div
@@ -523,6 +569,24 @@ export default function PatrolPage() {
                                       : arbitratingKey === arbitrateKey
                                         ? '处理中…'
                                         : '转入仲裁'}
+                                  </button>
+                                )}
+                                {isPattern && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void handleMerge(f, fKey)}
+                                    disabled={dismissed || merged || mergingKey === fKey}
+                                    className={`shrink-0 text-xs px-2 py-0.5 rounded ${
+                                      dismissed || merged
+                                        ? 'bg-blue-100 text-blue-400 cursor-default'
+                                        : 'bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50'
+                                    }`}
+                                  >
+                                    {dismissed || merged
+                                      ? '已合并'
+                                      : mergingKey === fKey
+                                        ? '合并中…'
+                                        : '合并'}
                                   </button>
                                 )}
                                 <button

@@ -626,8 +626,22 @@ async def _write_resolved_memory(
     Returns ``None`` on success, or the winner dict when the content-hash
     race was lost.
     """
-    if content_hash is None:
-        raise ValueError("content_hash required to resolve a conflict")
+    # A patrol-merged pair may have no content_hash — memories seeded directly
+    # (tests/eval/seed.py bypasses write_memory, which computes the hash) have
+    # NULL content_hash.  Refuse nothing: keep the survivor's existing hash so
+    # its idempotency gate stays intact; only the write_memory-shaped conflict
+    # paths (which always carry a hash) overwrite it.
+    hash_col = "content_hash = :content_hash," if content_hash else ""
+    params: dict[str, Any] = {
+        "id": existing_id,
+        "summary": summary,
+        "entities": json.dumps(entities, ensure_ascii=False),
+        "relations": json.dumps(relations, ensure_ascii=False),
+        "embedding": str(embedding),
+        "meta": json.dumps(meta),
+    }
+    if content_hash:
+        params["content_hash"] = content_hash
     try:
         async with session_factory() as session:
             if peer_id:
@@ -648,20 +662,12 @@ async def _write_resolved_memory(
                         relations = :relations,
                         embedding = :embedding,
                         meta = :meta,
-                        content_hash = :content_hash,
+                        {hash_col}
                         updated_at = NOW()
                     WHERE id = :id {where}
                     """
                 ),
-                {
-                    "id": existing_id,
-                    "summary": summary,
-                    "entities": json.dumps(entities, ensure_ascii=False),
-                    "relations": json.dumps(relations, ensure_ascii=False),
-                    "embedding": str(embedding),
-                    "meta": json.dumps(meta),
-                    "content_hash": content_hash,
-                },
+                params,
             )
             if peer_id and result.rowcount != 1:
                 # A deleted between the liveness check and the write — refuse

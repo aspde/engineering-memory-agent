@@ -309,6 +309,153 @@ class TestPersistPatrolConflict:
             await persist_patrol_conflict("log-1", {"memory_a_id": A_ID, "memory_b_id": A_ID})
 
 
+class TestLoadPatrolPair:
+    """The shared patrol-pair loader (arbitration queue + immediate-merge)."""
+
+    @pytest.mark.asyncio
+    async def test_returns_both_live_rows(self) -> None:
+        """Full UUIDs pass through; both rows come back keyed by id."""
+        from backend.service.conflicts import load_patrol_pair
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _memory_query_result(
+                _memory_row(A_ID, "Use PostgreSQL for storage", content_hash="hash-a"),
+                _memory_row(B_ID, "Migrate away from PostgreSQL", content_hash="hash-b"),
+            ),
+        ]
+        with patch(
+            "backend.service.conflicts.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ):
+            a_id, b_id, memory_a, memory_b = await load_patrol_pair(_patrol_finding())
+
+        assert a_id == A_ID
+        assert b_id == B_ID
+        assert memory_a["summary"] == "Use PostgreSQL for storage"
+        assert memory_b["summary"] == "Migrate away from PostgreSQL"
+        # The row read is keyed by the full UUIDs and excludes deleted rows.
+        sql, params = mock_session.execute.call_args_list[0][0]
+        assert "deleted_at IS NULL" in str(sql)
+        assert params["a_id"] == A_ID
+        assert params["b_id"] == B_ID
+
+    @pytest.mark.asyncio
+    async def test_resolves_short_ids_before_row_read(self) -> None:
+        """8-char prefixes resolve to full UUIDs; the row read uses them."""
+        from backend.service.conflicts import load_patrol_pair
+
+        def _id_row(mid: str) -> MagicMock:
+            r = MagicMock()
+            r.__getitem__.return_value = mid  # row[0] is the UUID string
+            return r
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _memory_query_result(_id_row(A_ID)),  # resolve a's 8-char prefix
+            _memory_query_result(_id_row(B_ID)),  # resolve b's 8-char prefix
+            _memory_query_result(
+                _memory_row(A_ID, "Use PostgreSQL for storage"),
+                _memory_row(B_ID, "Migrate away from PostgreSQL"),
+            ),
+        ]
+        finding = {
+            **_patrol_finding(),
+            "memory_a_id": A_ID[:8],
+            "memory_b_id": B_ID[:8],
+        }
+        with patch(
+            "backend.service.conflicts.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ):
+            a_id, b_id, _, _ = await load_patrol_pair(finding)
+
+        assert a_id == A_ID
+        assert b_id == B_ID
+        # The row read (call 2) is keyed by the resolved full UUIDs.
+        sql, params = mock_session.execute.call_args_list[2][0]
+        assert params["a_id"] == A_ID
+        assert params["b_id"] == B_ID
+
+    @pytest.mark.asyncio
+    async def test_missing_or_identical_ids_raise(self) -> None:
+        from backend.service.conflicts import load_patrol_pair
+
+        with pytest.raises(ValueError, match="memory_a_id or memory_b_id"):
+            await load_patrol_pair({"memory_a_id": A_ID})
+        with pytest.raises(ValueError, match="must differ"):
+            await load_patrol_pair({"memory_a_id": A_ID, "memory_b_id": A_ID})
+
+    @pytest.mark.asyncio
+    async def test_stale_pair_raises_when_one_side_deleted(self) -> None:
+        """A memory that is soft-deleted (or missing) makes the pair stale."""
+        from backend.service.conflicts import load_patrol_pair
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _memory_query_result(_memory_row(A_ID, "Use PostgreSQL for storage")),  # B missing
+        ]
+        with patch(
+            "backend.service.conflicts.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ), pytest.raises(ValueError, match="not found or already deleted"):
+            await load_patrol_pair(_patrol_finding())
+
+    @pytest.mark.asyncio
+    async def test_missing_embedding_raises(self) -> None:
+        """Either side lacking an embedding cannot be arbitrated/merged."""
+        from backend.service.conflicts import load_patrol_pair
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            _memory_query_result(
+                _memory_row(A_ID, "Use PostgreSQL for storage", embedding=None),
+                _memory_row(B_ID, "Migrate away from PostgreSQL", embedding=None),
+            ),
+        ]
+        with patch(
+            "backend.service.conflicts.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ), pytest.raises(ValueError, match="no embedding"):
+            await load_patrol_pair(_patrol_finding())
+
+
+class TestBuildPatrolDeferred:
+    @staticmethod
+    def _memory_dict(mid: str, summary: str, content_hash: str | None) -> dict:
+        """The plain-dict row shape ``load_patrol_pair`` returns (its caller)."""
+        return dict(_memory_row(mid, summary, content_hash=content_hash)._mapping)
+
+    def test_payload_matches_queue_path_shape(self) -> None:
+        """The extracted builder reproduces the deferred payload the queue
+        path used to build inline (self-contained; B as the new-side)."""
+        from backend.service.conflicts import build_patrol_deferred
+
+        memory_a = self._memory_dict(A_ID, "Use PostgreSQL for storage", "hash-a")
+        memory_b = self._memory_dict(B_ID, "Migrate away from PostgreSQL", "hash-b")
+        deferred = build_patrol_deferred(
+            A_ID, B_ID, memory_a, memory_b, _patrol_finding(), "log-1"
+        )
+
+        assert deferred == _patrol_deferred()
+
+    def test_severity_defaults_to_info(self) -> None:
+        """A finding without a severity key (the builder's own default; the
+        daily pattern route maps one in upstream) falls back to info."""
+        from backend.service.conflicts import build_patrol_deferred
+
+        memory_a = self._memory_dict(A_ID, "Use PostgreSQL for storage", "hash-a")
+        memory_b = self._memory_dict(B_ID, "Migrate away from PostgreSQL", "hash-b")
+        finding = {k: v for k, v in _patrol_finding().items() if k != "severity"}
+        deferred = build_patrol_deferred(
+            A_ID, B_ID, memory_a, memory_b, finding, "log-1"
+        )
+
+        assert deferred["metadata"]["severity"] == "info"
+        # The finding's description still flows through.
+        assert deferred["metadata"]["conflict_description"] == "opposite recommendations"
+
+
 class TestResolvePatrolConflict:
     @pytest.mark.asyncio
     async def test_keep_existing_soft_deletes_peer_only(self) -> None:

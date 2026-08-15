@@ -268,6 +268,94 @@ async def _resolve_patrol_ids(session, a_id: str, b_id: str) -> tuple[str, str]:
     return resolved[0], resolved[1]
 
 
+async def load_patrol_pair(finding: dict[str, Any]) -> tuple[str, str, dict, dict]:
+    """Resolve a patrol finding's two memory ids to full UUIDs and re-read
+    both live rows.
+
+    Shared by the queue path (``persist_patrol_conflict``) and the
+    immediate-merge path (patrol routes' ``/merge`` endpoint) so the
+    short-id resolution and stale-check logic exists once.  Patrol findings
+    carry the 8-char short id the search tool displays; ``_resolve_patrol_ids``
+    maps them to the full UUIDs the memories table is keyed by.
+
+    Returns ``(a_id, b_id, memory_a, memory_b)``.  Raises ValueError when the
+    finding is malformed, a short id is ambiguous, or either memory is
+    missing / deleted / has no embedding.
+    """
+    a_id = str(finding.get("memory_a_id") or "").strip()
+    b_id = str(finding.get("memory_b_id") or "").strip()
+    if not a_id or not b_id:
+        raise ValueError("Patrol finding missing memory_a_id or memory_b_id")
+    if a_id == b_id:
+        raise ValueError("Patrol finding memory_a_id and memory_b_id must differ")
+
+    session_factory = get_session_factory()
+    async with session_factory() as session:
+        a_id, b_id = await _resolve_patrol_ids(session, a_id, b_id)
+        rows = await session.execute(
+            text(
+                """\
+                SELECT id, summary, entities, relations, embedding, source_type,
+                       meta, content_hash
+                FROM memories
+                WHERE id IN (:a_id, :b_id) AND deleted_at IS NULL
+                """
+            ),
+            {"a_id": a_id, "b_id": b_id},
+        )
+        stored = {str(r.id): dict(r._mapping) for r in rows.fetchall()}
+
+    memory_a = stored.get(a_id)
+    memory_b = stored.get(b_id)
+    if memory_a is None or memory_b is None:
+        raise ValueError(
+            "memory_a or memory_b not found or already deleted — patrol finding is stale"
+        )
+    if memory_a.get("embedding") is None or memory_b.get("embedding") is None:
+        raise ValueError(
+            "memory_a or memory_b has no embedding — cannot arbitrate; re-embed the memories first"
+        )
+    return a_id, b_id, memory_a, memory_b
+
+
+def build_patrol_deferred(
+    a_id: str,
+    b_id: str,
+    memory_a: dict,
+    memory_b: dict,
+    finding: dict[str, Any],
+    log_id: str,
+) -> dict:
+    """The ``deferred`` payload ``resolve_conflict`` needs for a patrol pair.
+
+    Carries B (the losing side) as the extracted new-side and A as the
+    survivor; the payload is self-contained so resolution survives later
+    memory changes.  ``finding`` supplies the human description fields
+    (``conflict_description`` / ``severity``); daily pattern findings carry
+    ``reason`` / ``similarity`` instead — callers map them.
+    """
+    return {
+        "kind": "patrol",
+        "extracted": {
+            "summary": memory_b["summary"],
+            "entities": _as_list(memory_b.get("entities")),
+            "relations": _as_list(memory_b.get("relations")),
+        },
+        "embedding": str(memory_b["embedding"]),
+        "source_type": memory_b.get("source_type"),
+        "metadata": {
+            "conflicts_with": a_id,
+            "conflicting_summary": memory_a["summary"],
+            "peer_id": b_id,
+            "peer_summary": memory_b["summary"],
+            "conflict_description": finding.get("conflict_description", ""),
+            "severity": finding.get("severity", "info"),
+            "patrol_log_id": log_id,
+        },
+        "content_hash": memory_b.get("content_hash"),
+    }
+
+
 async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[str, Any]:
     """Queue a patrol contradiction for later HITL arbitration.
 
@@ -287,41 +375,9 @@ async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[
     ``"already_resolved"`` (this pair was arbitrated before and both memories
     are still live — i.e. the prior choice was keep_both).
     """
-    a_id = str(finding.get("memory_a_id") or "").strip()
-    b_id = str(finding.get("memory_b_id") or "").strip()
-    if not a_id or not b_id:
-        raise ValueError("Patrol finding missing memory_a_id or memory_b_id")
-    if a_id == b_id:
-        raise ValueError("Patrol finding memory_a_id and memory_b_id must differ")
+    a_id, b_id, memory_a, memory_b = await load_patrol_pair(finding)
 
     session_factory = get_session_factory()
-    async with session_factory() as session:
-        # Patrol findings carry 8-char short ids (the search tool's display);
-        # resolve them to full UUIDs before the row query / uuid-column insert.
-        a_id, b_id = await _resolve_patrol_ids(session, a_id, b_id)
-        rows = await session.execute(
-            text(
-                """\
-                SELECT id, summary, entities, relations, embedding, source_type,
-                       meta, content_hash
-                FROM memories
-                WHERE id IN (:a_id, :b_id) AND deleted_at IS NULL
-                """
-            ),
-            {"a_id": a_id, "b_id": b_id},
-        )
-        stored = {str(r.id): dict(r._mapping) for r in rows.fetchall()}
-        memory_a = stored.get(a_id)
-        memory_b = stored.get(b_id)
-
-    if memory_a is None or memory_b is None:
-        raise ValueError(
-            "memory_a or memory_b not found or already deleted — patrol finding is stale"
-        )
-    if memory_a.get("embedding") is None or memory_b.get("embedding") is None:
-        raise ValueError(
-            "memory_a or memory_b has no embedding — cannot arbitrate; re-embed the memories first"
-        )
 
     # ── Already-arbitrated check (keep_both record) ─────────────────────
     # Resolved rows leave the partial unique index, so a re-run of the same
@@ -357,26 +413,7 @@ async def persist_patrol_conflict(log_id: str, finding: dict[str, Any]) -> dict[
             "queued": False,
         }
 
-    deferred = {
-        "kind": "patrol",
-        "extracted": {
-            "summary": memory_b["summary"],
-            "entities": _as_list(memory_b.get("entities")),
-            "relations": _as_list(memory_b.get("relations")),
-        },
-        "embedding": str(memory_b["embedding"]),
-        "source_type": memory_b.get("source_type"),
-        "metadata": {
-            "conflicts_with": a_id,
-            "conflicting_summary": memory_a["summary"],
-            "peer_id": b_id,
-            "peer_summary": memory_b["summary"],
-            "conflict_description": finding.get("conflict_description", ""),
-            "severity": finding.get("severity", "info"),
-            "patrol_log_id": log_id,
-        },
-        "content_hash": memory_b.get("content_hash"),
-    }
+    deferred = build_patrol_deferred(a_id, b_id, memory_a, memory_b, finding, log_id)
 
     new_summary = memory_b["summary"]
     existing_summary = memory_a["summary"]
