@@ -360,6 +360,10 @@ export interface PatrolLogDetail {
   patrol_type: PatrolType;
   trigger: PatrolTrigger;
   status: PatrolStatus;
+  /** Failure reason for a ``failed`` run (provider error, timeout,
+   *  cancellation, or a malformed-findings message).  Null for completed
+   *  and interrupted runs. */
+  error?: string | null;
   /** Findings grouped by category key.  A group's value is an array of
    *  findings; an unstructured (failed/raw) log instead carries a single
    *  ``raw_output`` string with the patrol's original report text. */

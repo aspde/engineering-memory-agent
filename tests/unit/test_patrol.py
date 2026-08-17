@@ -550,6 +550,156 @@ class TestRunPatrol:
         assert len(patrol_id) == 36
 
     @pytest.mark.asyncio
+    async def test_run_patrol_persists_error_reason_on_crash(self) -> None:
+        """A crashed patrol records *why* in the error column, not just
+        'failed' — the reason is what the logs detail view surfaces so a
+        failure is diagnosable without grepping backend logs."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.side_effect = RuntimeError("LLM provider unavailable")
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "failed"
+        assert "LLM provider unavailable" in update_calls[0].args[1]["error"]
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_persists_validation_error(self) -> None:
+        """A malformed-findings failure also records the parse error in the
+        error column, mirroring the parse_error kept inside findings."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "This is not the JSON contract at all.",
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="weekly",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        params = update_calls[0].args[1]
+        assert params["status"] == "failed"
+        assert params["error"]  # non-empty reason
+        findings = json.loads(params["findings"])
+        assert params["error"] == findings["parse_error"]
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_surfaces_upstream_llm_error_over_contract(self) -> None:
+        """A failed ReAct-loop LLM call records the real provider error, not the
+        misleading 'findings missing required keys' contract violation.
+
+        call_llm_node captures the provider error in state.error and returns a
+        generic stub as final_response; that stub can't parse as findings, so
+        the contract check fails.  The contract violation is a symptom — the
+        error column must surface the true cause (e.g. a 429 rate limit).
+        """
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": "抱歉，当前回答生成失败，请稍后重试。",
+            "error": (
+                "Error code: 429 - {'error': {'type': 'FreeUsageLimitError', "
+                "'message': 'Rate limit exceeded.'}}"
+            ),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        params = update_calls[0].args[1]
+        assert params["status"] == "failed"
+        # The failure reason is the real provider error, not the contract check.
+        assert "429" in params["error"]
+        assert "missing required keys" not in params["error"]
+        findings = json.loads(params["findings"])
+        # The true cause is kept inside findings too, alongside the raw stub.
+        assert "429" in findings["agent_error"]
+        assert "raw_output" in findings
+        # parse_error is still recorded for debugging, just not as the headline.
+        assert "parse_error" in findings
+
+    @pytest.mark.asyncio
+    async def test_run_patrol_no_error_on_success(self) -> None:
+        """A completed patrol leaves the error column NULL — the column is a
+        failure channel, never set on the happy path."""
+        mock_agent = AsyncMock()
+        mock_agent.ainvoke.return_value = {
+            "final_response": json.dumps(
+                {"pattern_matches": [], "knowledge_gaps": [], "new_entities": []}
+            ),
+            "messages": [],
+        }
+        mock_factory = _make_mock_session()
+
+        with (
+            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch(
+                "backend.service.patrol.get_session_factory",
+                return_value=mock_factory,
+            ),
+        ):
+            await run_patrol(
+                patrol_type="daily",
+                trigger="cron",
+                system_prompt="test prompt",
+            )
+
+        session = mock_factory.return_value.__aenter__.return_value
+        update_calls = [
+            c for c in session.execute.await_args_list
+            if "UPDATE patrol_logs" in str(c.args[0])
+        ]
+        assert update_calls[0].args[1]["status"] == "completed"
+        assert update_calls[0].args[1]["error"] is None
+
+    @pytest.mark.asyncio
     async def test_overlap_guard_skips_when_already_running(self) -> None:
         """A second patrol of the same type is skipped, not run concurrently."""
         mock_agent = AsyncMock()

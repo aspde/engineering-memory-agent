@@ -344,14 +344,30 @@ async def run_patrol(
                     # A malformed scan must never persist as 'completed' — the
                     # UI would render "done" while every finding click fails.
                     status = "failed"
-                    error_msg = parse_error
+                    # When a ReAct-loop LLM call fails mid-scan, call_llm_node
+                    # captures the provider error in state.error and returns
+                    # only a generic error stub as the final response — so the
+                    # unparseable "findings" here are that stub, and the
+                    # contract violation is a *symptom*, not the cause.  Prefer
+                    # the real upstream error (e.g. a provider 429 rate limit)
+                    # as the failure reason; fall back to the contract message
+                    # only when the graph recorded no error (a genuine model
+                    # deviation from the JSON schema).
+                    graph_error = result.get("error")
+                    error_msg = (
+                        f"agent error: {graph_error}" if graph_error else parse_error
+                    )
                     if not isinstance(findings, dict):
                         findings = {"raw_output": raw_text[:5000]}
                     findings.setdefault("raw_output", raw_text[:5000])
                     findings["parse_error"] = parse_error
+                    if graph_error:
+                        # Keep the true cause inside findings too, so the detail
+                        # view shows it next to the raw stub.
+                        findings["agent_error"] = graph_error
                     logger.warning(
-                        "Patrol %s (%s) findings failed validation: %s",
-                        patrol_id, patrol_type, parse_error,
+                        "Patrol %s (%s) failed: %s",
+                        patrol_id, patrol_type, error_msg,
                     )
         finally:
             current_thread_id.reset(token)
@@ -395,6 +411,7 @@ async def run_patrol(
                 """UPDATE patrol_logs
                    SET status = :status,
                        findings = :findings,
+                       error = :error,
                        completed_at = :completed_at
                    WHERE id = :id"""
             ),
@@ -402,6 +419,10 @@ async def run_patrol(
                 "id": patrol_id,
                 "status": status,
                 "findings": findings_json,
+                # NULL for completed/interrupted runs; the failure reason
+                # (provider error, timeout, cancellation, validation, or a
+                # non-serialisable payload) for every 'failed' path.
+                "error": error_msg,
                 "completed_at": completed_at,
             },
         )

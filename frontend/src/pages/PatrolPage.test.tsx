@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import PatrolPage from './PatrolPage';
@@ -13,7 +13,7 @@ vi.mock('../api/patrol', () => ({
   triggerPatrol: vi.fn(),
 }));
 
-import { dismissFinding, getPatrolLog, listPatrolLogs, mergePatrolFinding, queuePatrolConflict } from '../api/patrol';
+import { dismissFinding, getPatrolLog, listPatrolLogs, mergePatrolFinding, queuePatrolConflict, triggerPatrol } from '../api/patrol';
 
 const mockListPatrolLogs = listPatrolLogs as ReturnType<typeof vi.fn>;
 const mockGetPatrolLog = getPatrolLog as ReturnType<typeof vi.fn>;
@@ -342,5 +342,105 @@ describe('PatrolPage', () => {
     await waitFor(() => {
       expect(screen.getByText('合并失败：记忆可能已被处理或删除')).toBeDefined();
     });
+  });
+
+  it('shows the failure reason of a failed patrol', async () => {
+    // A failed run carries no findings — its reason lives in `error`.
+    mockListPatrolLogs.mockResolvedValue({
+      items: [{ ...logSummary, id: 'log-failed', status: 'failed', finding_count: 0 }],
+      total: 1,
+    });
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      id: 'log-failed',
+      status: 'failed',
+      error: 'LLM provider unavailable',
+      findings: null,
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/0 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/0 个发现/));
+
+    // The reason is shown in the detail header, not swallowed as "未发现".
+    await waitFor(() => {
+      expect(screen.getByText(/失败原因：LLM provider unavailable/)).toBeDefined();
+    });
+  });
+
+  it('polls an in-flight patrol until it reaches a terminal status', async () => {
+    // Regression: nothing re-fetched after the initial load, so a run that was
+    // `running` on screen stayed that way even after it had failed server-side.
+    let status = 'running';
+    mockListPatrolLogs.mockImplementation(async () => ({
+      items: [todayLog({ id: 'log-run', patrol_type: 'daily', status })],
+      total: 1,
+    }));
+
+    vi.useFakeTimers();
+    try {
+      renderPage();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText('运行中')).toBeDefined();
+
+      // The patrol fails in the background — no user interaction at all.
+      status = 'failed';
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+      });
+
+      expect(screen.getByText('失败')).toBeDefined();
+      expect(screen.queryByText('运行中')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('watches a manually triggered patrol through to its terminal status', async () => {
+    // POST /trigger returns 202 *before* run_patrol inserts the log row, so the
+    // first refresh legitimately sees nothing — the watch has to survive that
+    // gap and keep polling once the row shows up.
+    let items: ReturnType<typeof todayLog>[] = [];
+    mockListPatrolLogs.mockImplementation(async () => ({
+      items,
+      total: items.length,
+    }));
+
+    vi.useFakeTimers();
+    try {
+      renderPage();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(screen.getByText(/暂无巡检记录/)).toBeDefined();
+
+      // fireEvent rather than userEvent — no extra fake-timer wiring needed.
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /▶ 每日/ }));
+      });
+      expect(triggerPatrol).toHaveBeenCalledWith('daily');
+
+      // The row lands a moment later, still running.
+      items = [todayLog({ id: 'log-new', patrol_type: 'daily', status: 'running' })];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+      });
+      expect(screen.getByText('运行中')).toBeDefined();
+
+      // …and the watch keeps going until it turns terminal.
+      items = [todayLog({ id: 'log-new', patrol_type: 'daily', status: 'failed' })];
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2100);
+      });
+      expect(screen.getByText('失败')).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

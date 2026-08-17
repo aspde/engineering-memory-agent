@@ -20,6 +20,14 @@ services:
       # Host backend source shadows the image copy — the reload watcher and
       # the running process both read from here.
       - ./backend:/app/backend
+      # Host migrations too, so a new migration file applies on the next
+      # `docker compose restart backend` — init_db runs `alembic upgrade head`
+      # at startup — without rebuilding the image.  Without this mount the
+      # container keeps the baked migrations while hot-reloaded backend code
+      # can already reference the new column, a schema/code skew that fails at
+      # runtime (UndefinedColumnError).  alembic.ini stays baked in the image;
+      # only the migrations/ tree (env.py + versions/) is shadowed here.
+      - ./migrations:/app/migrations
     command:
       - uvicorn
       - backend.main:app

@@ -195,7 +195,7 @@ async def get_patrol_log(log_id: str):
     async with session_factory() as session:
         row = await session.execute(
             text(
-                """SELECT id, patrol_type, trigger, status, findings,
+                """SELECT id, patrol_type, trigger, status, error, findings,
                           dismissed_findings, started_at, completed_at
                    FROM patrol_logs WHERE id = :id"""
             ),
@@ -219,6 +219,8 @@ async def get_patrol_log(log_id: str):
             "patrol_type": str(result.patrol_type),
             "trigger": str(result.trigger),
             "status": str(result.status),
+            # Failure reason for 'failed' runs; None for completed/interrupted.
+            "error": result.error,
             "findings": findings_raw,
             "dismissed_findings": [str(d) for d in dismissed],
             "started_at": result.started_at.isoformat() if result.started_at else "",

@@ -604,3 +604,64 @@ class TestDismissFindingRealDB:
 
         detail = await async_client.get(f"/api/patrol/logs/{patrol_log_id}")
         assert detail.json()["dismissed_findings"] == ["pattern_matches-1"]
+
+
+class TestGetLogErrorRealDB:
+    """Real-DB: GET /logs/{id} surfaces the error reason of a failed run.
+
+    A patrol that fails outside the validation path (provider error /
+    timeout / cancellation) persists ``status='failed'`` with a NULL
+    findings and its reason in the ``error`` column.  The detail endpoint
+    must return that reason so the UI shows *why* instead of a bare 失败.
+    """
+
+    @pytest.fixture(autouse=True)
+    async def _ensure_patrol_table(self) -> None:
+        from backend.db.schema import init_db
+
+        await init_db()
+
+    @pytest.fixture(autouse=True)
+    async def _clean_patrol_rows(self) -> None:
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await session.execute(text("DELETE FROM patrol_logs"))
+            await session.commit()
+        yield
+
+    async def _insert(self, *, status: str, error: str | None) -> str:
+        from uuid import uuid4
+
+        log_id = str(uuid4())
+        session_factory = get_session_factory()
+        async with session_factory() as session:
+            await session.execute(
+                text(
+                    """INSERT INTO patrol_logs
+                       (id, patrol_type, trigger, status, error)
+                       VALUES (:id, 'daily', 'cron', :status, :error)"""
+                ),
+                {"id": log_id, "status": status, "error": error},
+            )
+            await session.commit()
+        return log_id
+
+    async def test_failed_log_returns_error_reason(
+        self, async_client: AsyncClient
+    ) -> None:
+        """A failed run's error column is served back on the detail endpoint."""
+        log_id = await self._insert(status="failed", error="LLM provider unavailable")
+
+        resp = await async_client.get(f"/api/patrol/logs/{log_id}")
+        assert resp.status_code == 200
+        assert resp.json()["error"] == "LLM provider unavailable"
+
+    async def test_completed_log_has_null_error(
+        self, async_client: AsyncClient
+    ) -> None:
+        """A completed run reports a null error — not the empty string."""
+        log_id = await self._insert(status="completed", error=None)
+
+        resp = await async_client.get(f"/api/patrol/logs/{log_id}")
+        assert resp.status_code == 200
+        assert resp.json()["error"] is None

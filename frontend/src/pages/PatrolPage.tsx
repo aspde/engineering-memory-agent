@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   dismissFinding,
   getPatrolLog,
@@ -117,6 +117,22 @@ function findingCardText(
 
 const PAGE_SIZE = 20;
 
+/** Refresh cadence while a patrol run is in flight. */
+const POLL_INTERVAL_MS = 2000;
+/**
+ * Ceiling on a single watch window (~10 min).  A patrol wedged in `running` —
+ * its process died before it could write a terminal status — would otherwise
+ * keep an open tab polling for the whole session.
+ */
+const MAX_POLL_TICKS = 300;
+/**
+ * Ticks a fresh manual trigger stays watched for before any running row is
+ * visible.  `POST /patrol/trigger` returns 202 with the patrol id *before*
+ * `run_patrol` inserts the log row, so the first refresh can legitimately
+ * still see nothing — without this grace the poll loop would never start.
+ */
+const TRIGGER_SEED_TICKS = 3;
+
 export default function PatrolPage() {
   const [logs, setLogs] = useState<PatrolLogSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -133,24 +149,33 @@ export default function PatrolPage() {
   const [mergedKeys, setMergedKeys] = useState<Set<string>>(new Set());
   const [arbitrateError, setArbitrateError] = useState<string | null>(null);
   const [filterType, setFilterType] = useState<string>('');
+  // Poll ticks still owed to a just-triggered run whose log row may not exist
+  // yet.  Counted down by the poll loop; once the row appears, `hasRunningLog`
+  // keeps the loop alive on its own.
+  const [seedTicks, setSeedTicks] = useState(0);
+  const pollTickRef = useRef(0);
   // Latest run *today* per patrol type (for the "已执行过" hint under the
   // trigger buttons).  Informational only — triggering again stays allowed.
   const [todayRuns, setTodayRuns] = useState<
     Record<string, { started_at: string; status: string }>
   >({});
 
-  const fetchLogs = useCallback(async (newOffset: number) => {
-    setLoading(true);
+  const fetchLogs = useCallback(async (newOffset: number, opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true);
     try {
       const data = await listPatrolLogs({ limit: PAGE_SIZE, offset: newOffset, patrol_type: filterType || undefined });
       setLogs(data.items);
       setTotal(data.total);
       setOffset(newOffset);
     } catch {
-      setLogs([]);
-      setTotal(0);
+      // A silent poll must not wipe the list on a transient error — keep the
+      // current rows and let the next tick retry.
+      if (!opts?.silent) {
+        setLogs([]);
+        setTotal(0);
+      }
     } finally {
-      setLoading(false);
+      if (!opts?.silent) setLoading(false);
     }
   }, [filterType]);
 
@@ -186,34 +211,87 @@ export default function PatrolPage() {
     setFilterType(type);
   }, []);
 
-  const handleSelect = useCallback(async (id: string) => {
-    setSelectedId(id);
-    setDetailLoading(true);
+  /**
+   * Load one log's detail into the right-hand pane.  `silent` skips the
+   * spinner and keeps the current pane on a transient error — the poll loop
+   * refreshes an in-flight run's detail and must not blank it mid-run.
+   */
+  const loadDetail = useCallback(async (id: string, opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setDetailLoading(true);
     try {
       const data = await getPatrolLog(id);
       setDetail(data);
       setDismissedIds(new Set(data.dismissed_findings ?? []));
     } catch {
-      setDetail(null);
+      if (!opts?.silent) setDetail(null);
     } finally {
-      setDetailLoading(false);
+      if (!opts?.silent) setDetailLoading(false);
     }
   }, []);
+
+  const handleSelect = useCallback(async (id: string) => {
+    setSelectedId(id);
+    await loadDetail(id);
+  }, [loadDetail]);
 
   const handleTrigger = useCallback(async (patrolType: string) => {
     setTriggering(true);
     try {
       await triggerPatrol(patrolType);
-      // Refresh the log list + today's-runs hint after a short delay to let
-      // the patrol start
-      setTimeout(() => {
-        void fetchLogs(0);
-        void fetchTodayRuns();
-      }, 1000);
+      // Hand off to the poll loop: it does the first refresh and then keeps
+      // going until the run reaches a terminal status.  Refreshing right here
+      // would usually still show nothing — the 202 comes back before
+      // `run_patrol` inserts the log row.  Resetting the tick counter also
+      // resumes watching after an earlier window hit MAX_POLL_TICKS.
+      pollTickRef.current = 0;
+      setSeedTicks(TRIGGER_SEED_TICKS);
     } finally {
       setTriggering(false);
     }
-  }, [fetchLogs, fetchTodayRuns]);
+  }, []);
+
+  // ── Auto-refresh while a patrol run is in flight ───────────────────────
+  // A run only reaches `completed` / `failed` inside its background task, so
+  // without polling a triggered patrol sits at 运行中 on screen until the user
+  // reloads or re-selects it — a running→failed transition never shows up.
+  // `todayRuns` counts as a running signal too: it is fetched unfiltered, so a
+  // run hidden by the active type filter is still watched.
+  const hasRunningLog =
+    logs.some((log) => log.status === 'running') ||
+    Object.values(todayRuns).some((run) => run.status === 'running');
+  const watching = hasRunningLog || seedTicks > 0;
+
+  useEffect(() => {
+    if (!watching) {
+      pollTickRef.current = 0;
+      return;
+    }
+    if (pollTickRef.current >= MAX_POLL_TICKS) return;
+    const timer = setTimeout(() => {
+      pollTickRef.current += 1;
+      setSeedTicks((n) => (n > 0 ? n - 1 : 0));
+      void fetchLogs(offset, { silent: true });
+      void fetchTodayRuns();
+      // Keep an open detail pane in step — a failed run's reason lives there.
+      if (selectedId && detail?.status === 'running') {
+        void loadDetail(selectedId, { silent: true });
+      }
+    }, POLL_INTERVAL_MS);
+    return () => clearTimeout(timer);
+    // Every tick replaces `logs` / `todayRuns` with fresh objects, which
+    // re-runs this effect and schedules the next tick.  The loop ends when
+    // nothing is running any more, or at the MAX_POLL_TICKS ceiling.
+  }, [
+    watching,
+    logs,
+    todayRuns,
+    detail,
+    offset,
+    selectedId,
+    fetchLogs,
+    fetchTodayRuns,
+    loadDetail,
+  ]);
 
   const handleDismiss = useCallback(async (findingKey: string) => {
     if (!selectedId) return;
@@ -282,14 +360,9 @@ export default function PatrolPage() {
         } catch {
           // ignore — the merge already happened
         }
-        // 自动刷新：重新拉详情，让 UI 反映后端真值（该 finding 已被忽略）
-        try {
-          const data = await getPatrolLog(selectedId);
-          setDetail(data);
-          setDismissedIds(new Set(data.dismissed_findings ?? []));
-        } catch {
-          // 刷新失败不阻塞——本地 state 已反映合并结果
-        }
+        // 自动刷新：重新拉详情，让 UI 反映后端真值（该 finding 已被忽略）。
+        // 静默刷新，失败不阻塞——本地 state 已反映合并结果。
+        await loadDetail(selectedId, { silent: true });
       } catch (err) {
         setArbitrateError(
           err instanceof Error && /409|conflict|Conflict/.test(err.message)
@@ -302,7 +375,7 @@ export default function PatrolPage() {
         setMergingKey(null);
       }
     },
-    [selectedId],
+    [selectedId, loadDetail],
   );
 
   const hasPrev = offset > 0;
@@ -480,6 +553,12 @@ export default function PatrolPage() {
                 {detail.completed_at ? ` → ${new Date(detail.completed_at).toLocaleString('zh-CN')}` : ''}
               </p>
             </div>
+
+            {detail.error && (
+              <p className="mb-4 whitespace-pre-wrap rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">
+                失败原因：{detail.error}
+              </p>
+            )}
 
             {arbitrateError && (
               <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700">
