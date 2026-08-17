@@ -661,7 +661,14 @@ export default function PatrolPage() {
                                         : 'bg-blue-50 text-blue-600 hover:bg-blue-100 disabled:opacity-50'
                                     }`}
                                   >
-                                    {dismissed || merged
+                                    {/* Only a real merge reads 已合并.  The
+                                        backend has no merged flag — merging and
+                                        dismissing both land in
+                                        dismissed_findings — so local
+                                        `mergedKeys` is the one signal that
+                                        tells them apart.  A merely dismissed
+                                        finding keeps the 合并 label, disabled. */}
+                                    {merged
                                       ? '已合并'
                                       : mergingKey === fKey
                                         ? '合并中…'

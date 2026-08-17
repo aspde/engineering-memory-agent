@@ -344,6 +344,41 @@ describe('PatrolPage', () => {
     });
   });
 
+  it('keeps the merge label on a merely dismissed pattern finding', async () => {
+    // Regression: the button read 已合并 whenever the finding was dismissed.
+    // Dismissing is not merging — and since the backend has no merged flag
+    // (both actions land in dismissed_findings), only the local merge state may
+    // claim 已合并.
+    mockGetPatrolLog.mockResolvedValue({
+      ...logSummary,
+      findings: { pattern_matches: [patternFinding] },
+      dismissed_findings: [],
+    });
+    renderPage();
+
+    const user = userEvent.setup();
+    await waitFor(() => {
+      expect(screen.getByText(/1 个发现/)).toBeDefined();
+    });
+    await user.click(screen.getByText(/1 个发现/));
+
+    await waitFor(() => {
+      expect(screen.getByText('忽略')).toBeDefined();
+    });
+    await user.click(screen.getByText('忽略'));
+
+    // The finding is dismissed …
+    await waitFor(() => {
+      expect(screen.getByText('已忽略')).toBeDefined();
+    });
+    // … but nothing was merged, so the merge button must not claim otherwise.
+    expect(screen.queryByText('已合并')).toBeNull();
+    const mergeButton = screen.getByRole('button', { name: '合并' });
+    // Still non-actionable — a dismissed finding cannot be merged.
+    expect((mergeButton as HTMLButtonElement).disabled).toBe(true);
+    expect(mockMergePatrolFinding).not.toHaveBeenCalled();
+  });
+
   it('shows the failure reason of a failed patrol', async () => {
     // A failed run carries no findings — its reason lives in `error`.
     mockListPatrolLogs.mockResolvedValue({
