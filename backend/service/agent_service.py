@@ -233,8 +233,10 @@ def get_agent(
     ``approval_required_tools`` overrides the human-approval gate set
     (default ``APPROVAL_REQUIRED_TOOLS``); the interactive chat routes pass
     ``CHAT_APPROVAL_TOOLS`` so the notification tool also requires approval,
-    while automated patrol/scenario runs keep the default and notify
-    autonomously.
+    while automated patrol/scenario/event runs pass an explicit empty
+    frozenset (unattended — no human can approve a pause).  An empty
+    frozenset is honoured as "no approval gate"; only ``None`` falls back
+    to the default set.
 
     ``llm_tools`` narrows the tool schemas shown to the model (default: the
     full execution roster).  Chat passes ``CHAT_LLM_TOOLS`` so the model
@@ -245,7 +247,15 @@ def get_agent(
         tools=_active_tools(),
         checkpointer=_get_checkpointer(),
         max_steps=max_steps if max_steps is not None else config.max_agent_steps,
-        approval_required_tools=approval_required_tools or APPROVAL_REQUIRED_TOOLS,
+        # ``is not None`` rather than truthiness: an empty frozenset is a
+        # deliberate "no approval gate" (patrol/scenarios/event analysis run
+        # unattended) — ``or`` would silently swallow it back to the default
+        # write/ingest set and re-arm a gate no human can answer.
+        approval_required_tools=(
+            APPROVAL_REQUIRED_TOOLS
+            if approval_required_tools is None
+            else approval_required_tools
+        ),
         llm_tools=llm_tools,
     )
 
