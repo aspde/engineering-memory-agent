@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -10,7 +11,6 @@ import pytest
 
 from backend.service.scheduler import (
     _SLOT_GRACE_SECONDS,
-    _seconds_until,
     _slot_overshoot,
     PatrolScheduler,
     previous_daily_slot,
@@ -57,37 +57,13 @@ class _FakeFactory:
         return self._session
 
 
-class TestSleepTiming:
-    """Pure time math behind ``_sleep_until`` — no real sleeping involved.
+class TestSlotOvershoot:
+    """Overshoot math behind the poll loop — no real sleeping involved.
 
-    The only untestable surface of ``_sleep_until`` is ``asyncio.sleep``; its
-    decisions (how long to sleep, whether a wake missed the slot) are the pure
-    arithmetic of ``_seconds_until`` / ``_slot_overshoot``, tested here with
-    fixed wall-clock inputs.
+    The poll loop's only untestable surface is ``asyncio.sleep``; its
+    decision (whether a discovered slot was missed) is the pure arithmetic of
+    ``_slot_overshoot``, tested here with fixed wall-clock inputs.
     """
-
-    def test_seconds_until_slot_in_future(self) -> None:
-        # 10:00 → 10:30 = 30 minutes of sleep.
-        now = datetime(2026, 1, 15, 10, 0, 0)
-        slot = datetime(2026, 1, 15, 10, 30, 0)
-        assert _seconds_until(slot, now=now) == 1800.0
-
-    def test_seconds_until_slot_due_is_zero(self) -> None:
-        # Exactly on the slot → no sleep, fire immediately.
-        now = datetime(2026, 1, 15, 10, 0, 0)
-        assert _seconds_until(now, now=now) == 0.0
-
-    def test_seconds_until_slot_already_past(self) -> None:
-        # Caught up after a restart → negative, still no sleep.
-        now = datetime(2026, 1, 15, 10, 30, 0)
-        slot = datetime(2026, 1, 15, 10, 0, 0)
-        assert _seconds_until(slot, now=now) == -1800.0
-
-    def test_seconds_until_aware_inputs(self) -> None:
-        # Aware inputs (as the loops always produce) subtract correctly.
-        now = datetime(2026, 1, 15, 10, 0, 0).astimezone()
-        slot = now + timedelta(minutes=5)
-        assert _seconds_until(slot, now=now) == 300.0
 
     def test_slot_overshoot_woke_early(self) -> None:
         # Woke 1s before the slot (spurious wakeup) → negative, not a miss.
@@ -191,6 +167,115 @@ class TestSchedulerTimeCalculation:
         scheduler = PatrolScheduler()
         await scheduler.start()
         await scheduler.stop()
+
+
+class _LoopStop(Exception):
+    """Test-only sentinel that ends the poll loop deterministically."""
+
+
+@contextlib.contextmanager
+def _poll_fixture(times, polls):
+    """Drive the poll loop with a fixed clock sequence and no real sleeping.
+
+    *times* is an iterable of naive datetimes served to ``datetime.now`` in
+    order — the first is the startup tick, then one per poll.  *polls* is how
+    many ``asyncio.sleep`` calls return before the loop is stopped with
+    ``_LoopStop``, so a test asserting "fires once" runs exactly the polls it
+    wants before the loop dies.
+    """
+    stop_after = [polls]
+
+    async def _fake_sleep(_delay):
+        stop_after[0] -= 1
+        if stop_after[0] < 0:
+            raise _LoopStop()
+
+    with patch("backend.service.scheduler.asyncio.sleep", new=_fake_sleep), \
+            patch("backend.service.scheduler.datetime") as mock_dt:
+        mock_dt.now.side_effect = lambda: next(times).astimezone()
+        mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+        yield
+
+
+class TestPollingLoop:
+    """Wall-clock poll loop: fires each slot exactly once, never replays the
+    slot a mid-cycle startup already owns, and catches up a slot the host
+    slept through instead of dropping it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_daily_fires_once_when_slot_crossed(self) -> None:
+        # Startup 07:59 → previous slot is yesterday 08:00.  The first poll
+        # at 08:05 has crossed today's 08:00 → fires exactly once; the second
+        # poll is still today's slot → no second fire.
+        scheduler = PatrolScheduler()
+        callback = AsyncMock()
+        times = iter([
+            datetime(2026, 1, 15, 7, 59, 0),
+            datetime(2026, 1, 15, 8, 5, 0),
+            datetime(2026, 1, 15, 8, 5, 30),
+        ])
+        with _poll_fixture(times, polls=2):
+            scheduler.schedule_daily(hour=8, callback=callback)
+            with pytest.raises(_LoopStop):
+                await scheduler._tasks[0]
+        assert callback.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_daily_start_after_slot_waits_for_next(self) -> None:
+        # Startup 09:00 → previous slot is today's 08:00, already marked
+        # fired (the startup catch-up hook owns that slot).  The loop must
+        # keep polling without replaying today's run.
+        scheduler = PatrolScheduler()
+        callback = AsyncMock()
+        times = iter([
+            datetime(2026, 1, 15, 9, 0, 0),
+            datetime(2026, 1, 15, 9, 1, 0),
+        ])
+        with _poll_fixture(times, polls=1):
+            scheduler.schedule_daily(hour=8, callback=callback)
+            with pytest.raises(_LoopStop):
+                await scheduler._tasks[0]
+        assert callback.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_weekly_fires_once_when_slot_crossed(self) -> None:
+        # Startup Monday 08:00 → previous Monday@09 is last week's.  The
+        # first poll Monday 09:05 crosses this week's Monday@09 → fires once;
+        # the next poll 09:10 is still the same slot → no second fire.
+        scheduler = PatrolScheduler()
+        callback = AsyncMock()
+        times = iter([
+            datetime(2026, 1, 12, 8, 0, 0),   # Monday
+            datetime(2026, 1, 12, 9, 5, 0),   # crossed Monday 09:00
+            datetime(2026, 1, 12, 9, 10, 0),  # same slot
+        ])
+        with _poll_fixture(times, polls=2):
+            scheduler.schedule_weekly(day=0, hour=9, callback=callback)
+            with pytest.raises(_LoopStop):
+                await scheduler._tasks[0]
+        assert callback.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_daily_late_wake_logs_overshoot(self) -> None:
+        # Host slept from 07:00 to 13:00 — the monotonic clock froze while
+        # the wall clock jumped.  The first poll at 13:00 discovers today's
+        # 08:00 slot 5h late → fires and logs the overshoot instead of
+        # silently dropping it (the failure the old long-sleep loop was prone
+        # to).
+        scheduler = PatrolScheduler()
+        callback = AsyncMock()
+        times = iter([
+            datetime(2026, 1, 15, 7, 0, 0),
+            datetime(2026, 1, 15, 13, 0, 0),
+        ])
+        with _poll_fixture(times, polls=1), \
+                patch("backend.service.scheduler.logger") as mock_logger:
+            scheduler.schedule_daily(hour=8, callback=callback)
+            with pytest.raises(_LoopStop):
+                await scheduler._tasks[0]
+        assert callback.await_count == 1
+        mock_logger.warning.assert_called_once()
 
 
 class TestSchedulerLifecycle:

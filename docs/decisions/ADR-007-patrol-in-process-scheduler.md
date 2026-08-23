@@ -1,7 +1,7 @@
 # ADR-007: 巡检调度器内嵌主进程，不引入独立任务队列
 
 **日期**: 2026-08-04
-**更新**: 2026-08-07（补充 missed-slot catch-up 机制）
+**更新**: 2026-08-07（补充 missed-slot catch-up 机制）；2026-08-23（长睡循环改为墙钟短轮询，解决宿主休眠导致巡检延误）
 
 **状态**: 已接受
 
@@ -19,20 +19,27 @@ Phase 3 主动 Agent 需要定时触发巡检（每日 / 每周 / 技术债扫�
 
 **巡检调度器内嵌 FastAPI 主进程**（`backend/service/scheduler.py` 的 `PatrolScheduler`），在 `backend/main.py` 的 lifespan 中启动、shutdown 时取消。不引入 APScheduler、Celery、Redis、Bull 等任何任务调度依赖，不使用持久化任务队列。
 
-实现形态：
+实现形态（2026-08-23 起为**墙钟短轮询**）：
 
 ```python
-# 核心是 background task + asyncio.sleep 循环（scheduler.py）
+# 核心是 background task + 短轮询循环（scheduler.py）
 async def _loop():
+    fired_for = previous_daily_slot(hour, now=now)   # 启动时 seed，避免重放 catch-up 已处理的 slot
     while True:
-        next_run = calculate_next_run(now, schedule)
-        await asyncio.sleep((next_run - now).total_seconds())
+        await asyncio.sleep(_POLL_INTERVAL_SECONDS)  # 60 秒短睡
+        now = datetime.now().astimezone()
+        slot = previous_daily_slot(hour, now=now)
+        if slot == fired_for:                        # 墙钟未跨过新 slot → 继续轮询
+            continue
+        fired_for = slot
         await callback()
 ```
 
+> **为什么是轮询而不是一次长 sleep 到点**：最初的实现用 `asyncio.sleep((next_run - now).total_seconds())` 一觉睡到下一个槽点。`asyncio.sleep` 等待的是单调时钟，而宿主休眠/挂起（容器挂起、Windows 待机）期间单调时钟冻结、墙钟照走——一觉醒来的时刻可能已越过槽点数小时，旧循环会把这次运行静默推迟到下一天。改为每 60 秒醒来比对墙钟后，休眠唤醒最多一个轮询间隔内就能发现到期的 slot 并补跑（晚跑好过漏跑）；错过多个 slot 时只触发最近一个。代价是每分钟两次 `datetime.now()` 的可忽略开销。
+
 ## 理由
 
-1. **调度规则简单，复杂度不匹配**：每天固定小时、每周固定天 + 小时，`asyncio.sleep` + 循环就能精确表达。APScheduler 的 cron 表达式、Celery 的 broker / worker / 重试体系在这里没有用武之地——引入它们是把不存在的需求提前实现。
+1. **调度规则简单，复杂度不匹配**：每天固定小时、每周固定天 + 小时，短轮询循环就能精确表达。APScheduler 的 cron 表达式、Celery 的 broker / worker / 重试体系在这里没有用武之地——引入它们是把不存在的需求提前实现。
 
 2. **零新依赖**：Celery 强依赖 Redis / RabbitMQ 做 broker，Redis 本身又是一套要部署、备份、监控的服务。APScheduler 虽轻，但仍是新增第三方运行时。EMA 的约束是"简单优先、禁止随意增加依赖"，当前方案只复用 asyncio 标准库。
 
@@ -72,7 +79,7 @@ async def _loop():
 
 当以下任一条件出现时，重新评估是否引入独立 worker / Celery / APScheduler：
 
-1. 巡检频率提升到分钟级，或出现需要精确到秒的调度需求——`asyncio.sleep` 循环会变得脆弱
+1. 巡检频率提升到分钟级，或出现需要精确到秒的调度需求——60 秒轮询循环会变得脆弱
 2. 需要任务持久化重放——进程崩溃后未跑的任务要排队补执行，而不只是一次 catch-up
 3. 多实例 / 水平扩展部署——内嵌调度器无法选主，需要 DB 锁、租约或独立 worker
 4. 巡检成为用户可见的关键路径（如 SLA 保证），单进程故障不可接受
@@ -81,7 +88,7 @@ async def _loop():
 
 ## 后果
 
-- 巡检调度零新增依赖，`PatrolScheduler`（约 120 行）+ asyncio 实现，主进程内启动 / 优雅关闭
+- 巡检调度零新增依赖，`PatrolScheduler` + asyncio 墙钟轮询实现（60 秒间隔），主进程内启动 / 优雅关闭
 - 重启丢一个调度点可接受，且已有 catch-up 兜底；技术债扫描复用同一调度器（`main.py` 里 `schedule_weekly`）
 - 后续迁移独立 worker 时，只需把 `main.py` 的调度段移到独立进程，Agent / 巡检业务代码不变
 - 本决策对应 [ADR-006](./ADR-006-extension-roadmap.md) 的 Phase 3（主动 Agent），详细设计与巡检 Prompt 模板见 [phase-3-proactive-agent-spec.md](../design/phase-3-proactive-agent-spec.md)

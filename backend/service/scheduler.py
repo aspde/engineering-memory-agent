@@ -1,11 +1,15 @@
-"""Patrol Scheduler — lightweight asyncio-based cron for proactive agent patrols.
+"""Patrol Scheduler — lightweight wall-clock poller for proactive patrols.
 
-Uses ``asyncio.sleep`` loops rather than external task queues (APScheduler,
-Celery, etc.).  Schedules are simple — daily at a fixed hour, weekly at a
-fixed day+hour — so a persistent loop is sufficient.  The loop skips a run
-when the server is down at the scheduled time; :func:`should_catch_up` +
-the startup hook in ``backend.main`` detect that miss and fire one
-catch-up run so a restart doesn't silently drop the patrol for a cycle.
+Runs short ``asyncio.sleep`` polls rather than external task queues
+(APScheduler, Celery, etc.).  Schedules are simple — daily at a fixed hour,
+weekly at a fixed day+hour — so a persistent polling loop is sufficient.
+Polling the wall clock every ``_POLL_INTERVAL_SECONDS`` keeps a slot from
+being silently lost to host suspend/hibernate: the monotonic clock that a
+long ``asyncio.sleep`` waits on freezes during standby, so a wake after
+sleep could otherwise land hours past the slot and push the run to the next
+cycle.  A slot missed while the server is down (restart / deploy / crash)
+is caught up once by :func:`should_catch_up` + the startup hook in
+``backend.main``.
 
 Usage::
 
@@ -28,60 +32,30 @@ logger = logging.getLogger(__name__)
 
 ScheduleCallback = Callable[[], Awaitable[None]]
 
-# Sleep-precision allowance: a wake that overshoots its slot by more than
-# this (seconds) is a missed slot, not scheduler jitter.  ``_sleep_until``
-# logs the catch-up; the threshold lives here so ``_slot_overshoot``'s tests
-# can assert the boundary.
+# Sleep-precision allowance: a slot discovered more than this many seconds
+# late was missed — host suspend/hibernate, a long event-loop stall — not
+# ordinary poll jitter.  The poll loop logs that case; the threshold lives
+# here so ``_slot_overshoot``'s tests can assert the boundary.
 _SLOT_GRACE_SECONDS = 300
 
-
-def _seconds_until(target: datetime, *, now: datetime | None = None) -> float:
-    """Signed seconds from *now* until *target* (negative when already past).
-
-    The scheduler's wall clock is the local timezone at call time, so both
-    inputs are normalized to aware local datetimes before the subtraction — a
-    naive *target* gets the same local offset as *now*.  The sleep loop only
-    waits when the result is positive; zero or negative means the slot is due
-    and the callback fires immediately.
-    """
-    now = (now or datetime.now()).astimezone()
-    return (target.astimezone() - now).total_seconds()
+# Poll cadence for the scheduler loops.  Each loop wakes this often and
+# compares the wall clock against its slot.  A short interval bounds how
+# late a slot can be discovered after the host wakes from standby (one
+# interval) while keeping the per-tick cost trivial — a couple of
+# ``datetime.now`` calls a minute.
+_POLL_INTERVAL_SECONDS = 60
 
 
 def _slot_overshoot(slot: datetime, *, woke_at: datetime | None = None) -> float:
     """Seconds the wake landed past *slot* (negative when it woke early).
 
-    An overshoot beyond ``_SLOT_GRACE_SECONDS`` means the wake missed the
-    slot — host suspend/hibernate, a long event-loop stall — rather than
-    ordinary scheduler jitter.  The caller logs that case but still fires the
-    callback, since a late scan beats a dropped one.
+    An overshoot beyond ``_SLOT_GRACE_SECONDS`` means the slot was missed —
+    host suspend/hibernate, a long event-loop stall — rather than ordinary
+    poll jitter.  The caller logs that case but still fires the callback,
+    since a late scan beats a dropped one.
     """
     woke_at = (woke_at or datetime.now()).astimezone()
     return (woke_at - slot.astimezone()).total_seconds()
-
-
-async def _sleep_until(next_run: datetime, what: str) -> float:
-    """Sleep until *next_run*; return the overshoot seconds when woken.
-
-    A single long ``asyncio.sleep`` stalls while the host suspends /
-    hibernates (Windows freezes the event loop's monotonic clock), so a wake
-    can land hours past the slot and the loop would silently push the run to
-    the next cycle.  Logging the overshoot surfaces the miss; the caller
-    still fires the callback — a late scan beats a dropped one, and
-    ``run_patrol``'s overlap guard dedups against a concurrent run.
-    """
-    wait = _seconds_until(next_run)
-    if wait > 0:
-        await asyncio.sleep(wait)
-    overshoot = _slot_overshoot(next_run)
-    if overshoot > _SLOT_GRACE_SECONDS:
-        logger.warning(
-            "%s woke %.0fs past its %s slot — firing catch-up",
-            what,
-            overshoot,
-            next_run.isoformat(),
-        )
-    return overshoot
 
 
 class PatrolScheduler:
@@ -94,28 +68,70 @@ class PatrolScheduler:
     def __init__(self) -> None:
         self._tasks: list[asyncio.Task[None]] = []
 
-    def schedule_daily(self, hour: int, callback: ScheduleCallback) -> None:
-        """Run *callback* once per day at the given *hour* (0-23)."""
+    def _spawn_poll_loop(
+        self,
+        *,
+        label: str,
+        start_log: str,
+        slot_at: Callable[[datetime], datetime],
+        callback: ScheduleCallback,
+    ) -> None:
+        """Register one wall-clock poll loop as a background task.
+
+        Every loop this scheduler spawns polls the wall clock every
+        ``_POLL_INTERVAL_SECONDS`` and fires when the clock crosses a new
+        slot, instead of sleeping straight to the slot: a long
+        ``asyncio.sleep`` waits on the monotonic clock, which freezes while
+        the host suspends/hibernates, so a wake after standby could land
+        hours past the slot and push the run to the next cycle.  Polling
+        discovers a slot within one interval of the host waking — a late
+        scan instead of a dropped one.
+
+        *slot_at* maps a wake time to the most recent schedule slot strictly
+        before it; *label* prefixes the overshoot / failure log lines.
+        """
 
         async def _loop() -> None:
-            logger.info("Daily patrol scheduled at %02d:00 each day", hour)
+            logger.info(start_log)
+            # Seed the fired marker with the most recent slot so a mid-day
+            # startup waits for the next slot instead of replaying the one
+            # the startup catch-up hook already handled.
+            fired_for = slot_at(datetime.now().astimezone())
             while True:
+                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
                 now = datetime.now().astimezone()
-                next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-                if next_run <= now:
-                    next_run += timedelta(days=1)
-                logger.debug(
-                    "Daily patrol next run: %s (in %.0f seconds)",
-                    next_run.isoformat(),
-                    (next_run - now).total_seconds(),
-                )
-                await _sleep_until(next_run, "Daily patrol")
+                slot = slot_at(now)
+                if slot == fired_for:
+                    continue
+                fired_for = slot
+                overshoot = _slot_overshoot(slot, woke_at=now)
+                if overshoot > _SLOT_GRACE_SECONDS:
+                    logger.warning(
+                        "%s woke %.0fs past its %s slot — "
+                        "firing catch-up",
+                        label,
+                        overshoot,
+                        slot.isoformat(),
+                    )
                 try:
                     await callback()
                 except Exception:
-                    logger.exception("Daily patrol callback failed")
+                    logger.exception("%s callback failed", label)
 
         self._tasks.append(asyncio.create_task(_loop()))
+
+    def schedule_daily(self, hour: int, callback: ScheduleCallback) -> None:
+        """Run *callback* once per day at the given *hour* (0-23).
+
+        Polls the wall clock — see :meth:`_spawn_poll_loop` for why polling
+        beats sleeping straight to the slot.
+        """
+        self._spawn_poll_loop(
+            label="Daily patrol",
+            start_log=f"Daily patrol scheduled at {hour:02d}:00 each day",
+            slot_at=lambda now: previous_daily_slot(hour, now=now),
+            callback=callback,
+        )
 
     def schedule_weekly(
         self,
@@ -128,37 +144,23 @@ class PatrolScheduler:
         """Run *callback* once per week on the given *day* (0=Mon, 6=Sun)
         at the given *hour* (0-23).
 
+        Polls the wall clock like :meth:`schedule_daily` so a week's slot is
+        discovered within one poll interval of the host waking from standby,
+        not hours late.
+
         *name* labels the task in the startup log — callers register more
         than one weekly task (patrol scan, tech-debt radar), and without a
         name they all log as "Weekly patrol", which reads like a duplicate
         registration.
         """
-
-        async def _loop() -> None:
-            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            label = days[day] if 0 <= day <= 6 else f"day={day}"
-            logger.info("%s scheduled on %s at %02d:00", name, label, hour)
-            while True:
-                now = datetime.now().astimezone()
-                next_run = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-                # Advance to the target day-of-week
-                days_ahead = day - now.weekday()
-                if days_ahead < 0 or (days_ahead == 0 and next_run <= now):
-                    days_ahead += 7
-                next_run += timedelta(days=days_ahead)
-                logger.debug(
-                    "%s next run: %s (in %.0f seconds)",
-                    name,
-                    next_run.isoformat(),
-                    (next_run - now).total_seconds(),
-                )
-                await _sleep_until(next_run, name)
-                try:
-                    await callback()
-                except Exception:
-                    logger.exception("Weekly patrol callback failed")
-
-        self._tasks.append(asyncio.create_task(_loop()))
+        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        label = days[day] if 0 <= day <= 6 else f"day={day}"
+        self._spawn_poll_loop(
+            label=name,
+            start_log=f"{name} scheduled on {label} at {hour:02d}:00",
+            slot_at=lambda now: previous_weekly_slot(day, hour, now=now),
+            callback=callback,
+        )
 
     async def start(self) -> None:
         """Start all registered scheduled tasks (they begin sleeping)."""
