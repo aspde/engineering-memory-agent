@@ -224,10 +224,36 @@ class ResilienceConfig:
 
 
 @dataclass
+class CIGitHubConfig:
+    """GitHub Actions enrichment for the CI connector (best-effort, off by default).
+
+    When ``token`` is empty the CI connector stays purely inbound — exactly
+    today's behaviour.  With a token plus GitHub identifiers in the webhook,
+    ``_enrich_github`` fetches the authoritative job duration, a median
+    duration baseline from recent successful runs (powering
+    ``ci_regression``), and a bounded full job log; every step failing on
+    GitHub's side degrades back to the plain ``ci_build`` intake.
+    """
+
+    token: str = field(default_factory=lambda: os.getenv("CI_GITHUB_TOKEN", ""))
+    api_base: str = field(
+        default_factory=lambda: os.getenv("CI_GITHUB_API_BASE", "https://api.github.com")
+    )
+    lookback_runs: int = field(
+        default_factory=lambda: int(os.getenv("CI_GITHUB_LOOKBACK_RUNS", "5"))
+    )
+    timeout: int = field(default_factory=lambda: int(os.getenv("CI_GITHUB_TIMEOUT", "10")))
+    log_max_chars: int = field(
+        default_factory=lambda: int(os.getenv("CI_GITHUB_LOG_MAX_CHARS", "8000"))
+    )
+
+
+@dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     resilience: ResilienceConfig = field(default_factory=ResilienceConfig)
+    ci_github: CIGitHubConfig = field(default_factory=CIGitHubConfig)
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/ema_dev")
     )
@@ -553,6 +579,23 @@ def validate_config() -> list[str]:
     if config.context_token_budget < 1:
         problems.append(
             f"CONTEXT_TOKEN_BUDGET={config.context_token_budget} must be >= 1"
+        )
+
+    # CI GitHub enrichment bounds — a non-positive lookback would make the
+    # baseline search pointless, a non-positive timeout would fire every call
+    # immediately, and a log cap below 100 chars would truncate even a single
+    # meaningful log line.
+    if config.ci_github.lookback_runs < 1:
+        problems.append(
+            f"CI_GITHUB_LOOKBACK_RUNS={config.ci_github.lookback_runs} must be >= 1"
+        )
+    if config.ci_github.timeout <= 0:
+        problems.append(
+            f"CI_GITHUB_TIMEOUT={config.ci_github.timeout} must be > 0"
+        )
+    if config.ci_github.log_max_chars < 100:
+        problems.append(
+            f"CI_GITHUB_LOG_MAX_CHARS={config.ci_github.log_max_chars} must be >= 100"
         )
 
     # Rate-limit quotas: a non-positive requests count admits nothing, and a

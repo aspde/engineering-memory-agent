@@ -139,6 +139,26 @@ class TestIsRetryable:
         assert is_retryable(_api_error(openai.InternalServerError, 500))
         assert not is_retryable(_api_error(openai.BadRequestError, 400))
 
+    def test_httpx_status_errors_classified_by_response_status(self) -> None:
+        """``raise_for_status()`` errors carry the status on ``.response``.
+
+        Regression: only a top-level ``status_code`` was consulted, so an
+        ``httpx.HTTPStatusError`` raised inside a resilience-wrapped
+        operation (GitHub Actions client) was classified non-retryable even
+        for transient 429/5xx — no retry, and no breaker failure recorded.
+        """
+        def _http_status_error(status: int) -> httpx.HTTPStatusError:
+            request = httpx.Request("GET", "https://api.github.com/x")
+            response = httpx.Response(status, request=request)
+            return httpx.HTTPStatusError(
+                f"err {status}", request=request, response=response
+            )
+
+        for status in (429, 500, 502, 503):
+            assert is_retryable(_http_status_error(status))
+        for status in (400, 401, 403, 404):
+            assert not is_retryable(_http_status_error(status))
+
     def test_sdk_timeout_connection_errors_retryable(self) -> None:
         assert is_retryable(openai.APITimeoutError(request=MagicMock()))
         assert is_retryable(openai.APIConnectionError(request=MagicMock()))
@@ -384,6 +404,43 @@ class TestCircuitBreakerWiring:
         )
         assert raw == '{"ok": true}'
         assert create.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_httpx_status_error_retries_and_counts_toward_breaker(
+        self, monkeypatch
+    ) -> None:
+        """A ``raise_for_status()`` failure inside a wrapped operation gets
+        full resilience treatment: transient 503 is retried, and the retries
+        accumulate toward the named breaker's trip threshold.
+        """
+        monkeypatch.setattr(config.resilience, "circuit_breaker_threshold", 2)
+        calls = 0
+
+        def _http_status_error() -> httpx.HTTPStatusError:
+            request = httpx.Request("GET", "https://api.github.com/x")
+            response = httpx.Response(503, request=request)
+            return httpx.HTTPStatusError(
+                "Service Unavailable", request=request, response=response
+            )
+
+        async def op() -> dict:
+            nonlocal calls
+            calls += 1
+            raise _http_status_error()
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await resilience.call_with_resilience("github-test", op)
+        assert calls == config.resilience.max_attempts
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await resilience.call_with_resilience("github-test", op)
+
+        # Two retryable failures (each exhausting its attempts) tripped the
+        # breaker → the third call fails fast without reaching the operation.
+        calls_before = calls
+        with pytest.raises(CircuitOpenError):
+            await resilience.call_with_resilience("github-test", op)
+        assert calls == calls_before
 
 
 # ── Metrics interaction: usage recorded only on success ──────────────

@@ -70,6 +70,13 @@ def is_retryable(exc: BaseException) -> bool:
     404) indicate a client-side problem retrying will not fix.
     """
     status = getattr(exc, "status_code", None)
+    # httpx.HTTPStatusError carries the status on its response, not the
+    # exception itself — callers that ``raise_for_status()`` inside a
+    # resilience-wrapped operation (e.g. the GitHub Actions client) would
+    # otherwise fall through to the isinstance check and never retry 429/5xx
+    # or count those failures toward their circuit breaker.
+    if status is None and isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
     if isinstance(status, int):
         return status == 429 or status >= 500
     return isinstance(

@@ -195,6 +195,7 @@ EMA 日志统一走 **stdout**（容器 `docker compose logs`），格式由 `LO
 - `AGENT_TIMEOUT` — Agent 单回合总超时（秒）
 - `PATROL_*` — 巡检调度与超时（`PATROL_ENABLED` **默认 false**（ADR-011，生产空库时避免巡检空跑）/ `PATROL_DAILY_HOUR` / `PATROL_WEEKLY_*` / `PATROL_TIMEOUT`）
 - `CONNECTORS_ENABLED` — 连接器 / webhook 模块总开关（**默认 false**，ADR-011）。false 时 `/api/webhook/*` 与 `/api/connectors*` 路由不挂载（404）、连接器不注册；有真实数据源时置 `true`。`WEBHOOK_*_SECRET` 仅在启用后生效
+- `CI_GITHUB_*` — CI 连接器的 GitHub Actions 出站增强（best-effort，**默认关闭**）：`CI_GITHUB_TOKEN` 留空时纯入站行为；设置后对带 GitHub 标识的失败构建 webhook，用 GitHub 权威数据计算 job 耗时与同 job 成功运行的中位数基线（超 2× 基线记为 `ci_regression`），并追加有界完整 job 日志。任一环节 GitHub 侧失败都独立降级回普通 `ci_build` 摄入，不影响 webhook 投递。其余项：`CI_GITHUB_API_BASE`（默认 `https://api.github.com`）/ `CI_GITHUB_LOOKBACK_RUNS`（基线回看运行数，默认 5）/ `CI_GITHUB_TIMEOUT`（单次 API 超时秒数，默认 10）/ `CI_GITHUB_LOG_MAX_CHARS`（追加日志的字符上限，默认 8000）。实现见 `backend/connectors/github_client.py` 与 `backend/connectors/ci.py`
 - `SCENARIOS_ENABLED` — 垂直场景模块总开关（**默认 false**，ADR-011）。false 时 `/api/scenarios*` 路由不挂载（404）；场景有真实输入时置 `true`
 - `USAGE_*` — LLM 用量追踪（`USAGE_ENABLED` / `USAGE_FLUSH_INTERVAL_SECONDS` / `USAGE_BUFFER_MAX` / `USAGE_SAMPLE_RATE`——采样率决定多少成功调用把 prompt/response 文本存入 `llm_usage` 供事后质量分析，error 调用一律采样；`/api/usage/samples` 查询。`USAGE_SAMPLE_RETENTION_DAYS`——采样文本保留天数，到期由 flusher 清空文本列、元数据保留，默认 30）
 - `METRICS_ENABLED` — 运行健康指标（Prometheus，默认 true）。开启后 `GET /metrics` 暴露进程内时间序列：HTTP 请求数与延迟分位数、LLM 调用数/延迟/token、熔断器状态与打开/拒绝计数、Agent 并发槽位占用与 503 拒绝、ReAct 循环步数分布。与 `USAGE_ENABLED` 独立——这是进程本地健康观测，`llm_usage` 是持久化成本行。关闭则 `/metrics` 返回 404

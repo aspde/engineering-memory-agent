@@ -29,7 +29,7 @@ EMA 当前只有两个数据来源——用户手动上传文档和手动触发 
 
 8. As a team member, I want EMA to automatically ingest CI build failures as memories, so that recurring build issues are tracked and can be correlated across time.
 9. As a team member, I want the CI connector to capture the failed job name, error summary, commit SHA, and branch, so that the memory can be linked to specific code changes (via Phase 1 entity normalization).
-10. As a team member, I want CI pipeline duration regressions (e.g., test suite went from 3min to 12min) to be detected and stored as a distinct memory type "ci_regression", so that performance degradations are tracked separately from outright failures.
+10. As a team member, I want CI pipeline duration regressions (e.g., test suite went from 3min to 12min) to be detected and stored as a distinct memory type "ci_regression", so that performance degradations are tracked separately from outright failures. Baseline detection is powered by GitHub Actions (when configured): authoritative duration from the failed job's own timestamps, a median-duration baseline across the same job's recent successful runs, plus a bounded full job log appended to the memory.
 
 ### 飞书 连接器
 
@@ -132,6 +132,26 @@ CREATE TABLE webhook_logs (
 
 每个连接器是一个独立的 Python 文件，不相互依赖。新增一个连接器只需要新建一个文件 + 在 registry 中注册——不改任何已有代码。
 
+### CI 连接器的 GitHub Actions 增强（best-effort 出站）
+
+CI 接口的通用设计不变——GitLab CI / Jenkins 等仍走纯入站路径；GitHub Actions 是第一个真实 enrichment 后端，由独立的 [`backend/connectors/github_client.py`](../../backend/connectors/github_client.py) 承载全部出站调用。
+
+**契约：**
+
+- **token 关（`CI_GITHUB_TOKEN` 留空）** = 纯入站行为，webhook 渲染什么就存什么。
+- **token 开 + payload 带 GitHub 标识** = `process()` 阶段做三步增强，每步独立降级：
+  1. **权威耗时** — `GET /actions/jobs/{id}` 的 `started_at`/`completed_at` 差值，替换正文中的 `Duration:` 行并写入 meta；
+  2. **基线** — 同 workflow/分支/同名 job 最近 N 次成功运行的耗时中位数（N=`CI_GITHUB_LOOKBACK_RUNS`），写入 meta 的 `baseline_duration_seconds`；当前耗时 > 基线 × 2.0 时记忆升级为 `ci_regression` 并在正文头部标注倍数。这是该 source_type 在真实环境中的唯一触发路径；
+  3. **完整日志** — job 日志 zip（302 → codeload）解包、剥 ANSI、按 step 序号拼接、超 `CI_GITHUB_LOG_MAX_CHARS` 从尾部截断，以 `GitHub Actions Log:` 段追加到正文末尾。
+- **任一步 GitHub 侧失败** = 记 warning、保留其余步骤成果，投递仍以 `processed` 结束——GitHub 故障绝不丢 CI 失败记忆。
+- 所有 HTTP 调用走共享韧性层（`"github"` 熔断器 + 传输重试）；429/5xx 可重试，401/403/404 立即回退。基线结果按 (workflow, branch, job) 缓存 TTL 600s，失败风暴下不重跑 fan-out。
+
+**标识符契约：** webhook 载荷的顶层字段或嵌套 `"github"` dict 提供 `owner/repo/run_id/job_id/workflow_id`（存入 meta 带 `github_` 前缀）；缺 owner/repo 时回退解析 GitHub 形式的 `build_url`（`https://github.com/{owner}/{repo}/actions/runs/{run_id}(/job/{job_id})`）。owner/repo 无法确定则不做增强。`workflow_id` 缺省时由 run 接口反查（GitHub `workflow_job` 载荷不带它），branch 缺省回退 run 的 `head_branch`。
+
+**幂等性：** `write_memory` 的 content-hash 基于**最终 enriched 内容**；对已完成的 job 增强是确定性的（日志 zip 不可变、基线取中位数、截断从尾部、时长格式化固定），因此相同 webhook 重发仍会被去重。残余风险：GitHub 在事后修订日志文本会使 hash 变化，此时视为新内容重新入库。
+
+配置项见 `.env.example` 与 [deployment.md](../deployment.md) 的 `CI_GITHUB_*` 说明。
+
 ### 飞书自动摄入触发词
 
 消息中包含以下关键词时，自动标记为优先摄入：`记一下`、`备忘`、`记住`、`记录下来`、`mark`。
@@ -169,9 +189,11 @@ CREATE TABLE webhook_logs (
 |---------|------|---------|
 | `tests/unit/test_connector_base.py` | Connector ABC、registry 注册/获取 | test_llm_service.py（接口 + 实现模式） |
 | `tests/unit/test_connector_pingcode.py` | PingCode payload → normalize → content 文本 | 新——纯数据测试，无 mock |
-| `tests/unit/test_connector_ci.py` | CI payload → normalize → content 文本 | 同上 |
+| `tests/unit/test_connector_ci.py` | CI payload → normalize → content 文本；GitHub enrichment 降级路径（fake client 注入） | 同上 |
 | `tests/unit/test_connector_feishu.py` | 飞书 payload → normalize → content 文本 | 同上 |
+| `tests/unit/test_github_client.py` | GitHub Actions 客户端：纯 helper（时长/日志 zip 解析）+ MockTransport 路由/基线中位数/重试边界 | test_resilience.py（韧性接线） |
 | `tests/api/test_webhook_routes.py` | 签名校验、format 校验、正常流程 | test_memory_routes.py |
+| `tests/api/test_ci_webhook_github.py` | GitHub 全挂时的端到端 best-effort 契约（投递仍 `processed`） | test_webhook_routes.py |
 | `tests/api/test_connector_routes.py` | 连接器列表、投递日志、分页 | test_memory_routes.py |
 | `src/pages/Connectors.test.tsx` | 连接器列表渲染、状态展示 | StatsDashboard.test.tsx |
 
@@ -202,5 +224,5 @@ CREATE TABLE webhook_logs (
 
 - 本 spec 对应 [ADR-006](./decisions/ADR-006-extension-roadmap.md) 的 Phase 2
 - 连接器的价值依赖 Phase 1（实体归一化）——外部数据摄入后需要能链接到已有实体才有意义
-- CI 连接器设计为通用接口——支持 GitHub Actions、GitLab CI、Jenkins 等，只需各自实现 `normalize()` 的差异化部分
+- CI 连接器设计为通用接口——支持 GitHub Actions、GitLab CI、Jenkins 等，只需各自实现 `normalize()` 的差异化部分。出站增强目前仅 GitHub Actions 实现（见上文），其余系统保持纯入站。
 - 连接器自己的配置（API keys、webhook secrets）存储在 `.env` 中，不存数据库——保持现有配置管理模式一致
