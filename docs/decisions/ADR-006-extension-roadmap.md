@@ -17,7 +17,7 @@ EMA 基础功能已就绪：ReAct Agent 循环、三阶段记忆提取、四级�
 ```
 Phase 1: 知识图谱化（实体归一化 + 一度关系查询 + 可视化）
     ↓
-Phase 2: 多源连接器（Webhook 接收 + 连接器接口 + Jira/CI/Slack 适配）
+Phase 2: 多源连接器（Webhook 接收 + 连接器接口 + PingCode/CI/飞书 适配）
     ↓
 Phase 3: 主动 Agent（任务调度 + 自主巡检 + 洞察推送）
     ↓
@@ -41,7 +41,7 @@ Phase 4: 垂直场景（故障复盘 / 代码审查 / 新人 Onboarding，按需
 
 ### Phase 2 在 Phase 1 之后的原因
 
-- 连接器引入的外部数据（Jira issue、CI 事件、Slack 消息）需要能关联到已有实体才有意义
+- 连接器引入的外部数据（PingCode 工作项、CI 事件、飞书消息）需要能关联到已有实体才有意义
 - 连接器接口设计依赖 Phase 1 确定的数据模型
 
 ### Phase 2 预留：连接器批量归一化（batch 脚手架）
@@ -81,7 +81,7 @@ Phase 4: 垂直场景（故障复盘 / 代码审查 / 新人 Onboarding，按需
 ```
 现在：API 补强（Webhook + Batch） + Web 做厚（图谱可视化）
     ↓
-Phase 3 附近：ChatOps Bot（Slack/飞书），开发成本约一个周末
+Phase 3 附近：ChatOps Bot（飞书），开发成本约一个周末
     ↓
 远期：IDE 插件（等知识库和用户习惯成熟）
 ```

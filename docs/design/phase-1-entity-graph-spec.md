@@ -30,7 +30,7 @@ EMA 需要一种能力——让分散在数百条记忆中的实体和关系**�
 
 7. As a user, I want to filter a memory search by entity name — "find memories related to PostgreSQL in the past 30 days" — so that I can narrow down broad searches.
 
-8. As a user, I want to see the total count of memories an entity is associated with, and how many came from each source type (git, conversation, jira), so that I know how rich the knowledge is around this entity.
+8. As a user, I want to see the total count of memories an entity is associated with, and how many came from each source type (git, conversation, pingcode), so that I know how rich the knowledge is around this entity.
 
 ### 关系查询
 

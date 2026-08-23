@@ -17,7 +17,7 @@ class Connector(ABC):
 
     Subclasses must provide:
       - ``source_type`` — a unique string used as ``memories.source_type``
-      - ``display_name`` — human-readable label (e.g. "Jira", "CI/CD")
+      - ``display_name`` — human-readable label (e.g. "PingCode", "CI/CD")
       - ``validate(payload)`` — check whether the webhook payload is well-formed
       - ``normalize(payload)`` — transform the payload into EMA's standard
         content text format

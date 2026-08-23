@@ -38,8 +38,8 @@ describe('ConnectorsPage', () => {
     mockListConnectors.mockResolvedValue({
       connectors: [
         {
-          source_type: 'jira',
-          display_name: 'Jira',
+          source_type: 'pingcode',
+          display_name: 'PingCode',
           status: 'active',
           batch_mode: 'pending',
         },
@@ -55,7 +55,7 @@ describe('ConnectorsPage', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText('Jira')).toBeDefined();
+      expect(screen.getByText('PingCode')).toBeDefined();
     });
     expect(screen.getByText('CI/CD')).toBeDefined();
     expect(screen.getByText('已激活')).toBeDefined();
@@ -86,8 +86,8 @@ describe('ConnectorsPage', () => {
     mockListConnectors.mockResolvedValue({
       connectors: [
         {
-          source_type: 'jira',
-          display_name: 'Jira',
+          source_type: 'pingcode',
+          display_name: 'PingCode',
           status: 'active',
           batch_mode: 'pending',
         },
@@ -97,8 +97,8 @@ describe('ConnectorsPage', () => {
       logs: [
         {
           id: 'log-1',
-          source: 'jira',
-          event_type: 'issue.resolved',
+          source: 'pingcode',
+          event_type: 'workitem.updated',
           status: 'processed',
           payload_summary: 'EMA-42 fixed',
           memory_id: null,
@@ -111,7 +111,7 @@ describe('ConnectorsPage', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText('Jira')).toBeDefined();
+      expect(screen.getByText('PingCode')).toBeDefined();
     });
 
     const user = userEvent.setup();
@@ -126,8 +126,8 @@ describe('ConnectorsPage', () => {
     mockListConnectors.mockResolvedValue({
       connectors: [
         {
-          source_type: 'jira',
-          display_name: 'Jira',
+          source_type: 'pingcode',
+          display_name: 'PingCode',
           status: 'active',
           batch_mode: 'pending',
         },
@@ -138,7 +138,7 @@ describe('ConnectorsPage', () => {
     renderPage();
 
     await waitFor(() => {
-      expect(screen.getByText('Jira')).toBeDefined();
+      expect(screen.getByText('PingCode')).toBeDefined();
     });
 
     const user = userEvent.setup();

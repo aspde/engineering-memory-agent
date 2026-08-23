@@ -18,8 +18,8 @@ Phase 4 的目标不是增加新能力，而是**为高频场景预组装解决�
 
 ### 故障复盘 Agent
 
-1. As an on-call engineer, I want EMA to automatically generate a postmortem draft when a Jira incident issue is marked "Resolved", so that I don't start the postmortem from a blank page.
-2. As an on-call engineer, I want the postmortem draft to include a timeline assembled from Jira timestamps + CI failure logs + related Slack discussions, so that I don't have to manually piece together the chronology.
+1. As an on-call engineer, I want EMA to automatically generate a postmortem draft when a PingCode incident work item is marked "Resolved", so that I don't start the postmortem from a blank page.
+2. As an on-call engineer, I want the postmortem draft to include a timeline assembled from PingCode timestamps + CI failure logs + related Feishu discussions, so that I don't have to manually piece together the chronology.
 3. As an on-call engineer, I want the postmortem draft to include a "similar incidents" section — matching the current incident to historical ones by affected entities and symptom patterns — so that I can identify recurring root causes.
 4. As an on-call engineer, I want the postmortem draft to suggest potential root causes based on the code diff of the fix commit + entity relation graph (e.g., "the changed file DBConfig.java has been involved in 2 previous connection-pool incidents"), so that the analysis is grounded in project history.
 5. As a team, I want the finalized postmortem to be saved as a structured memory linked to all related entities, so that it enriches the knowledge base for future queries.
@@ -29,7 +29,7 @@ Phase 4 的目标不是增加新能力，而是**为高频场景预组装解决�
 6. As a developer reviewing a PR, I want EMA to analyze the changed files and tell me what I should watch out for, based on historical faults and decisions associated with those files, so that I don't miss a known risk that the author and I may have both forgotten.
 7. As a developer reviewing a PR, I want EMA to flag when the changed file has been involved in past incidents — "⚠️ DBConfig.java: changed the connection pool config — this file was involved in 2 production incidents in the last 6 months" — so that high-risk changes get extra scrutiny.
 8. As a PR author, I want EMA to check whether the PR's stated goal (from the PR description) aligns with the historical decision record — "this PR proposes extracting the patrol scheduler into a separate service, but ADR-007 documents keeping it embedded in the main process" — so that contradictions with past decisions are surfaced before merge.
-9. As a developer, I want the review context to be delivered as a comment on the PR (via GitHub/GitLab API) or as a Slack message, so that I get it in my existing workflow without switching to EMA's Web UI.
+9. As a developer, I want the review context to be delivered as a comment on the PR (via GitHub/GitLab API) or as a 飞书 message, so that I get it in my existing workflow without switching to EMA's Web UI.
 
 ### 新人 Onboarding 向导
 
@@ -43,7 +43,7 @@ Phase 4 的目标不是增加新能力，而是**为高频场景预组装解决�
 14. As a tech lead, I want EMA to produce a weekly report of unresolved temporary solutions — memories marked with "workaround" or "temporary" that are older than 3 months with no follow-up — so that shortcuts don't become permanent.
 15. As a tech lead, I want EMA to flag documentation gaps — modules associated with many memories but zero formal documentation — so that I know where tribal knowledge is most concentrated and most fragile.
 16. As a tech lead, I want EMA to detect when a temporary solution has been replaced by a proper fix (matching a new commit memory against the workaround memory) and automatically mark the workaround as resolved, so that the debt radar stays accurate without manual curation.
-17. As a tech lead, I want the tech debt report to be shareable — "send this to #tech-debt in Slack" — so that the whole team sees it without another meeting.
+17. As a tech lead, I want the tech debt report to be shareable — "send this to #tech-debt in 飞书" — so that the whole team sees it without another meeting.
 
 ### 场景孵化流程
 
@@ -84,7 +84,7 @@ SCENARIOS: dict[str, dict] = {
     "postmortem": {
         "name": "故障复盘",
         "compose": "backend.service.scenarios.postmortem.compose_postmortem",
-        "triggers": ["jira_issue_resolved", "manual"],
+        "triggers": ["pingcode_workitem_resolved", "manual"],
         "status": "active",
     },
     "code_review": {
@@ -116,7 +116,7 @@ SCENARIOS: dict[str, dict] = {
 
 | 场景 | 用到 Phase 1（实体查询） | 用到 Phase 2（连接器数据） | 用到 Phase 3（主动触发） |
 |------|----------------------|--------------------------|------------------------|
-| 故障复盘 | ✅ 关联实体历史故障 | ✅ Jira + CI + Git 拼时间线 | ✅ Jira resolved 事件触发 |
+| 故障复盘 | ✅ 关联实体历史故障 | ✅ PingCode + CI + Git 拼时间线 | ✅ PingCode resolved 事件触发 |
 | 代码审查 | ✅ 文件→实体→历史故障 | ✅ Git PR webhook | ✅ PR opened 事件触发 |
 | Onboarding | ✅ 核心实体 + 关系全景 | — | — |
 | 技术债雷达 | ✅ 临时方案→关联模块 | — | ✅ 每周巡检自动运行 |
