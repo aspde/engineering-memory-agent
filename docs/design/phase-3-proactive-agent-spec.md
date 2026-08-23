@@ -3,9 +3,9 @@
 > **实现状态（2026-08）**：本 spec 是 Phase 3 的原始设计蓝图，正文保留设计时的意图。
 > 与当前代码的差异：
 > - 定时巡检 `daily` / `weekly` 已实现——weekly 内含全量矛盾扫描与过期记忆扫描（`contradictions` / `stale_memories` / `entity_coverage`），**不再有独立的 `contradiction_scan` 类型**；
-> - 事件驱动响应（CI 失败 / PingCode 工作项解决 → 实时 Agent 分析 + 推送）从未接线，已在精简中移除（含对应 prompt）。注意与摄入链路区分：CI webhook 本身已实现并持续增强（如 2026-08 的 GitHub Actions 富化——权威耗时、时长基线、`ci_regression` 检测），但事件仍止步于写入记忆，不触发响应；
+> - 事件驱动响应：**CI 失败分析已接线（2026-08）**——投递终态后由 `backend/service/event_analysis.py` 驱动分析 Agent（只读检索工具面、同 job 冷却闸、severity 阈值飞书推送、结论落 `webhook_logs.analysis` 列，开关 `EVENT_ANALYSIS_ENABLED` 默认关闭，见 ADR-011 风格的双层门控；冷却默认 3600s 对应 story 10 示例语义）。PingCode bug-resolved 分析未接线但接口已预留（Connector 的 `triggers_event_analysis` / `event_analysis_cooldown_key` / `event_analysis_prompt_key` 能力属性）；原 spec 中的 Jira/Slack 对应实际栈为 PingCode/飞书。story 9（CI 配置值与历史事故值比对告警）尚未实现，属后续独立需求。摄入链路本身此前已实现并持续增强（如 GitHub Actions 富化——权威耗时、时长基线、`ci_regression` 检测）；
 > - 巡检输出修复重试（repair）已移除——输出不合 JSON 契约时直接记 `failed` 并保留原始输出；
-> - 通知通过飞书 bot webhook 推送，tool 为 `notify_feishu_tool`（原设计的 `notify_slack` 从未实现，飞书版为独立设计而非改名）；
+> - 通知通过飞书 bot webhook 推送，tool 为 `notify_feishu_tool`（原设计的 `notify_slack` 从未实现，飞书版为独立设计而非改名）；事件分析的推送不走 agent 工具面，由代码按 severity 阈值确定性触发（共享发送逻辑在 `backend/service/notification.py`）；
 > - 手动触发 `POST /api/patrol/trigger` 返回真实 `patrol_id`（异步运行）。
 > 当前 `patrol_type` 枚举为 `daily | weekly`。
 

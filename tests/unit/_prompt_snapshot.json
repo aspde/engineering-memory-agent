@@ -11,6 +11,10 @@
     "version": "5",
     "sha256": "37a76130c025ed2110ba537fda8d52762fba08a04025c262cbb220b7c947c1fd"
   },
+  "event.ci_failure": {
+    "version": "1",
+    "sha256": "5d47776968545003f6937436ec53a82e7243c5e7600b5d83d2eed0546f02971e"
+  },
   "extraction.entities": {
     "version": "4",
     "sha256": "c7babcd2a564d6fac3fd295b5911205d56be868f4e538056c087ea1278a29c6e"

@@ -55,6 +55,32 @@ class CIConnector(Connector):
     def source_type(self) -> str:
         return "ci_build"
 
+    @property
+    def triggers_event_analysis(self) -> bool:
+        # Failed builds trigger the Phase 3 event-driven analysis (search
+        # for similar historical failures, push a summary).  Gated by
+        # EVENT_ANALYSIS_ENABLED at the runner level.
+        return True
+
+    @property
+    def event_analysis_cooldown_key(self) -> str | None:
+        # Repeated failures of the same job within the cooldown window are
+        # analysed once (spec story 10 — notification fatigue).
+        return "job_name"
+
+    @property
+    def event_analysis_prompt_key(self) -> str | None:
+        return "event.ci_failure"
+
+    @property
+    def event_analysis_display(self) -> dict[str, Any]:
+        # Card title shows the job; the user message carries branch + URL
+        # context lines.
+        return {
+            "title_entity": "job_name",
+            "context_fields": ["branch", "source_url"],
+        }
+
     # ── Connector ABC ─────────────────────────────────────────────────
 
     def validate(self, payload: dict[str, Any]) -> bool:

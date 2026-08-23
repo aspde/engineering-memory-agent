@@ -245,36 +245,73 @@ async def _process_delivery(
     # Link every LLM call this ingestion makes to one trace (the agent chat
     # and patrol paths already set a trace id) so ``GET /api/usage/trace/{id}``
     # can replay a whole webhook intake — extraction → grading → merge —
-    # end-to-end instead of leaving its calls trace-less.
+    # end-to-end instead of leaving its calls trace-less.  (The analysis
+    # runner below stamps its own trace token.)
     trace_token = current_trace_id.set(f"webhook:{delivery_id}")
+    delivery_terminal = False
     try:
-        result = await connector.process(content, metadata)
-        memory_id: str | None = result.get("id") if isinstance(result, dict) else None
-        conflict_id: str | None = None
-        if isinstance(result, dict) and result.get("action") == "conflict":
-            # No interactive session on a webhook — persist for later HITL
-            # instead of silently dropping the conflicting content.
-            pending = await persist_pending_conflict(source, result)
-            conflict_id = pending["id"]
-        await _update_delivery(
-            delivery_id,
-            status="conflict_pending" if conflict_id else "processed",
-            memory_id=memory_id,
-            conflict_id=conflict_id,
-        )
-        logger.info(
-            "Webhook delivery %s processed (source=%s status=%s)",
-            delivery_id, source, "conflict_pending" if conflict_id else "processed",
-        )
-    except Exception as exc:
-        logger.exception("Webhook background processing failed for delivery %s", delivery_id)
         try:
-            await _update_delivery(delivery_id, status="failed", error=str(exc))
-        except Exception:
-            logger.exception("Failed to record failure outcome for delivery %s", delivery_id)
+            result = await connector.process(content, metadata)
+            memory_id: str | None = result.get("id") if isinstance(result, dict) else None
+            conflict_id: str | None = None
+            if isinstance(result, dict) and result.get("action") == "conflict":
+                # No interactive session on a webhook — persist for later HITL
+                # instead of silently dropping the conflicting content.
+                pending = await persist_pending_conflict(source, result)
+                conflict_id = pending["id"]
+            final_status = "conflict_pending" if conflict_id else "processed"
+            await _update_delivery(
+                delivery_id,
+                status=final_status,
+                memory_id=memory_id,
+                conflict_id=conflict_id,
+            )
+            logger.info(
+                "Webhook delivery %s processed (source=%s status=%s)",
+                delivery_id, source, final_status,
+            )
+            delivery_terminal = True
+        except Exception as exc:
+            logger.exception("Webhook background processing failed for delivery %s", delivery_id)
+            try:
+                await _update_delivery(delivery_id, status="failed", error=str(exc))
+            except Exception:
+                logger.exception("Failed to record failure outcome for delivery %s", delivery_id)
+        finally:
+            # Intake is finished (terminal or failed) — hand the extraction
+            # slot back BEFORE the optional analysis below.  A slow verdict
+            # (up to EVENT_ANALYSIS_TIMEOUT_SECONDS) must never pin intake
+            # capacity: with the slot released, fresh webhooks keep the full
+            # extraction budget even while analyses are in flight.
+            current_trace_id.reset(trace_token)
+            _release_slot()
+
+        # Phase 3 event-driven response — after the delivery is terminal,
+        # let the analysis agent judge the event against history.  Still
+        # awaited within this task (the ``_webhook_tasks`` strong reference
+        # must outlive every await), but under its own concurrency budget;
+        # every failure path lands in webhook_logs.analysis, never in the
+        # delivery status above.  A delivery that failed to ingest gets no
+        # analysis — there is nothing meaningful to match against history.
+        if delivery_terminal:
+            try:
+                from backend.service.event_analysis import EventContext, maybe_analyze_event
+
+                await maybe_analyze_event(
+                    EventContext(
+                        source=source,
+                        delivery_id=delivery_id,
+                        content=content,
+                        metadata=metadata,
+                        connector=connector,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    "Post-delivery event analysis dispatch failed for delivery %s",
+                    delivery_id,
+                )
     finally:
-        current_trace_id.reset(trace_token)
-        _release_slot()
         _webhook_tasks.discard(asyncio.current_task())
 
 

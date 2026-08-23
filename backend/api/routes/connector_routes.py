@@ -35,6 +35,8 @@ class DeliveryLogEntry(BaseModel):
     memory_id: str | None
     error: str | None
     created_at: str
+    # Phase 3 event-driven analysis verdict (JSON), NULL when no analysis ran.
+    analysis: dict | None = None
 
 
 class DeliveryLogResponse(BaseModel):
@@ -78,7 +80,7 @@ async def get_connector_logs(
             text(
                 """\
                 SELECT id, source, event_type, status, payload_summary,
-                       memory_id, error, created_at
+                       memory_id, error, created_at, analysis
                 FROM webhook_logs
                 WHERE source = :source
                 ORDER BY created_at DESC
@@ -100,6 +102,7 @@ async def get_connector_logs(
                 memory_id=str(row.memory_id) if row.memory_id else None,
                 error=row.error,
                 created_at=row.created_at.isoformat() if row.created_at else "",
+                analysis=row.analysis,
             )
             for row in rows
         ]

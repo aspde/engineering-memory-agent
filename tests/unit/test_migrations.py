@@ -167,6 +167,50 @@ class TestBaselineMigration:
         finally:
             conn.close()
 
+    def test_webhook_logs_analysis_column_round_trip(self, temp_migration_db) -> None:
+        """0004 adds ``webhook_logs.analysis`` (JSONB) and 0003→0004
+        downgrade removes it — the event-analysis verdict column must be
+        paired-migratable, not just present at head."""
+        command.upgrade(_migration_config(), "head")
+
+        conn = psycopg.connect(_psycopg_url(config.database_url))
+        try:
+            conn.autocommit = True
+            columns = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'webhook_logs'"
+            ).fetchall()
+            assert {"analysis"} <= {r[0] for r in columns}
+
+            # The column actually stores JSON: insert a row with a verdict
+            # and read it back.
+            conn.execute(
+                """
+                INSERT INTO webhook_logs (source, status, analysis)
+                VALUES ('ci', 'processed', '{"status": "completed"}'::jsonb)
+                """
+            )
+            row = conn.execute(
+                "SELECT analysis ->> 'status' FROM webhook_logs "
+                "WHERE source = 'ci' LIMIT 1"
+            ).fetchone()
+            assert row == ("completed",)
+        finally:
+            conn.close()
+
+        # One step down from head removes the column again.
+        command.downgrade(_migration_config(), "-1")
+
+        conn = psycopg.connect(_psycopg_url(config.database_url))
+        try:
+            columns = conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'webhook_logs'"
+            ).fetchall()
+            assert "analysis" not in {r[0] for r in columns}
+        finally:
+            conn.close()
+
     def test_upgrade_backfills_columns_on_partially_migrated_db(
         self, temp_migration_db,
     ) -> None:

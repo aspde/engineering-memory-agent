@@ -101,6 +101,61 @@ class Connector(ABC):
         """
         return "supported" if self.supports_batch else "pending"
 
+    # ── Event-analysis capability (Phase 3 event-driven response) ────
+
+    @property
+    def triggers_event_analysis(self) -> bool:
+        """Whether ingested events should trigger agent analysis.
+
+        When True, the webhook path spawns an analysis run after the
+        delivery reaches a terminal state (see
+        ``backend/service/event_analysis.py``).  Default False — only
+        connectors whose events warrant an immediate historical lookup
+        opt in (currently CI failures).
+        """
+        return False
+
+    @property
+    def event_analysis_cooldown_key(self) -> str | None:
+        """Metadata field whose value keys the per-entity cooldown gate.
+
+        Only meaningful when ``triggers_event_analysis`` is True.  For CI
+        this is ``"job_name"`` — repeated failures of the same job within
+        the cooldown window are analysed once.  None disables the gate
+        (every event is analysed).
+        """
+        return None
+
+    @property
+    def event_analysis_prompt_key(self) -> str | None:
+        """Registry key of this connector's analysis System Prompt.
+
+        Only meaningful when ``triggers_event_analysis`` is True.  Declared
+        per-connector (rather than derived from ``source``) because a
+        connector may ingest several memory types — the prompt describes
+        the *analysis task* ("judge this failed build"), not the source.
+        """
+        return None
+
+    @property
+    def event_analysis_display(self) -> dict[str, Any]:
+        """How the generic analysis UI renders this connector's events.
+
+        Two optional keys:
+
+        - ``"title_entity"`` — metadata field shown in the Feishu card
+          title (e.g. ``"job_name"`` for CI, ``"item_id"`` for PingCode).
+          Absent → the title is just the source name.
+        - ``"context_fields"`` — list of metadata fields appended to the
+          user message as context lines (CI: ``["branch", "source_url"]``).
+          Absent → no context lines.
+
+        Declared here so the runner and card renderer stay source-agnostic;
+        a new opted-in connector gets a sensible card without touching
+        event-analysis code.
+        """
+        return {}
+
     def normalize_batch(self, payloads: list[dict[str, Any]]) -> list[str]:
         """Normalize a batch of payloads — default loops over ``normalize()``.
 

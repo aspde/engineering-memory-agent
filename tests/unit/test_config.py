@@ -297,6 +297,57 @@ class TestValidateConfig:
         problems = config_mod.validate_config()
         assert any("EMBEDDING_PROVIDER" in p for p in problems)
 
+    # ── Event analysis (EVENT_ANALYSIS_*) ─────────────────────────────
+
+    def test_event_analysis_defaults_are_valid(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+
+        assert config_mod.validate_config() == []
+
+    def test_event_analysis_cooldown_below_one(self, monkeypatch) -> None:
+        """A non-positive cooldown analyses every repeat, defeating the gate."""
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(
+            config_mod.config.event_analysis, "cooldown_seconds", 0
+        )
+
+        problems = config_mod.validate_config()
+        assert any("EVENT_ANALYSIS_COOLDOWN_SECONDS" in p for p in problems)
+
+    def test_event_analysis_timeout_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(
+            config_mod.config.event_analysis, "timeout_seconds", -1
+        )
+
+        problems = config_mod.validate_config()
+        assert any("EVENT_ANALYSIS_TIMEOUT_SECONDS" in p for p in problems)
+
+    def test_event_analysis_concurrency_below_one(self, monkeypatch) -> None:
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(
+            config_mod.config.event_analysis, "max_concurrency", 0
+        )
+
+        problems = config_mod.validate_config()
+        assert any("EVENT_ANALYSIS_MAX_CONCURRENCY" in p for p in problems)
+
+    def test_event_analysis_notify_severity_unknown_never_notifies(self, monkeypatch) -> None:
+        """An unknown severity name would make the threshold comparison
+        unmatchable — silent notification loss — so it must be rejected."""
+        _valid_patrol(monkeypatch)
+        monkeypatch.setattr(config_mod.config, "app_env", "test")
+        monkeypatch.setattr(
+            config_mod.config.event_analysis, "notify_severity", "catastrophic"
+        )
+
+        problems = config_mod.validate_config()
+        assert any("EVENT_ANALYSIS_NOTIFY_SEVERITY" in p for p in problems)
+
 
 class TestBreadthLayerFlags:
     """ADR-011: breadth layers (connectors/webhooks, scenarios, patrol) are

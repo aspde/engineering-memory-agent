@@ -248,12 +248,67 @@ class CIGitHubConfig:
     )
 
 
+# Severity ladder shared by every producer of structured findings (event
+# analysis verdicts, patrol findings).  Order is the escalation rank: the
+# notify-threshold comparison and ``validate_config``'s enum check both
+# read this tuple instead of re-declaring their own.
+SEVERITY_LEVELS: tuple[str, ...] = ("info", "warning", "critical")
+
+
+@dataclass
+class EventAnalysisConfig:
+    """Event-driven analysis of ingested connector events (Phase 3).
+
+    When a delivery with an opted-in connector reaches its terminal webhook
+    state, an analysis agent searches the memory store for similar
+    historical events and pushes a structured verdict.  Off by default —
+    this is a breadth layer behind CONNECTORS_ENABLED (ADR-011);
+    EVENT_ANALYSIS_ENABLED is the inner gate so analysis can be toggled
+    independently of intake.
+
+    Scope note: only CI failure analysis is wired today (spec story 7).
+    The mechanism is deliberately source-agnostic — a future connector
+    (PingCode bug-resolved) opts in via its capability properties rather
+    than new config.  Spec stories 9 (CI config value vs. past incident
+    values) and per-finding-type notification levels (story 12) are not
+    implemented; story 10's rate limit is approximated by cooldown_seconds
+    below.
+    """
+
+    enabled: bool = field(
+        default_factory=lambda: os.getenv("EVENT_ANALYSIS_ENABLED", "false").lower() == "true"
+    )
+    # Repeated events of the same cooldown key (CI: job_name) within this
+    # window are analysed once — a CI storm must not burn one agent run
+    # (3-8 LLM calls) per failed build.  Default 3600 matches spec story
+    # 10's example (50 failures in an hour alert once); lower it if a job
+    # legitimately needs a second look sooner.
+    cooldown_seconds: int = field(
+        default_factory=lambda: int(os.getenv("EVENT_ANALYSIS_COOLDOWN_SECONDS", "3600"))
+    )
+    timeout_seconds: int = field(
+        default_factory=lambda: int(os.getenv("EVENT_ANALYSIS_TIMEOUT_SECONDS", "120"))
+    )
+    max_concurrency: int = field(
+        default_factory=lambda: int(os.getenv("EVENT_ANALYSIS_MAX_CONCURRENCY", "2"))
+    )
+    # Findings at or above this severity push a Feishu card; lower ones are
+    # only persisted to webhook_logs.analysis.
+    notify_severity: str = field(
+        default_factory=lambda: os.getenv("EVENT_ANALYSIS_NOTIFY_SEVERITY", "warning")
+    )
+    notify_enabled: bool = field(
+        default_factory=lambda: os.getenv("EVENT_ANALYSIS_NOTIFY_ENABLED", "true").lower() == "true"
+    )
+
+
 @dataclass
 class AppConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     resilience: ResilienceConfig = field(default_factory=ResilienceConfig)
     ci_github: CIGitHubConfig = field(default_factory=CIGitHubConfig)
+    event_analysis: EventAnalysisConfig = field(default_factory=EventAnalysisConfig)
     database_url: str = field(
         default_factory=lambda: os.getenv("DATABASE_URL", "postgresql://ema:ema123@localhost:5432/ema_dev")
     )
@@ -596,6 +651,28 @@ def validate_config() -> list[str]:
     if config.ci_github.log_max_chars < 100:
         problems.append(
             f"CI_GITHUB_LOG_MAX_CHARS={config.ci_github.log_max_chars} must be >= 100"
+        )
+
+    # Event analysis: a non-positive cooldown would analyse every repeat
+    # (defeating the gate), a non-positive timeout/concurrency lets one
+    # analysis hang or fan out unbounded, and an unknown severity name would
+    # silently never notify (the threshold comparison can never match).
+    if config.event_analysis.cooldown_seconds < 1:
+        problems.append(
+            f"EVENT_ANALYSIS_COOLDOWN_SECONDS={config.event_analysis.cooldown_seconds} must be >= 1"
+        )
+    if config.event_analysis.timeout_seconds < 1:
+        problems.append(
+            f"EVENT_ANALYSIS_TIMEOUT_SECONDS={config.event_analysis.timeout_seconds} must be >= 1"
+        )
+    if config.event_analysis.max_concurrency < 1:
+        problems.append(
+            f"EVENT_ANALYSIS_MAX_CONCURRENCY={config.event_analysis.max_concurrency} must be >= 1"
+        )
+    if config.event_analysis.notify_severity not in SEVERITY_LEVELS:
+        problems.append(
+            f"EVENT_ANALYSIS_NOTIFY_SEVERITY={config.event_analysis.notify_severity} "
+            "must be one of: " + ", ".join(SEVERITY_LEVELS)
         )
 
     # Rate-limit quotas: a non-positive requests count admits nothing, and a
