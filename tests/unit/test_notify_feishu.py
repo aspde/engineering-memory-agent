@@ -48,6 +48,8 @@ class TestNotifyFeishu:
         data = json.loads(result)
         assert data["ok"] is True
         assert data["msg_type"] == "text"
+        # Historical contract: the Feishu response code travels as an int.
+        assert isinstance(data["feishu_status"], int)
 
         fake_client.post.assert_called_once()
         call_args = fake_client.post.call_args

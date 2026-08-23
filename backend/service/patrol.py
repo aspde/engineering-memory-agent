@@ -108,53 +108,14 @@ def _validate_findings(findings: dict | None, patrol_type: str) -> str | None:
 
 
 def _parse_findings(raw_text: str) -> dict | None:
-    """Try to parse the agent's final response as JSON findings.
+    """Parse the agent's final response as JSON findings.
 
-    The agent is instructed to output pure JSON, but it may wrap with
-    markdown fences or include explanatory text.  This function attempts
-    to extract a JSON object from the response.
+    Thin wrapper over the shared tolerant extractor — patrol keeps its
+    historical name so existing tests and callers are unchanged.
     """
-    text = raw_text.strip()
-    if not text:
-        return None
+    from backend.service.json_extraction import extract_json_object
 
-    # Try direct parse first
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-
-    # Try to extract from markdown code fences
-    if "```" in text:
-        lines = text.split("\n")
-        in_fence = False
-        fence_lines: list[str] = []
-        for line in lines:
-            if line.strip().startswith("```"):
-                if in_fence:
-                    break
-                in_fence = True
-                continue
-            if in_fence:
-                fence_lines.append(line)
-        if fence_lines:
-            try:
-                return json.loads("\n".join(fence_lines))
-            except json.JSONDecodeError:
-                pass
-
-    # Try to find a JSON object with regex (greedy — last { to first })
-    import re
-
-    m = re.search(r"\{[\s\S]*\}", text)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-
-    logger.warning("Could not parse patrol findings as JSON, storing raw text")
-    return {"raw_output": text[:5000]}
+    return extract_json_object(raw_text, label="patrol findings")
 
 
 async def run_patrol(

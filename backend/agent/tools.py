@@ -408,65 +408,20 @@ async def notify_feishu_tool(
         msg_type: ``"text"`` (default) or ``"interactive"`` for a card.
         title: Card title (only used when msg_type="interactive").
     """
-    import httpx
+    from backend.service.notification import send_feishu_message
 
-    from backend.shared.config import config
-
-    webhook_url = config.feishu_webhook_url
-    if not webhook_url:
-        return json.dumps(
-            {"ok": False, "error": "FEISHU_WEBHOOK_URL is not configured"},
-            ensure_ascii=False,
-        )
-
-    # Build Feishu bot webhook payload
-    if msg_type == "interactive":
-        payload: dict[str, Any] = {
-            "msg_type": "interactive",
-            "card": {
-                "header": {
-                    "title": {"tag": "plain_text", "content": title or "EMA 巡检通知"},
-                    "template": "blue",
-                },
-                "elements": [
-                    {"tag": "markdown", "content": message},
-                ],
-            },
-        }
-    else:
-        payload = {
-            "msg_type": "text",
-            "content": {"text": message},
-        }
-
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(webhook_url, json=payload)
-            resp.raise_for_status()
-        feishu_result = resp.json()
-        return json.dumps(
-            {
-                "ok": True,
-                "msg_type": msg_type,
-                "message_preview": message[:200],
-                "feishu_status": feishu_result.get("code", -1),
-            },
-            ensure_ascii=False,
-        )
-    except httpx.TimeoutException:
-        import logging
-        logging.getLogger(__name__).error("Feishu webhook timed out")
-        return json.dumps(
-            {"ok": False, "error": "Webhook request timed out"},
-            ensure_ascii=False,
-        )
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).error("Feishu webhook failed: %s", exc)
-        return json.dumps(
-            {"ok": False, "error": str(exc)},
-            ensure_ascii=False,
-        )
+    ok, detail = await send_feishu_message(message, msg_type=msg_type, title=title)
+    if not ok:
+        return json.dumps({"ok": False, "error": detail}, ensure_ascii=False)
+    return json.dumps(
+        {
+            "ok": True,
+            "msg_type": msg_type,
+            "message_preview": message[:200],
+            "feishu_status": detail,
+        },
+        ensure_ascii=False,
+    )
 
 
 # ── Tool roster ──────────────────────────────────────────────────────
