@@ -38,6 +38,21 @@ def _migration_config() -> AlembicConfig:
     return cfg
 
 
+def _head_revision() -> str:
+    """The current migration head, resolved from migrations/versions/.
+
+    Asserting against this instead of a hard-coded revision string keeps the
+    tests green when a new migration lands — the thing being verified is
+    "upgrade head stamps exactly the head", not "the head is revision X".
+    """
+    from alembic.script import ScriptDirectory
+
+    script = ScriptDirectory.from_config(_migration_config())
+    heads = script.get_heads()
+    assert len(heads) == 1, f"expected a single migration head, got {heads}"
+    return heads[0]
+
+
 def _admin_conn_string() -> str:
     parts = urlsplit(config.database_url)
     admin = urlunsplit((parts.scheme, parts.netloc, "/postgres", "", ""))
@@ -112,7 +127,7 @@ class TestBaselineMigration:
             version = conn.execute(
                 "SELECT version_num FROM alembic_version"
             ).fetchone()
-            assert version == ("0002_drop_decay_factor",)
+            assert version == (_head_revision(),)
         finally:
             conn.close()
 
@@ -279,7 +294,7 @@ class TestInitDbIntegration:
         finally:
             conn.close()
         assert EXPECTED_TABLES <= tables
-        assert version[0] == "0002_drop_decay_factor"
+        assert version[0] == _head_revision()
 
     @pytest.mark.asyncio
     async def test_init_db_rejects_dimension_mismatch(self, temp_migration_db) -> None:
