@@ -11,7 +11,7 @@
 该机制有两个问题，其中一个直到做了 A/B 才暴露：
 
 1. **前提未经验证**：「近期/高频 = 相关」建立在合成老化分布上，没有真实语料支撑。
-2. **测量显示它让检索变差**（见 `tests/eval/reports/decay_ab_report.md`）。
+2. **测量显示它让检索变差**（见 `evals/reports/decay_ab_report.md`）。
 
 ## 决策
 
@@ -46,4 +46,4 @@
 - `search_memories` 单段 HNSW 纯相似度，代码路径简化（删掉两段候选窗 + Python 重排）。
 - `record_recalls` 保留，作为 patrol 归档与 UI 展示的输入。
 - `docs/memory-system.md` §4 与 `docs/engineering/gap-remediation.md` §6.1 的衰减论证现由本文档统一记录，决策可追溯。
-- 完整测量数据见 `tests/eval/reports/decay_ab_report.md`；口头记录见 `docs/engineering/decision-faq.md` 第 7 节。
+- 完整测量数据见 `evals/reports/decay_ab_report.md`；口头记录见 `docs/engineering/decision-faq.md` 第 7 节。

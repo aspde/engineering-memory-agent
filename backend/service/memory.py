@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Similarity thresholds for grading.
 # Calibrated 2026-08-11 against seed-corpus similarity distributions
-# (tests/eval/experiments/threshold_calibration.py): LLM-paraphrase pairs of the same
+# (evals/experiments/threshold_calibration.py): LLM-paraphrase pairs of the same
 # knowledge (should MERGE) land at cosine 0.842-0.965 (p25 0.878); distinct
 # same-category memories (should NOT merge) top out at 0.792.  The old
 # MERGE=0.92 sat above the paraphrase p25, so "the same knowledge written by
@@ -627,7 +627,7 @@ async def _write_resolved_memory(
     race was lost.
     """
     # A patrol-merged pair may have no content_hash — memories seeded directly
-    # (tests/eval/seed.py bypasses write_memory, which computes the hash) have
+    # (evals/seed.py bypasses write_memory, which computes the hash) have
     # NULL content_hash.  Refuse nothing: keep the survivor's existing hash so
     # its idempotency gate stays intact; only the write_memory-shaped conflict
     # paths (which always carry a hash) overwrite it.

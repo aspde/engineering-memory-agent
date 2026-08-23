@@ -90,7 +90,7 @@ LIMIT :limit;
 | Chunk 检索 | `retrieve(query)` | embed → vector_search(HNSW) → （可选 rerank） → 返回 |
 | Memory 检索 | `query_memories(query)` | embed → search_memories(相似度) → （可选 rerank） → record_recalls → 返回 |
 
-两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../../tests/eval/reports/eval-report.md)。召回统计为 `record_recalls`（单条 `UPDATE ... WHERE id = ANY(:ids)` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数），只作元数据、不参与排序。
+两套共用同一个 `EmbeddingProvider`（BGE-M3 / 1024 维）。**rerank 默认关闭**（`use_cross_encoder=False` / `use_llm_rerank=False`，opt-in）——eval 显示小语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 更低（0.967 vs 1.000），见 [eval-report.md](../../evals/reports/eval-report.md)。召回统计为 `record_recalls`（单条 `UPDATE ... WHERE id = ANY(:ids)` 批量递增 `recall_count`/`recalled_at`，无 N+1、并发不丢计数），只作元数据、不参与排序。
 
 ### 写入时的向量操作
 
@@ -108,7 +108,7 @@ LIMIT 1;
 
 四级阈值：≥0.92 合并、0.75-0.92 冲突检测、0.60-0.75 补充关联、<0.60 新插入。全部在 SQL 层面完成，不需要应用层后处理。
 
-> **2026-08-11 更正**：阈值已标定调整（[threshold_calibration_report.md](../../tests/eval/reports/archive/threshold_calibration_report.md)）——0.92 高到同义改写对一半漏 merge，改后为 ≥0.85 合并、0.72-0.85 冲突检测、0.60-0.72 补充关联、<0.60 新插入（`backend/service/memory.py`）。本条保留原始决策值供追溯。
+> **2026-08-11 更正**：阈值已标定调整（[threshold_calibration_report.md](../../evals/reports/archive/threshold_calibration_report.md)）——0.92 高到同义改写对一半漏 merge，改后为 ≥0.85 合并、0.72-0.85 冲突检测、0.60-0.72 补充关联、<0.60 新插入（`backend/service/memory.py`）。本条保留原始决策值供追溯。
 
 ## Trade-offs & Limitations
 

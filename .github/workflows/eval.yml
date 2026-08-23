@@ -74,7 +74,7 @@ jobs:
           python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-v2-m3')"
 
       - name: Seed eval corpus (chunks + memories)
-        run: python -m tests.eval.seed --clear --memories
+        run: python -m evals.seed --clear --memories
 
       - name: Run retrieval eval
         run: |
@@ -95,7 +95,7 @@ jobs:
           # memory retriever matches `summary`; content-only fingerprints were
           # unanswerable on it), and 8 seeds distilled from the real git
           # history via `ingest_repo` (seed-079..086).  See
-          # tests/eval/reports/baseline/README.md for the full baseline table.
+          # evals/reports/baseline/README.md for the full baseline table.
           #
           # recall@5 0.84 = measured 0.891 − ~0.05: allows ~15 misses
           # (92 × 0.16) against the measured 10, leaving headroom for
@@ -105,8 +105,8 @@ jobs:
           if [ "$RETRIEVER" = "memory" ]; then
             GATE_ARGS="--min-recall@5 0.84 --min-mrr 0.72"
           fi
-          python -m tests.eval.run_eval --retriever "$RETRIEVER" \
-            --report-md tests/eval/reports/eval-report.md \
+          python -m evals.run_eval --retriever "$RETRIEVER" \
+            --report-md evals/reports/eval-report.md \
             --report-json eval-report.json $GATE_ARGS
 
       - name: Upload eval report
@@ -115,7 +115,7 @@ jobs:
         with:
           name: eval-report
           path: |
-            tests/eval/reports/eval-report.md
+            evals/reports/eval-report.md
             eval-report.json
 
   # LLM behavior eval — tool selection / knowledge extraction / final-answer
@@ -124,7 +124,7 @@ jobs:
   # provider.  Requires the LLM_API_KEY secret (plus LLM_BASE_URL when not
   # the provider default).
   #
-  # The gate is a MULTI-RUN mean gate (tests/eval/multi_run_gate.py): the
+  # The gate is a MULTI-RUN mean gate (evals/multi_run_gate.py): the
   # eval runs 3 times and the gate trips on the 95% CI *lower bound* of the
   # 3-run mean (mean - t*stdev/sqrt(n)), NOT on any single run's value.
   # LLM output is sampled even with --judge deterministic, so one unlucky
@@ -139,7 +139,7 @@ jobs:
   # bias, so the gate trips on a real regression, not a noise blip.
   #
   # Thresholds calibrated 2026-08-09 against the committed baseline
-  # (tests/eval/reports/llm-eval-baseline.json, commit 4ae4848, --judge
+  # (evals/reports/llm-eval-baseline.json, commit 4ae4848, --judge
   # deterministic, 0 execution errors / 0 judge degradations); the floors sit
   # ~0.05-0.10 below the measured values so a healthy run passes while a real
   # regression still trips the job.  Recalibrate after an intentional
@@ -193,7 +193,7 @@ jobs:
           # a sustained quality drop drags the CI lower bound below a floor.
           # Thresholds are the same numbers the old single-run gate used; each
           # metric fails when ci95_lower < threshold - 0.03.
-          python -m tests.eval.multi_run_gate --n-runs 3 \
+          python -m evals.multi_run_gate --n-runs 3 \
             --judge deterministic \
             --suite tool_selection,extraction,answer \
             --report-dir llm-eval-reports \
@@ -220,7 +220,7 @@ jobs:
   # (which has neither) or `eval` (which must stay LLM-free).
   #
   # Gate thresholds calibrated 2026-08-09 against the committed baseline
-  # (tests/eval/reports/llm-eval-baseline.json, --judge deterministic):
+  # (evals/reports/llm-eval-baseline.json, --judge deterministic):
   # context_recall=1.000, fact_coverage=1.000, groundedness=1.000,
   # citation_rate=1.000 on 8 items.  Floors sit ~0.05-0.10 below so a
   # healthy run passes while a regression trips the job.  Same
@@ -280,15 +280,15 @@ jobs:
       - name: Seed e2e eval corpus
         # Re-seed from scratch each run: clear the previous run's rows first
         # so the corpus is exactly the e2e labeled set, no accumulation.
-        run: python -m tests.eval.e2e_seed --clear
+        run: python -m evals.e2e_seed --clear
 
       - name: Run end-to-end eval
         run: |
           # Deterministic gate (see the job comment): thresholds from the
           # committed baseline minus ~0.05-0.10.
-          python -m tests.eval.run_llm_eval --suite e2e \
+          python -m evals.run_llm_eval --suite e2e \
             --judge deterministic \
-            --report-md tests/eval/reports/e2e-eval-report.md \
+            --report-md evals/reports/e2e-eval-report.md \
             --report-json e2e-eval-report.json \
             --min-context-recall 0.95 \
             --min-fact-coverage 0.90 \
@@ -301,7 +301,7 @@ jobs:
         with:
           name: e2e-eval-report
           path: |
-            tests/eval/reports/e2e-eval-report.md
+            evals/reports/e2e-eval-report.md
             e2e-eval-report.json
 
   # Task-level end-to-end eval — drives the REAL agent graph (ReAct loop,
@@ -360,15 +360,15 @@ jobs:
           python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-m3')"
 
       - name: Seed e2e eval corpus
-        run: python -m tests.eval.e2e_seed --clear
+        run: python -m evals.e2e_seed --clear
 
       - name: Run task-level end-to-end eval
         run: |
           # Deterministic judging for the weekly run: no dedicated judge
           # provider required.  Agent is auto-approved at every HITL gate.
-          python -m tests.eval.run_task_eval \
+          python -m evals.run_task_eval \
             --judge deterministic \
-            --report-md tests/eval/reports/task-eval-report.md \
+            --report-md evals/reports/task-eval-report.md \
             --report-json task-eval-report.json
 
       - name: Upload task eval report
@@ -377,5 +377,5 @@ jobs:
         with:
           name: task-eval-report
           path: |
-            tests/eval/reports/task-eval-report.md
+            evals/reports/task-eval-report.md
             task-eval-report.json

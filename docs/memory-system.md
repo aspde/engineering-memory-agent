@@ -38,7 +38,7 @@ Read Path:
 | `rerank_cross_encoder()` | BGE-Reranker-v2-m3 本地 | 零 API 成本 | opt-in；小语料下实测掉 recall 且慢 ~90 倍（eval-report），默认关闭 |
 | `rerank_llm()` | 现有 LLMProvider | API 调用费用 | opt-in；需精细语义判断时 |
 
-**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`tests/eval/reports/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
+**hybrid 检索默认跳过 rerank**：`retrieve_hybrid(query, top_k, use_llm_rerank=False, skip_rerank=True)` 默认按 **RRF（reciprocal rank fusion）** 融合 dense 与 sparse 两个列表的名次直接排序——以名次而非原始分数融合，规避 cosine 与 jaccard 两种分布不可比、`max(dense, sparse)` 会被分布更热的检索器主导的问题；同时被两个检索器召回的 chunk 会获得交叉验证的加权。融合分数按最大可达值（双列表 #1）归一化到 0-1 相似度刻度，语义是**相对排序信号**而非绝对相似度。eval 报告（`evals/reports/eval-report.md`）显示当前语料下 cross-encoder rerank 延迟高 ~90 倍且 recall 反而更低（0.967 vs 1.000，0.15 floor 误伤 q015），故 rerank 为 opt-in（传 `skip_rerank=False` 走 cross-encoder，或 `use_llm_rerank=True` 走 LLM）。rerank 收益 scale-dependent，万级语料候选池覆盖率下降时需重新评估。
 
 ### 2. 三阶段记忆提取
 
@@ -71,7 +71,7 @@ extract_entities(content) ─┘
 | 0.60–0.72 | 插入为新记忆，关联到最相似记忆 |
 | < 0.60 | 作为全新记忆插入 |
 
-阈值经标定（`tests/eval/reports/archive/threshold_calibration_report.md`）：同义改写对的相似度 p25 为 0.878、同类不同记忆上限 0.792，0.85 是自然分离点。旧值 0.92 高到「同一知识被不同来源写出来」的 merge 一半不触发。
+阈值经标定（`evals/reports/archive/threshold_calibration_report.md`）：同义改写对的相似度 p25 为 0.878、同类不同记忆上限 0.792，0.85 是自然分离点。旧值 0.92 高到「同一知识被不同来源写出来」的 merge 一半不触发。
 
 合并和矛盾检测均为结构化 LLM 调用（JSON-schema 校验 + 重试，见「分层容错」）。合并失败保留原有摘要（合并是自由文本，失败成本是"少合并一次"）；矛盾检测失败则**降级为 supplement 关联写入**（`write_memory` 的 failsafe）——不假定矛盾（那会丢弃内容或把非矛盾误路由到 HITL），也不把新内容无标记写进冲突记忆，内容以补充关联保留；检测遗漏的矛盾由每周巡检的全量矛盾扫描兜底。实体/关系提取失败（增强类）在重试耗尽后降级为 `[]`，但会记 ERROR 日志 + 失败计数（`ema_structured_failures_total`），写入继续。
 
@@ -83,11 +83,11 @@ extract_entities(content) ─┘
 
 ### 4. 召回统计（替代原艾宾浩斯衰减）
 
-> 衰减加权的移除决策见 [ADR-009](./decisions/ADR-009-decay-weighting-removed.md)，A/B 数据见 `tests/eval/reports/decay_ab_report.md`。
+> 衰减加权的移除决策见 [ADR-009](./decisions/ADR-009-decay-weighting-removed.md)，A/B 数据见 `evals/reports/decay_ab_report.md`。
 
 记忆检索按**纯相似度**排序；每次检索会把命中的记忆记一次召回（`recall_count` + 1、`recalled_at = NOW()`），作为**元数据**而非排序信号。
 
-原实现曾用艾宾浩斯遗忘曲线把 `decay_factor` 乘进相似度排序，但 decay A/B 实测（`tests/eval/reports/decay_ab_report.md`）显示衰减加权 recall@5 0.667、无衰减 0.900——唯一的测量数据表明衰减让检索变差，且其前提「近期/高频=相关」建立在合成老化分布上、没有真实语料支撑。调参三轮（S=2x→8x→12x）本质是把曲线调得越来越接近 no-op。故从排序路径移除衰减，保留召回计数作访问历史。
+原实现曾用艾宾浩斯遗忘曲线把 `decay_factor` 乘进相似度排序，但 decay A/B 实测（`evals/reports/decay_ab_report.md`）显示衰减加权 recall@5 0.667、无衰减 0.900——唯一的测量数据表明衰减让检索变差，且其前提「近期/高频=相关」建立在合成老化分布上、没有真实语料支撑。调参三轮（S=2x→8x→12x）本质是把曲线调得越来越接近 no-op。故从排序路径移除衰减，保留召回计数作访问历史。
 
 `search_memories(query_vector)` 单段 HNSW 按 `embedding <=> :vec` 直接返回相似度排序，不再需要两段检索（候选窗 + Python 按 `similarity × decay_factor` 重排）。`query_memories(query)` 封装完整管道：embed → 纯相似度搜索 →（默认无 rerank，cross-encoder/LLM 为 opt-in）→ `record_recalls()`（单条 `UPDATE ... WHERE id = ANY(:ids)` 批量递增 `recall_count`/`recalled_at`，无 N+1 提交、并发不丢计数；从未召回的记忆记首次召回）→ 返回。
 

@@ -186,8 +186,8 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 - **文档索引与检索**：分块 → 嵌入 → pgvector，双 reranker（cross-encoder / LLM）
 - **三阶段记忆提取**：摘要 + 实体并行提取 → 关系提取
-- **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `tests/eval/reports/archive/threshold_calibration_report.md`）
-- **召回统计**：检索按纯相似度排序，命中记忆记录 `recall_count`/`recalled_at` 作元数据；原艾宾浩斯衰减加权因 A/B 实测掉 recall（0.667 vs 无衰减 0.900，见 `tests/eval/reports/decay_ab_report.md`）已从排序路径移除，过期记忆归档改由 patrol LLM 读原始召回字段判断
+- **四级相似度去重**：≥0.85 合并，0.72–0.85 冲突检测，0.60–0.72 补充关联，<0.60 新插入（阈值经标定，见 `evals/reports/archive/threshold_calibration_report.md`）
+- **召回统计**：检索按纯相似度排序，命中记忆记录 `recall_count`/`recalled_at` 作元数据；原艾宾浩斯衰减加权因 A/B 实测掉 recall（0.667 vs 无衰减 0.900，见 `evals/reports/decay_ab_report.md`）已从排序路径移除，过期记忆归档改由 patrol LLM 读原始召回字段判断
 
 ### Agent
 

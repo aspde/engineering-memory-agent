@@ -19,8 +19,8 @@ Two modes:
 - `HOT=1 locust ...`: the original 10 fixed queries, all of which hit the
   backend's LRU after the first pass → measures the cached hot path.
 
-The pool is built at import time from ``tests/eval/seed_memories.jsonl``
-(entities) + ``tests/eval/ground_truth.py`` (natural queries), so it stays
+The pool is built at import time from ``evals/seed_memories.jsonl``
+(entities) + ``evals/ground_truth.py`` (natural queries), so it stays
 in sync with the seeded corpus.
 """
 
@@ -36,7 +36,7 @@ load_dotenv()  # repo-root .env → EMA_API_KEY etc.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Real queries from tests/eval/ground_truth.py — all hit seeded corpus rows.
+# Real queries from evals/ground_truth.py — all hit seeded corpus rows.
 _HOT_QUERIES = [
     "PostgreSQL 连接池配置多少合适",
     "之前怎么修的 OOM 问题",
@@ -93,7 +93,7 @@ def _build_cold_pool() -> list[str]:
     ]
     # Add the natural ground-truth queries so the pool isn't all templates.
     try:
-        from tests.eval.ground_truth import GROUND_TRUTH
+        from evals.ground_truth import GROUND_TRUTH
         pool.extend(g["query"] for g in GROUND_TRUTH)
     except Exception:
         pass  # ground_truth import is optional (noisy cwd) — templates suffice

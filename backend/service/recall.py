@@ -5,7 +5,7 @@ only records that a search surfaced a memory, so ``recall_count`` /
 ``recalled_at`` are metadata, not a ranking signal.
 
 Why is there no Ebbinghaus decay weighting any more?  The decay A/B
-(``tests/eval/reports/decay_ab_report.md``) measured recall@5 0.667 with
+(``evals/reports/decay_ab_report.md``) measured recall@5 0.667 with
 decay weighting vs 0.900 without it, on a *synthetic* aging profile — and
 the profile's assumption that "recently-recalled = relevant" had no
 real-corpus support.  Archival decisions are a human/LLM judgement over the

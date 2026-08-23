@@ -176,7 +176,7 @@ class LLMConfig:
     fallback_timeout: int = field(
         default_factory=lambda: int(os.getenv("LLM_FALLBACK_TIMEOUT", "60"))
     )
-    # Dedicated judge provider for the LLM behavior eval (tests/eval).  When
+    # Dedicated judge provider for the LLM behavior eval (evals).  When
     # set, the eval's LLM-as-judge runs on this independent provider so the
     # verdict comes from a different model than the one being evaluated —
     # avoiding the self-preference bias of same-model judging.  All

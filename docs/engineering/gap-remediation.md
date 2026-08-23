@@ -2,7 +2,7 @@
 
 > 本文档记录 EMA 的能力评估方法、实测数据与基于数据的优化决策。目标:让"检索准不准 / 单轮对话多少钱 / 能扛多少并发 / 换了个 reranker 效果如何"这类问题都有**可复现的数字**可答,并保留每次改动的 A/B 证据,使后续任何改动都能对照基线判断是提升还是回归。
 >
-> 评估代码在 `tests/eval/`(检索评测、LLM 行为评测、任务级端到端评测、一次性实验脚本),CLI 用法见对应章节。本项目"评估驱动优化"的演进复盘见 [lessons-learned.md](lessons-learned.md)。
+> 评估代码在 `evals/`(检索评测、LLM 行为评测、任务级端到端评测、一次性实验脚本),CLI 用法见对应章节。本项目"评估驱动优化"的演进复盘见 [lessons-learned.md](lessons-learned.md)。
 
 ---
 
@@ -51,7 +51,7 @@
 构造 20-50 条 `(query, 相关 memory_id)` 标注对:
 
 ```python
-# tests/eval/ground_truth.py
+# evals/ground_truth.py
 """评估标注集 —— 手工构造，覆盖典型查询模式"""
 
 GROUND_TRUTH: list[dict] = [
@@ -74,7 +74,7 @@ GROUND_TRUTH: list[dict] = [
 #### 2.2.2 评估指标实现
 
 ```python
-# tests/eval/metrics.py
+# evals/metrics.py
 """RAG 评估指标 —— Recall@K / MRR / NDCG"""
 
 from typing import List
@@ -108,13 +108,13 @@ def ndcg_at_k(retrieved_ids: List[str], relevant_ids: List[str], k: int = 5) -> 
 #### 2.2.3 评估脚本
 
 ```python
-# tests/eval/run_eval.py
+# evals/run_eval.py
 """跑评估：对每个 query 调检索，算指标"""
 
 import asyncio
 from backend.service.retrieval import query_memories
-from tests.eval.ground_truth import GROUND_TRUTH
-from tests.eval.metrics import recall_at_k, mrr, ndcg_at_k
+from evals.ground_truth import GROUND_TRUTH
+from evals.metrics import recall_at_k, mrr, ndcg_at_k
 
 
 async def evaluate(use_llm_rerank: bool = False, top_k: int = 5):
@@ -150,7 +150,7 @@ if __name__ == "__main__":
 
 ### 2.3 LLM-as-judge 与 Agent 行为评测
 
-工具选择 / 知识抽取 / 最终答案三套 LLM 行为评测见 [llm-eval.md](llm-eval.md),CLI 为 `python -m tests.eval.run_llm_eval`。2026-08-09 新增第四套任务级端到端评测(`python -m tests.eval.run_task_eval`)——驱动真实 Agent 图(ReAct 循环 + 真实工具执行 + HITL 自动放行)完成多步任务,测 `completed` / `tool_recall` / `within_budget` 与答案接地。它顺带抓出并修复了一个生产 bug:拒绝审批后写操作仍被静态边路由执行(LangGraph 1.2.10 resume 时 Command 与静态边同时生效),详见 [llm-eval.md](llm-eval.md) 末尾。
+工具选择 / 知识抽取 / 最终答案三套 LLM 行为评测见 [llm-eval.md](llm-eval.md),CLI 为 `python -m evals.run_llm_eval`。2026-08-09 新增第四套任务级端到端评测(`python -m evals.run_task_eval`)——驱动真实 Agent 图(ReAct 循环 + 真实工具执行 + HITL 自动放行)完成多步任务,测 `completed` / `tool_recall` / `within_budget` 与答案接地。它顺带抓出并修复了一个生产 bug:拒绝审批后写操作仍被静态边路由执行(LangGraph 1.2.10 resume 时 Command 与静态边同时生效),详见 [llm-eval.md](llm-eval.md) 末尾。
 
 实现要点:
 
@@ -158,25 +158,25 @@ if __name__ == "__main__":
 - 裁判输出用 `chat_structured`(JSON Schema 校验 + 语义重试),替代裸 `json.loads` + 解析失败归零的脆弱写法;
 - 裁判 prompt 让 LLM 输出结构化的 `covered_facts / grounded / ungrounded_claims`,覆盖率与忠实度可从判决直接算指标,幻觉论断进报告 per-query 明细。
 
-> 早期草案（裸 `json.loads` + 1-5 分制）已重构，`tests/eval/llm_judge.py` 当前实现走 `chat_structured`（schema 校验 + 有界重试），prompt 是 answer/summary 两套结构化工件（`covered_facts` / `grounded` / `ungrounded_claims` 与摘要忠实/完整 0-1 分），失败降级到确定性通道并计入 `judge_errors`——judge 侧降级不触发 CI 门禁。以代码为准。
+> 早期草案（裸 `json.loads` + 1-5 分制）已重构，`evals/llm_judge.py` 当前实现走 `chat_structured`（schema 校验 + 有界重试），prompt 是 answer/summary 两套结构化工件（`covered_facts` / `grounded` / `ungrounded_claims` 与摘要忠实/完整 0-1 分），失败降级到确定性通道并计入 `judge_errors`——judge 侧降级不触发 CI 门禁。以代码为准。
 
-评估体系现状:`tests/eval/` 下交付,检索路径 70 条标注、四套 LLM 行为评测、任务级端到端评测,门禁接入 CI(每周定时,阈值按基线校准)。生成质量由 LLM-as-judge 粗筛 + 人工抽检兜底。
+评估体系现状:`evals/` 下交付,检索路径 70 条标注、四套 LLM 行为评测、任务级端到端评测,门禁接入 CI(每周定时,阈值按基线校准)。生成质量由 LLM-as-judge 粗筛 + 人工抽检兜底。
 
 ### 2.4 实施完成记录
 
-**交付目录**:`tests/eval/`
+**交付目录**:`evals/`
 
 | 文件 | 职责 |
 |------|------|
-| [metrics.py](../../tests/eval/metrics.py) | 6 个纯函数指标:Recall@K / Precision@K / HitRate@K / MRR / NDCG@K / MAP@K + `compute_all` |
-| [ground_truth.py](../../tests/eval/ground_truth.py) | 检索标注集访问器 + 常量 + 一致性守卫(70 条标注数据在 [data/ground_truth.jsonl](../../tests/eval/data/ground_truth.jsonl)) |
-| [seed_memories.jsonl](../../tests/eval/seed_memories.jsonl) | 70 条种子记忆(EMA 自身工程史),每条 summary 含独特指纹 |
-| [dataset.py](../../tests/eval/dataset.py) | 标注集加载 + 指纹匹配(`is_relevant`/`relevance_mask`)+ 语义相关性通道(`semantic_relevance_mask`,embedding cosine≥0.80)+ retriever 适配(chunk/memory)+ 4 项一致性校验 |
-| [runner.py](../../tests/eval/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合;语义通道默认关闭(opt-in),per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
-| [core.py](../../tests/eval/core.py) | 与 LLM 行为/task 评测共用的骨架:EvalResult / 聚合 / judge 失败零值 / JSON 序列化 |
-| [report.py](../../tests/eval/report.py) | Markdown + JSON 报告,含 A/B delta 表 |
-| [run_eval.py](../../tests/eval/run_eval.py) | CLI:`python -m tests.eval.run_eval --validate-only` / `--compare` / `--report-md` |
-| [seed.py](../../tests/eval/seed.py) | CLI:`python -m tests.eval.seed --dry-run` / `--memories` / `--clear` |
+| [metrics.py](../../evals/metrics.py) | 6 个纯函数指标:Recall@K / Precision@K / HitRate@K / MRR / NDCG@K / MAP@K + `compute_all` |
+| [ground_truth.py](../../evals/ground_truth.py) | 检索标注集访问器 + 常量 + 一致性守卫(70 条标注数据在 [data/ground_truth.jsonl](../../evals/data/ground_truth.jsonl)) |
+| [seed_memories.jsonl](../../evals/seed_memories.jsonl) | 70 条种子记忆(EMA 自身工程史),每条 summary 含独特指纹 |
+| [dataset.py](../../evals/dataset.py) | 标注集加载 + 指纹匹配(`is_relevant`/`relevance_mask`)+ 语义相关性通道(`semantic_relevance_mask`,embedding cosine≥0.80)+ retriever 适配(chunk/memory)+ 4 项一致性校验 |
+| [runner.py](../../evals/runner.py) | 单组评估 + A/B 对比 + 按 category/difficulty 聚合;语义通道默认关闭(opt-in),per-query 记录 `substring_hits`/`semantic_only_hits` 拆分 |
+| [core.py](../../evals/core.py) | 与 LLM 行为/task 评测共用的骨架:EvalResult / 聚合 / judge 失败零值 / JSON 序列化 |
+| [report.py](../../evals/report.py) | Markdown + JSON 报告,含 A/B delta 表 |
+| [run_eval.py](../../evals/run_eval.py) | CLI:`python -m evals.run_eval --validate-only` / `--compare` / `--report-md` |
+| [seed.py](../../evals/seed.py) | CLI:`python -m evals.seed --dry-run` / `--memories` / `--clear` |
 
 单元测试(154 passed):`tests/unit/test_eval_metrics.py`(指标手算 case)+ `test_eval_dataset.py`(数据集一致性 + 合成坏语料校验器)+ `test_eval_runner.py`(synthetic retriever 端到端)+ `test_eval_report.py` + `test_eval_core.py` + `test_eval_thresholds.py`(四级阈值分级逻辑)+ `test_eval_compare_baseline.py`。
 
@@ -193,21 +193,21 @@ if __name__ == "__main__":
 
 ```bash
 # 1. 灌种子（chunks 表，零 LLM 成本）
-python -m tests.eval.seed
+python -m evals.seed
 # 2. 跑 chunks 路径评估
-python -m tests.eval.run_eval --retriever chunk --report-md report.md
+python -m evals.run_eval --retriever chunk --report-md report.md
 # 3. A/B 对比 rerank 策略
-python -m tests.eval.run_eval --retriever chunk --compare --report-json ab.json
+python -m evals.run_eval --retriever chunk --compare --report-json ab.json
 # 4.（可选）memories 路径：先灌结构化记忆
-python -m tests.eval.seed --memories --clear
-python -m tests.eval.run_eval --retriever memory
+python -m evals.seed --memories --clear
+python -m evals.run_eval --retriever memory
 ```
 
 **检索路径实测数字**(2026-08-11,70 条,memory 路径默认确定性基线):
 
 - **Recall@5=0.886 / MRR=0.767 / NDCG@5=0.798**(70 query,语料翻倍 + hard 占比 30%;30 条时代为 recall 0.900 / MRR 0.844)。chunks 路径早期 baseline(vector_search 无 rerank,30 query,重新播种前语料)Recall@5=0.833 / MRR=0.817——当前语料下 vector 单独即 1.000(见 §11.5)。
 - **cross-encoder rerank vs 无 rerank Δ recall@5:-0.033**(hybrid:ce 0.967 vs hybrid:norank 1.000,30 query 全量实测——rerank 在小语料下有害,见 §11.5)。
-- **LLM rerank vs bounded-CE(生产 memory 路径)**:recall@5 相同 **0.900**(rerank 不改变召回集合),**MRR 0.819→0.833(+0.014)/ NDCG@5 0.840→0.851**,但**平均延迟 2.5s→14.1s(5.5x,每候选 1 次 LLM 调用)**——小语料下 rerank 只微调排序不救召回,收益 scale-dependent,见 [memory_llm_vs_ce_report.md](../../tests/eval/reports/memory_llm_vs_ce_report.md)。
+- **LLM rerank vs bounded-CE(生产 memory 路径)**:recall@5 相同 **0.900**(rerank 不改变召回集合),**MRR 0.819→0.833(+0.014)/ NDCG@5 0.840→0.851**,但**平均延迟 2.5s→14.1s(5.5x,每候选 1 次 LLM 调用)**——小语料下 rerank 只微调排序不救召回,收益 scale-dependent,见 [memory_llm_vs_ce_report.md](../../evals/reports/memory_llm_vs_ce_report.md)。
 - **easy/medium/hard recall@5:0.778 / 0.933 / 0.909**(70 条,memory_path_report_70.md)——medium 最高,hard 概念查询 0.909 优于 easy 0.778(部分 easy query 词重合但向量区分度不足)。
 - **按 category**:技术决策 1.000 / 故障复盘 1.000 / 架构设计 0.857 / 代码实现 0.786 / 历史背景 0.786(70 条)——代码实现 + 历史背景是当前短板(概念查询多),故障复盘已从 30 条时代的 0.667 升到 1.000。
 
@@ -230,13 +230,13 @@ python -m tests.eval.run_eval --retriever memory
 | Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | **10 轮真实对话实测 P95 73.6s**(P50 43.2s / mean 35.9s / min 12.7s / max 73.6s,2026-08-11,DeepSeek deepseek-v4-flash + 本地 BGE-M3)。已定位根因并从工具 schema 锁死 LLM rerank(§3.1.1) | 那 73.6s 里约 40s 是每轮 ~19 次 `rerank_llm`(模型自主把 `use_llm_rerank=True` 传给检索工具)。锁死后对话检索走纯相似度排序(~2s/query,recall@5 0.90 基线),预期 P95 降至 ~25s 量级 |
 | 单次对话平均 token 数 | LLMProvider 加计数(见 §4) | **≈28.6k tokens/轮**(10 轮合计 285.9k;估 $0.008/轮 ≈ ¥0.06,用内置价格表) | 成本大头是 rerank_llm(75.6k tokens)+ agent_chat(165.8k,其中 144k 是 cache_read 折扣价)——缓存命中大幅压低实际成本 |
 | 单次对话平均 tool 调用数 | 在 Agent 加计数 | 2.6 次/任务(task 轨迹均值) | 任务级评测 8 任务平均 2.6 次 LLM 调用,概念查询会到 5 |
-| Agent 任务级完成率 | `python -m tests.eval.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | 8 任务实测:工具选择意图准(0.94)但过度调用(unexpected 0.375)拉低严格完成率,是轨迹级真实短板 |
+| Agent 任务级完成率 | `python -m evals.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | 8 任务实测:工具选择意图准(0.94)但过度调用(unexpected 0.375)拉低严格完成率,是轨迹级真实短板 |
 | Agent 答案接地 | 同上(judge 对工具上下文判定) | groundedness 1.000 / citation 0.875 / 0 执行错误 | 答案全部接地、无捏造、零错误;过度调用而非幻觉是主要问题 |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms(CPU)；限并发后 ~300ms/条 | embed CPU 推理；并发超卖时被拖慢到 366→1120ms，限并发(§5.3.2)后单条稳定 ~300ms |
-| 检索 Recall@5 | `python -m tests.eval.run_eval --retriever memory` | 0.886(70 条默认确定性基线,2026-08-11) | 生产默认路径(query_memories,threshold 0.3)70 条标注集默认纯子串实测 recall@5=0.886;语义通道自证故默认关 |
+| 检索 Recall@5 | `python -m evals.run_eval --retriever memory` | 0.886(70 条默认确定性基线,2026-08-11) | 生产默认路径(query_memories,threshold 0.3)70 条标注集默认纯子串实测 recall@5=0.886;语义通道自证故默认关 |
 | 检索 MRR | 同上 | 0.767(70 条默认) | 生产 memory 路径默认 MRR 0.77(70 条语料,hard 占比 30% 更真实) |
 | 检索 NDCG@5 | 同上 | 0.798 | memory 路径 70 条默认 NDCG@5 0.798(30 条语义开启时历史值 0.959) |
-| 检索判别力(hard-negative) | `python -m tests.eval.experiments.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | 27 条陷阱集实测:纯向量找得到但容易被表面词带偏(综合通过 59.3%)。已落地 bounded cross-encoder top-3 重排(`query_memories(use_cross_encoder=True)`,默认关)提至 81.5% |
+| 检索判别力(hard-negative) | `python -m evals.experiments.hard_negative` | 纯向量 59.3% → **bounded-CE 81.5%** / MRR 0.790→0.889 / worse 11→5 | 27 条陷阱集实测:纯向量找得到但容易被表面词带偏(综合通过 59.3%)。已落地 bounded cross-encoder top-3 重排(`query_memories(use_cross_encoder=True)`,默认关)提至 81.5% |
 | 检索 QPS | locust 压测 `/api/memory/search` | 10 并发 4.77 / 40 并发 18.6 / 160 并发 63.3 | QPS 随并发线性涨至 160 仍 0 失败,瓶颈在 BGE CPU embed |
 | 检索 P95(压测) | 同上 | 10 并发 110ms / 80 并发 690ms / 160 并发 1.0s | 缓存热路径 P95 110ms@10 并发;冷查询单次 1.75s(含 embed) |
 
@@ -277,7 +277,7 @@ python -m tests.eval.run_eval --retriever memory
 2. **是否走 rerank 是对话 P95 的决定性变量**:走 rerank 的轮 67-110s,没走的轮 12-40s——关掉 LLM rerank,P95 预计从 73.6s 降到 ~25s,成本省 ~46%。
 3. **这不是删功能**:eval 已证 LLM rerank 在小语料下只微调排序不改变召回集合(recall@5 同为 0.900,MRR +0.014)。修复动作是把 `use_llm_rerank` 从工具 schema 移除(见 §2.4 复测),服务层签名保留仅供显式调用者 / eval 使用(`backend/service/retrieval.py` 各函数签名已标注"NOT exposed in agent tool schemas")。本决策已记录为 [ADR-010](../decisions/ADR-010-llm-rerank-locked-from-tools.md)。
 
-**锁死 LLM rerank 后的复测**(2026-08-11,见 [task_eval_norerank_report.md](../../tests/eval/reports/task_eval_norerank_report.md)):
+**锁死 LLM rerank 后的复测**(2026-08-11,见 [task_eval_norerank_report.md](../../evals/reports/task_eval_norerank_report.md)):
 
 | 指标 | 2026-08-09 baseline | 锁死 rerank 后 | Δ |
 |------|--------------------|----------------|-----|
@@ -341,7 +341,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
   --headless -u 10 -r 2 -t 60s --host http://127.0.0.1:8000 --only-summary
 ```
 
-需先 `python -m tests.eval.seed` 灌入 70 条评估种子,后端以 `.venv` 启动。
+需先 `python -m evals.seed` 灌入 70 条评估种子,后端以 `.venv` 启动。
 
 ### 5.3 热路径实测结果(2026-08-09,本机 CPU)
 
@@ -407,7 +407,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 |------|-----------|
 | 检索准不准 | 70 条标注集,5 类 × 14 条 + 难度分级(hard 占 30%);生产 memory 路径默认确定性基线 Recall@5=0.886、MRR 0.767(纯子串匹配,无自证);语义通道为显式 opt-in(用被评测模型自评故非默认)。**但这只证明找得到。真实判别力看 27 条 hard-negative 陷阱集:纯向量目标召回 100%、陷阱入侵 96.3%、综合通过仅 59.3%,11 条陷阱压过目标**。已用这个集驱动改进:bounded cross-encoder top-3 重排把综合通过提至 81.5%(默认关、显式启用) |
 | 换 reranker 效果如何 | A/B 实测:cross-encoder 反而有害——hybrid:ce 0.967 vs 无 rerank 1.000,0.15 floor 误伤 q015;收益 scale-dependent,默认关闭是数据支撑的决策。生产 memory 路径 LLM rerank vs bounded-CE 也实测了:recall@5 相同 0.900(rerank 不改变召回集合),MRR +0.014 / NDCG +0.011,但延迟 2.5s→14.1s(5.5x)——小语料下 rerank 只微调排序不救召回 |
-| 记忆衰减加权有用吗 | A/B 实测 + 调参闭环([decay_ab_report.md](../../tests/eval/reports/decay_ab_report.md)):原公式 `S=1+2·recall` 半衰期≈0.7·S 小时太激进,合成老化分布下把 recall@5 打到 0.367——19/30 条目标被压出 top-5。S 乘数调到 12、加 0.10 保留 floor 后,同分布重测 recall@5 回升到 0.667、MRR 0.622。语义权衡:decay 仍低于无衰减(0.667 vs 0.900)是「过时沉底」的有意代价。最终决策是移除排序衰减、保留召回计数作访问历史(见 [memory-system.md](../memory-system.md)) |
+| 记忆衰减加权有用吗 | A/B 实测 + 调参闭环([decay_ab_report.md](../../evals/reports/decay_ab_report.md)):原公式 `S=1+2·recall` 半衰期≈0.7·S 小时太激进,合成老化分布下把 recall@5 打到 0.367——19/30 条目标被压出 top-5。S 乘数调到 12、加 0.10 保留 floor 后,同分布重测 recall@5 回升到 0.667、MRR 0.622。语义权衡:decay 仍低于无衰减(0.667 vs 0.900)是「过时沉底」的有意代价。最终决策是移除排序衰减、保留召回计数作访问历史(见 [memory-system.md](../memory-system.md)) |
 
 ### 6.2 成本
 
@@ -482,7 +482,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 ### 9.3 深度较深的三个模块的设计要点
 
-1. **四级去重 + 冲突检测**:阈值调参(经标定,见 [threshold_calibration_report.md](../../tests/eval/reports/archive/threshold_calibration_report.md))、fails safe、`_deferred` 载荷传递、4 选项解决(keep_existing / overwrite / merge / keep_both)。
+1. **四级去重 + 冲突检测**:阈值调参(经标定,见 [threshold_calibration_report.md](../../evals/reports/archive/threshold_calibration_report.md))、fails safe、`_deferred` 载荷传递、4 选项解决(keep_existing / overwrite / merge / keep_both)。
 2. **双 HITL LangGraph**:interrupt/Command vs edge、max_steps 防循环、PostgresSaver 持久化。
 3. **实体归一化双层判断**:向量粗筛 + LLM 精判、fails safe 假定不匹配、批量回填。
 
@@ -490,7 +490,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 - **三阶段提取**:并行编排 + fails safe 已实现;prompt 优化(§10)已有 A/B。
 - **rerank**:cross-encoder 原理、scale-dependent 实证(§11.5.1)已落地;listwise/微调未做。
-- **衰减**:已从排序路径移除,改用召回计数(§11);旧公式调参细节记录在 [decay_ab_report.md](../../tests/eval/reports/decay_ab_report.md)。
+- **衰减**:已从排序路径移除,改用召回计数(§11);旧公式调参细节记录在 [decay_ab_report.md](../../evals/reports/decay_ab_report.md)。
 
 ### 9.5 未实现方向的记录
 
@@ -503,7 +503,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 三阶段提取是记忆写入的关键环节。以下两项优化已实施并实测(few-shot examples 进 prompt v3、函数调用通道实现):
 
-- A/B 实测见 [extraction_ab_report.md](../../tests/eval/reports/archive/extraction_ab_report.md):few-shot 让 entity_recall 0.781→0.927、relation_recall 0.531→0.688、relation_f1 0.356→0.427(+0.071);函数调用通道 recall 持平、precision 略降(过度抽取)但 entity_type_accuracy 上升(enum 生成期约束)。
+- A/B 实测见 [extraction_ab_report.md](../../evals/reports/archive/extraction_ab_report.md):few-shot 让 entity_recall 0.781→0.927、relation_recall 0.531→0.688、relation_f1 0.356→0.427(+0.071);函数调用通道 recall 持平、precision 略降(过度抽取)但 entity_type_accuracy 上升(enum 生成期约束)。
 
 ### 10.1 原始问题
 
@@ -580,11 +580,11 @@ _EXTRACT_ENTITIES_TOOL = {
 给三阶段提取一个准确率数字。方法:从记忆库抽样本 → 人工标注正确实体/关系 → 跑 `extract_memory()` → 算 precision/recall → 对比 zero-shot vs few-shot vs 函数调用三种方式。当前用 `llm_ground_truth.EXTRACTION_ITEMS`(8 条)复用同一套评测管线,标注集扩充列为后续优化。
 
 ```python
-# tests/eval/extraction_eval.py
+# evals/extraction_eval.py
 """评估三阶段提取的准确率"""
 
 from backend.service.extraction import extract_memory
-from tests.eval.ground_truth import EXTRACTION_GT  # 人工标注集
+from evals.ground_truth import EXTRACTION_GT  # 人工标注集
 
 
 async def eval_extraction():
@@ -625,7 +625,7 @@ async def eval_extraction():
 | 为什么不用 few-shot | 无对比数据 | 加 few-shot 后 entity_recall 0.781→0.927(+0.146)、relation_recall 0.531→0.688(+0.157)、relation_f1 0.356→0.427 |
 | JSON 解析失败怎么办 | fails safe 返回空 | entity/relation 走函数调用通道——enum 在生成期约束,非法 type 机制上产生不出来;DeepSeek thinking 模式拒绝强制 tool_choice(400),所以不强制、靠模型自然调用工具,失败降级 chat_structured |
 | entity 抽取准确率 | 没测过 | 8 条标注集:entity_recall 0.927 / entity_f1 0.772 / type_accuracy 0.792(few-shot + 函数调用) |
-| prompt 怎么迭代 | 靠 git | 有标注集,`python -m tests.eval.experiments.extraction_ab` 每次改动跑 zero-shot/few-shot/函数调用三臂对比 |
+| prompt 怎么迭代 | 靠 git | 有标注集,`python -m evals.experiments.extraction_ab` 每次改动跑 zero-shot/few-shot/函数调用三臂对比 |
 
 ---
 
@@ -723,7 +723,7 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict]:
 1. **hybrid 默认开**(+10ms 无感,不依赖按需判断);
 2. **query 改写作为 Agent 的显式 tool**(`query_rewrite_and_search_tool`),让 Agent 自主判断概念查询时调用;retrieve 默认走 hybrid。
 
-### 11.4 评估验证(tests/eval A/B)
+### 11.4 评估验证(evals A/B)
 
 **实测结果**(30 query 全量评估;**注**:baseline 0.833 为重新播种前的旧语料,hybrid 行在播种后——0.83→0.97 增量混入了语料变更,非纯 jieba 收益。当前语料下 vector 单独即 1.000):
 
@@ -804,7 +804,7 @@ async def sparse_search(query: str, top_k: int = 20) -> list[dict]:
 
 ### 11.5.3 万级实测验证:rerank 转正实锤(2026-08-11)
 
-> 复用 `tests/eval/experiments/probe_scale_1000.py`(重写为参数化:`--target 10000 --rerank`),LLM 精修 33 个相邻主题 856 条 + 模板填充 9114 条 = 9969 条干扰 chunks,插入后跑 hybrid_norerank **和** hybrid+cross-encoder 两轮 eval(每轮 30 query 全量)。
+> 复用 `evals/experiments/probe_scale_1000.py`(重写为参数化:`--target 10000 --rerank`),LLM 精修 33 个相邻主题 856 条 + 模板填充 9114 条 = 9969 条干扰 chunks,插入后跑 hybrid_norerank **和** hybrid+cross-encoder 两轮 eval(每轮 30 query 全量)。
 
 | 指标 | 30 条 | 9999 条(无 rerank) | 9999 条(+CE rerank) | rerank 增益 |
 |------|-------|--------------------|----------------------|------------|

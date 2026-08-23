@@ -10,7 +10,7 @@
 
 | 区间 | 状态 | 说明 |
 |------|------|------|
-| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 处理全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../tests/eval/reports/archive/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
+| P0 评估与核心卖点 | **8 ✅ 全完成** | P0-1/2/3/4/5/7/8 代码项 + P0-6 处理全部完成。P0-3 judge 校准（一致率 1.000 / coverage F1 0.833，见 [judge_calibration_report.md](../../evals/reports/archive/judge_calibration_report.md)）、P0-4 多次均值门禁（CI 已改 3 次均值 CI 下限判红） |
 | P1 崩溃级缺陷 | **10 ✅ 全完成** | `0481dd5` 一次提交修完，全量回归通过 |
 | P2 生产/安全/定位 | **4 ✅ 代码项 + 12 🗣 待改进项** | 代码完成：P2-4 沙箱 / P2-5 tsc 门禁 / P2-8 attempts / P2-11 错误渲染。其余为待改进项（分析见 [decision-faq.md](./decision-faq.md)） |
 
@@ -20,23 +20,23 @@
 
 ### ✅ P0-1 评估数字是"自问自答"，Recall@5=1.000 含金量低
 
-**证据**：`tests/eval/ground_truth.py` 的 query 由种子记忆反向生成（指纹即摘要逐字子串）；`tests/eval/seed.py` 把同一份 seed 灌进库；审查时语料 30 条、每 query 仅 `n_relevant=1`（`tests/eval/reports/eval-report.json` 全部行），随机基线 recall@5=5/30≈0.167。因此 1.0 是"记住答案"而非"检索能力"。**2026-08-11 起语料与 query 已扩至 70 条**（5 类 × 14，见 [memory_path_report_70.md](../../tests/eval/reports/memory_path_report_70.md)），默认确定性基线改为 0.886 / 0.767。
+**证据**：`evals/ground_truth.py` 的 query 由种子记忆反向生成（指纹即摘要逐字子串）；`evals/seed.py` 把同一份 seed 灌进库；审查时语料 30 条、每 query 仅 `n_relevant=1`（`evals/reports/eval-report.json` 全部行），随机基线 recall@5=5/30≈0.167。因此 1.0 是"记住答案"而非"检索能力"。**2026-08-11 起语料与 query 已扩至 70 条**（5 类 × 14，见 [memory_path_report_70.md](../../evals/reports/memory_path_report_70.md)），默认确定性基线改为 0.886 / 0.767。
 
-**现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../tests/eval/reports/archive/hard_negative_report.md)）。
+**现状**：已启用 `query_candidates.jsonl` 的 27 条 hard-negative 判别集并重述数字——纯向量综合通过 59.3%，bounded cross-encoder top-3 重排后 81.5%（见 [hard_negative_report.md](../../evals/reports/archive/hard_negative_report.md)）。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。
 
 ### ✅ P0-2 语义相关性通道用"被评测模型给自己打分"
 
-**证据**：`tests/eval/dataset.py:219-252`，`run_eval.py:103-111` 默认开启；用同一个 BGE-M3 嵌入召回结果与目标摘要，cos≥0.80 判"相关"——模型检到自己就是"对"。"hard" 类目 recall=1.0 依赖此通道。
+**证据**：`evals/dataset.py:219-252`，`run_eval.py:103-111` 默认开启；用同一个 BGE-M3 嵌入召回结果与目标摘要，cos≥0.80 判"相关"——模型检到自己就是"对"。"hard" 类目 recall=1.0 依赖此通道。
 
 **现状**：已改为 opt-in（`--semantic-relevance`），默认确定性纯子串基线（memory 路径 70 条 recall 0.886 / MRR 0.767）；报告区分 `substring_hits` / `semantic_only_hits` 如实披露自证贡献。
 
 ### ✅ P0-3 LLM judge 与被测模型同源、无校准
 
-**证据**：`tests/eval/llm_judge.py` judge 用 DeepSeek（免费档 mimo-v2.5-free）；committed 报告 `llm-eval-semantic-baseline.json:46-48` 自记 known_anomaly（ans-006 正确回答被判 grounded=false）；`.github/workflows/eval.yml` 曾承认 judge 限流导致"所有 LLM-judged 指标不可信"。
+**证据**：`evals/llm_judge.py` judge 用 DeepSeek（免费档 mimo-v2.5-free）；committed 报告 `llm-eval-semantic-baseline.json:46-48` 自记 known_anomaly（ans-006 正确回答被判 grounded=false）；`.github/workflows/eval.yml` 曾承认 judge 限流导致"所有 LLM-judged 指标不可信"。
 
-**现状**：已加 judge 一致性小样本校准——12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**。ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../tests/eval/reports/archive/judge_calibration_report.md)。
+**现状**：已加 judge 一致性小样本校准——12 条人工标注样本（6 grounded / 6 ungrounded，含 2 条同义改写），真实跑出 **grounded 一致率 1.000 / coverage F1 0.833 / 0 假阴假阳**。ans-006 那类误判未复现（同义改写被正确判 grounded，说明是 judge 模型偶发而非 prompt 缺陷），报告见 [judge_calibration_report.md](../../evals/reports/archive/judge_calibration_report.md)。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 5 节（LLM judge 可信吗）。
 
@@ -44,7 +44,7 @@
 
 **证据**：同一天 `llm-eval-baseline.json`（relation_recall 0.531, tool_accuracy 0.733）与 `llm-eval-report.json`（0.344 / 0.667）互相矛盾；`eval.yml` 门禁 `--min-tool-accuracy 0.68` 正好夹在两次观测之间；`compare_baseline.py` tolerance=0.01 对 n=15 远小于单样本翻转量 0.067。
 
-**现状**：已加 `tests/eval/multi_run_gate.py`——N 次运行均值 + 95% CI 下限判红（t 值硬编码，无 scipy）；`eval.yml` 的 llm-eval 门禁改为 `--n-runs 3` 均值 CI 下限判红。单次随机低值不再误杀 CI，真实下滑才把 CI 下限推到阈值以下。
+**现状**：已加 `evals/multi_run_gate.py`——N 次运行均值 + 95% CI 下限判红（t 值硬编码，无 scipy）；`eval.yml` 的 llm-eval 门禁改为 `--n-runs 3` 均值 CI 下限判红。单次随机低值不再误杀 CI，真实下滑才把 CI 下限推到阈值以下。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 6 节（单次跑的数字能代表能力吗）。
 
@@ -52,13 +52,13 @@
 
 **证据**：`eval-report.json:15-24` 的 1.0/0.983 来自 `chunk:vector`（裸向量）；生产默认 `query_memories`（memory 路径）无 committed 报告；`eval.yml` 对 memory 的门禁 recall 0.95/mrr 0.87 比报的 0.983 低。
 
-**现状**：已补跑生产 memory 路径报告（[memory_path_report.md](../../tests/eval/reports/memory_path_report.md)），[deep-dive.md](./deep-dive.md) 成果表注明路径口径。
+**现状**：已补跑生产 memory 路径报告（[memory_path_report.md](../../evals/reports/memory_path_report.md)），[deep-dive.md](./deep-dive.md) 成果表注明路径口径。
 
 ### ✅ P0-6 "四级阈值 0.92/0.75/0.60 实测调参"无任何证据
 
-**证据**：全仓库（docs/tests/eval）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
+**证据**：全仓库（docs/evals）找不到相似度分布分析或调参过程；`test_memory.py` 只测分级逻辑不测阈值合理性。0.92 对"不同来源各自生成的 LLM 摘要"高到 merge 大概率从不触发。
 
-**现状（已标定）**：`tests/eval/experiments/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../tests/eval/reports/archive/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
+**现状（已标定）**：`evals/experiments/threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.842-0.965（p25 0.878）、同类不同记忆（不该 merge）≤0.792、异类 ≤0.724。**旧值 0.92 高到 4/8 同义改写对被漏成冲突检测**，0.85 是自然分离点。已改 `memory.py` MERGE 0.92→0.85、CONFLICT 0.75→0.72（SUPPLEMENT 0.60 不变），报告见 [threshold_calibration_report.md](../../evals/reports/archive/threshold_calibration_report.md)。**边界**：8 对改写样本小、与真实生产摘要对还有差距，部署后收集真实对确认。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 1 节（四级阈值怎么定的）。
 

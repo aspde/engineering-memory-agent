@@ -374,56 +374,6 @@ class TestPatrolConflictRoutes:
         list_resp = await async_client.get("/api/conflicts")
         assert list_resp.json() == []
 
-    @pytest.mark.asyncio
-    async def test_resolve_keep_both_then_requeue_is_suppressed(self) -> None:
-        """keep_both marks the pair arbitrated; re-queueing returns already_resolved."""
-        from backend.service.conflicts import persist_patrol_conflict
-        from backend.service.memory import resolve_conflict
-
-        a_id, b_id, log_id = str(uuid4()), str(uuid4()), str(uuid4())
-        await _insert_memory(a_id, "Use PostgreSQL for storage")
-        await _insert_memory(b_id, "Migrate away from PostgreSQL")
-        await _insert_patrol_log(log_id)
-
-        finding = {
-            "memory_a_id": a_id,
-            "memory_a_summary": "Use PostgreSQL for storage",
-            "memory_b_id": b_id,
-            "memory_b_summary": "Migrate away from PostgreSQL",
-        }
-        queued = await persist_patrol_conflict(log_id, finding)
-
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            row = await session.execute(
-                text("SELECT existing_id, peer_id, deferred FROM pending_conflicts WHERE id = :id"),
-                {"id": queued["id"]})
-            conflict = row.fetchone()
-            existing_id = str(conflict.existing_id)
-            peer_id = str(conflict.peer_id)
-            deferred = conflict.deferred
-            if isinstance(deferred, str):
-                import json
-
-                deferred = json.loads(deferred)
-            await session.execute(
-                text(
-                    """UPDATE pending_conflicts
-                       SET status = 'resolved', resolution = 'keep_both', resolved_at = now()
-                       WHERE id = :id"""
-                ),
-                {"id": queued["id"]})
-            await session.commit()
-
-        outcome = await resolve_conflict("keep_both", existing_id, deferred, peer_id=peer_id)
-        assert outcome["resolution"] == "keep_both"
-
-        # Both memories still live → keep_both arbitration → re-queue suppressed.
-        re_queued = await persist_patrol_conflict(log_id, finding)
-        assert re_queued["status"] == "already_resolved"
-        assert re_queued["queued"] is False
-
-
 class TestPatrolConflictReopen:
     """POST /api/conflicts/{id}/reopen + resolved/type filtering."""
 

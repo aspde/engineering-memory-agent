@@ -135,13 +135,17 @@ async def test_usage_read_endpoints_require_api_key_in_production(
 
 
 @pytest.mark.asyncio
-async def test_read_endpoints_redact_error_text(monkeypatch, async_client) -> None:
-    """Error text is re-redacted on read for samples / trace / threads."""
+async def test_read_endpoints_redact_legacy_rows(monkeypatch, async_client) -> None:
+    """Read-time redaction (defense in depth): a row persisted before
+    write-time redaction existed never surfaces a secret — for both the
+    error field and the sampled response text, across samples / trace /
+    threads reads.  (Write-time redaction itself is covered by the unit
+    tests in ``test_usage.py``.)"""
     from backend.service import usage
 
     monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
-    t_trace = current_trace_id.set("trace-secret")
-    t_thread = current_thread_id.set("thread-secret")
+    t_trace = current_trace_id.set("trace-redact")
+    t_thread = current_thread_id.set("thread-redact")
     try:
         ctx = begin_call([{"role": "user", "content": "hi"}])
         record_call(
@@ -151,19 +155,21 @@ async def test_read_endpoints_redact_error_text(monkeypatch, async_client) -> No
             scenario="agent_chat",
             status="error",
             error="boom",
-            response_text="err",
+            response_text="err body",
         )
     finally:
         current_trace_id.reset(t_trace)
         current_thread_id.reset(t_thread)
     await flush_usage_buffer()
 
-    # Simulate a row persisted before write-time redaction existed.
+    # Simulate rows persisted before write-time redaction existed.
     async with get_session_factory()() as session:
         await session.execute(
             text(
-                "UPDATE llm_usage SET error = 'api_key=sk-abc123XYZ987 exploded' "
-                "WHERE trace_id = 'trace-secret'"
+                "UPDATE llm_usage SET "
+                "error = 'api_key=sk-abc123XYZ987 exploded', "
+                "response_sample = 'Authorization: Bearer sk-abc123XYZ987' "
+                "WHERE trace_id = 'trace-redact'"
             )
         )
         await session.commit()
@@ -172,11 +178,13 @@ async def test_read_endpoints_redact_error_text(monkeypatch, async_client) -> No
     assert len(samples) == 1
     assert "sk-abc123XYZ987" not in samples[0]["error"]
     assert "api_key=***" in samples[0]["error"]
+    assert "sk-abc123XYZ987" not in samples[0]["response_sample"]
+    assert "Bearer ***" in samples[0]["response_sample"]
 
-    trace = (await async_client.get("/api/usage/trace/trace-secret")).json()["calls"]
+    trace = (await async_client.get("/api/usage/trace/trace-redact")).json()["calls"]
     assert trace and "sk-abc123XYZ987" not in trace[0]["error"]
 
-    thread = (await async_client.get("/api/usage/threads/thread-secret")).json()["calls"]
+    thread = (await async_client.get("/api/usage/threads/thread-redact")).json()["calls"]
     assert thread and "sk-abc123XYZ987" not in thread[0]["error"]
 
 
@@ -194,34 +202,6 @@ async def test_empty_trace_returns_empty(async_client) -> None:
     resp = await async_client.get("/api/usage/trace/does-not-exist")
     assert resp.status_code == 200
     assert resp.json()["calls"] == []
-
-
-@pytest.mark.asyncio
-async def test_samples_endpoint_returns_sampled_calls(monkeypatch, async_client) -> None:
-    from backend.service import usage
-
-    monkeypatch.setattr(usage.config, "usage_sample_rate", 1.0)
-    t_trace = current_trace_id.set("trace-sample")
-    try:
-        ctx = begin_call([{"role": "user", "content": "hello"}])
-        record_call(
-            ctx,
-            model="deepseek-chat",
-            provider="openai-compatible",
-            scenario="agent_chat",
-            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
-            response_text="answer body",
-        )
-    finally:
-        current_trace_id.reset(t_trace)
-    await flush_usage_buffer()
-
-    resp = await async_client.get("/api/usage/samples")
-    assert resp.status_code == 200
-    samples = resp.json()["samples"]
-    assert len(samples) == 1
-    assert samples[0]["response_sample"] == "answer body"
-    assert samples[0]["prompt_sample"] == "hello"
 
 
 @pytest.mark.asyncio

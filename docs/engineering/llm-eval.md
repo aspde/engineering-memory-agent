@@ -1,6 +1,6 @@
 # LLM 行为评测（工具选择 / 知识抽取 / 最终答案 / 端到端）
 
-> 评测代码在 `tests/eval/` 下的 `llm_*` 模块，CLI 入口是 `python -m tests.eval.run_llm_eval`。
+> 评测代码在 `evals/` 下的 `llm_*` 模块，CLI 入口是 `python -m evals.run_llm_eval`。
 
 ## 为什么需要它
 
@@ -69,7 +69,7 @@ answer 套件注入 golden context，回答不了"真实检索到底给了模型
 把整条链串起来：**查询 → 真实检索 → 按生产 prompt 生成答案 → 评判**。
 
 标注集：`查询 + 必须被检索到的 source_content + 必须覆盖的事实 + 禁止出现的论断 +
-检索模式（memory / chunk）`。`source_content` 通过 `tests.eval.e2e_seed` 写入
+检索模式（memory / chunk）`。`source_content` 通过 `evals.e2e_seed` 写入
 memories/chunks 表（带 `eval_e2e` 标签，可 `--clear` 重建，不走 LLM 抽取，
 与检索评测的 70 条语料互不污染）。
 
@@ -96,26 +96,26 @@ chunk 模式 → `retrieve_hybrid`），把检索结果按 `generate_final_node`
 
 ```bash
 # 只校验标注集一致性（零 LLM / 零 DB，CI 每 push 跑）
-python -m tests.eval.run_llm_eval --validate-only
+python -m evals.run_llm_eval --validate-only
 
 # 冒烟：每套件 3 条，确定性评判（最省 token）
-python -m tests.eval.run_llm_eval --sample 3 --judge deterministic
+python -m evals.run_llm_eval --sample 3 --judge deterministic
 
 # 三个无 DB 套件（CI llm-eval job 跑这个）
-python -m tests.eval.run_llm_eval --suite tool_selection,extraction,answer
+python -m evals.run_llm_eval --suite tool_selection,extraction,answer
 
 # 端到端套件（需要先 seeding + 本地 DB + embedding 模型）
-python -m tests.eval.e2e_seed --clear
-python -m tests.eval.run_llm_eval --suite e2e \
+python -m evals.e2e_seed --clear
+python -m evals.run_llm_eval --suite e2e \
   --min-context-recall 0.90 --min-fact-coverage 0.70 \
   --min-groundedness 0.80 --min-citation-rate 0.80
 
 # 全量 + LLM 裁判 + 报告
-python -m tests.eval.run_llm_eval --suite all \
-  --report-md tests/eval/reports/llm-eval-report.md
+python -m evals.run_llm_eval --suite all \
+  --report-md evals/reports/llm-eval-report.md
 
 # 回归门禁（exit 2 = 指标跌破下限）
-python -m tests.eval.run_llm_eval --suite all \
+python -m evals.run_llm_eval --suite all \
   --min-tool-accuracy 0.70 --min-entity-f1 0.60 --min-relation-f1 0.50 \
   --min-fact-coverage 0.60 --min-groundedness 0.80
 ```
@@ -127,7 +127,7 @@ LLM 调用，全量 + LLM 裁判约 80-120 次调用，适合每周定时任务�
 ## 架构
 
 ```
-tests/eval/
+evals/
   llm_ground_truth.py   # 四套标注集的 item 类型 + validate_llm_dataset()（数据在 data/*.jsonl）
   llm_metrics.py        # 纯函数指标（无 I/O，单测覆盖）
   llm_executors.py      # 默认执行器：包装 call_llm_node / extract_memory / 答案 prompt / e2e 检索
@@ -137,7 +137,7 @@ tests/eval/
   llm_report.py         # Markdown + JSON 报告 + summarize 一行（序列化复用 core）
   e2e_seed.py           # e2e 语料 seeding CLI（--clear / --dry-run，独立标签）
   run_llm_eval.py       # CLI：--suite（逗号分隔）/ --judge / --sample / --min-*
-  experiments/          # 一次性研究脚本归档（A/B、阈值标定、judge 校准、scale 探测…）：不复用主骨架、不进 CI，按需 `python -m tests.eval.experiments.<script>`
+  experiments/          # 一次性研究脚本归档（A/B、阈值标定、judge 校准、scale 探测…）：不复用主骨架、不进 CI，按需 `python -m evals.experiments.<script>`
 ```
 
 设计要点：
@@ -167,23 +167,23 @@ tests/eval/
     驱动真实 Agent 图。**门禁阈值暂未设置**——等首份
     `task-eval-report.md` 落地后按真实数字校准（参考 e2e-eval 的标定流程）。
   - 两个（llm/e2e）job 的**门禁都用 `--judge deterministic`**，阈值已按
-    `tests/eval/reports/llm-eval-baseline.json`（2026-08-09，commit 4ae4848）校准，
+    `evals/reports/llm-eval-baseline.json`（2026-08-09，commit 4ae4848）校准，
     每个阈值低于基线 0.05-0.10 留噪声余量。门禁退出码：执行失败或指标跌破阈值
     为非零，CI 即红。
 
 ### 基线
 
-- **基线文件**：`tests/eval/reports/llm-eval-baseline.json`——一次干净运行
+- **基线文件**：`evals/reports/llm-eval-baseline.json`——一次干净运行
   （0 执行错误、0 judge 降级）的逐指标结果，提交进仓库，不被每次 run 覆盖。
-- **语义基线**：`tests/eval/reports/llm-eval-semantic-baseline.json`——judge 通道稳定后
+- **语义基线**：`evals/reports/llm-eval-semantic-baseline.json`——judge 通道稳定后
   用 `--judge llm` 跑出的语义判定结果（groundedness / hallucination_rate /
   summary_faithfulness / summary_completeness），供手动分析；不进 CI 门禁。
-- **对比**：`python -m tests.eval.experiments.compare_baseline` 把当前报告与基线做 diff，
+- **对比**：`python -m evals.experiments.compare_baseline` 把当前报告与基线做 diff，
   输出逐指标 delta，任何跌破 `--tolerance`（默认 0.01，吸收 ~±0.001 的
   运行间噪声）的下降都以非零退出码标红。**每次改 prompt 或模型后跑一次**，
   用 delta 判断该改动是提升还是回归。确定性报告与 LLM-judge 报告混比会被
   拒绝（judge 模式不匹配时脚本明确报错，避免把语义判定的更严当成回归）；
-  语义对比用 `--baseline tests/eval/reports/llm-eval-semantic-baseline.json`。
+  语义对比用 `--baseline evals/reports/llm-eval-semantic-baseline.json`。
 - **重标定**：有意的行为变更（prompt 版本号 bump、模型切换、工具表调整）落地后，
   重新生成基线并同步 eval.yml 阈值。
 
@@ -206,7 +206,7 @@ judge 一抖动整个 job 就误红——标定也就失去意义。因此 **CI 
 
 ## 任务级端到端评测（task_eval）
 
-> 评测代码在 `tests/eval/` 下的 `task_*` 模块，CLI 入口是 `python -m tests.eval.run_task_eval`。
+> 评测代码在 `evals/` 下的 `task_*` 模块，CLI 入口是 `python -m evals.run_task_eval`。
 
 ### 和上面四个套件的区别
 
@@ -247,19 +247,19 @@ Auto-memory 在评测进程中关闭，避免后台抽取/写入污染语料、�
 
 ```bash
 # 1. 灌 e2e 语料（记忆 + 分块）
-python -m tests.eval.e2e_seed --clear
+python -m evals.e2e_seed --clear
 # 2. 全量跑（真实 LLM，默认 --judge llm）
-python -m tests.eval.run_task_eval --report-md tests/eval/reports/task_eval_report.md
+python -m evals.run_task_eval --report-md evals/reports/task_eval_report.md
 # 3. 免 judge 通道（CI 用，更便宜）
-python -m tests.eval.run_task_eval --judge deterministic
+python -m evals.run_task_eval --judge deterministic
 # 4. 零成本校验（ci.yml 每 push 跑）
-python -m tests.eval.run_task_eval --validate-only
+python -m evals.run_task_eval --validate-only
 ```
 
 ### 实测结果
 
 实测数字（2026-08-09 baseline 与 2026-08-11 锁死 LLM rerank 复测）见
-[task_eval 评测报告](../../tests/eval/reports/task_eval_report.md)。
+[task_eval 评测报告](../../evals/reports/task_eval_report.md)。
 
 ### 顺带修掉的一个生产 bug
 

@@ -48,7 +48,7 @@
 - 三个检索工具 schema 移除 `use_llm_rerank` 参数；服务层签名保留并标注"NOT exposed in agent tool schemas"。
 - `/api/memory/search` 与 `/api/memory/memories/search` 的请求体同样移除 `use_llm_rerank`（2026-08-11 补充，见下节）——开关只在服务层存活，外部入口无法触发。
 - 对话 P95 预期从 73.6s 降至 ~25s 量级，对话成本估算省 ~46%。
-- 完整量化证据见 `docs/engineering/gap-remediation.md` §3.1.1 与 `tests/eval/reports/task_eval_norerank_report.md`；检索侧 rerank 效果对比见 `tests/eval/reports/memory_llm_vs_ce_report.md`。
+- 完整量化证据见 `docs/engineering/gap-remediation.md` §3.1.1 与 `evals/reports/task_eval_norerank_report.md`；检索侧 rerank 效果对比见 `evals/reports/memory_llm_vs_ce_report.md`。
 
 ## 补充：API 层同样封死（2026-08-11）
 

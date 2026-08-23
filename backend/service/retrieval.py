@@ -69,7 +69,7 @@ _RERANK_FLOOR = 0.15
 # hard-negative eval: pass@5 59.3%→81.5% with only 3 pairs scored (vs 77.8%
 # and 20 pairs for full rerank), and it keeps every candidate in the ranked
 # list (no floor-dropping, which had falsely evicted a relevant memory).  See
-# tests/eval/reports/archive/hard_negative_report.md for the A/B numbers.
+# evals/reports/archive/hard_negative_report.md for the A/B numbers.
 _MEMORY_BOUNDED_RERANK_N = 3
 
 # Recall-stage floor for the vector recall in ``retrieve`` / ``retrieve_hybrid``:
@@ -396,7 +396,7 @@ async def _rerank_and_filter(
     — the rerank + floor + assemble tail was copy-pasted in all three.
 
     Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
-    report (``tests/eval/reports/eval-report.md``) shows it costs ~90x latency
+    report (``evals/reports/eval-report.md``) shows it costs ~90x latency
     while *lowering* recall@5 on the current corpus, so the default read
     path ranks candidates by their raw recall similarity and never loads the
     568M model.  ``use_llm_rerank=True`` selects the LLM pointwise variant
@@ -457,7 +457,7 @@ async def retrieve(
     ``retrieve_hybrid``, query rewriting uses ``retrieve_multi_query``, and
     the memory/API read paths use ``query_memories`` / ``vector_search``.
     Kept as the eval harness's chunks retriever (``make_chunk_retriever`` in
-    ``tests/eval/dataset.py``) and as the unit-test surface for the shared
+    ``evals/dataset.py``) and as the unit-test surface for the shared
     rerank tail (``_rerank_and_filter``) — remove only together with those.
 
     By default candidates are ranked by raw cosine similarity with no
@@ -586,7 +586,7 @@ async def retrieve_hybrid(
 
     By default the union is ranked by reciprocal-rank fusion (RRF) of the
     dense and sparse lists (``skip_rerank=True``): the eval report
-    (``tests/eval/reports/eval-report.md``) shows cross-encoder rerank costs
+    (``evals/reports/eval-report.md``) shows cross-encoder rerank costs
     ~90x latency on the current corpus while *lowering* recall@5 (0.967 vs
     1.000), so reranking is opt-in.  Pass ``skip_rerank=False`` for the
     cross-encoder rerank path, or ``use_llm_rerank=True`` for the LLM
@@ -763,7 +763,7 @@ async def query_memories(
     → record_recalls → return as-ranked list of memory dicts.
 
     Cross-encoder rerank is opt-in (``use_cross_encoder=True``): the eval
-    report (``tests/eval/reports/eval-report.md``) shows it costs ~90x
+    report (``evals/reports/eval-report.md``) shows it costs ~90x
     latency while lowering recall@5 on the current corpus, so the default
     path ranks candidates by ``search_memories``' similarity and never loads
     the 568M model.  The recall write is a read-path side effect recorded for

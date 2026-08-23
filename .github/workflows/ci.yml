@@ -51,7 +51,7 @@ jobs:
       # Static quality gates: lint + type check fail the build fast, before
       # the (slower) test and dataset-consistency steps.
       - name: Lint (ruff)
-        run: ruff check backend/ tests/
+        run: ruff check backend/ tests/ evals/
 
       - name: Type check (mypy)
         run: mypy backend/
@@ -59,20 +59,20 @@ jobs:
       # Zero-cost gate: ground-truth ↔ seed-corpus consistency (no DB, no
       # models). Catches dataset drift before anything is seeded.
       - name: Validate eval dataset
-        run: python -m tests.eval.run_eval --validate-only
+        run: python -m evals.run_eval --validate-only
 
       # Zero-cost gate: LLM-eval labeled sets (tool selection / extraction /
       # answer) — internal consistency only, no LLM / DB required.  The real
       # LLM behavior eval runs on a schedule in eval.yml.
       - name: Validate LLM eval datasets
-        run: python -m tests.eval.run_llm_eval --validate-only
+        run: python -m evals.run_llm_eval --validate-only
 
       # Zero-cost gate: task-eval labeled set — internal consistency + the
       # reachability contract (every required fact exists in the e2e seed
       # corpus).  No LLM / DB required.  The real agent-graph eval runs on a
       # schedule in eval.yml.
       - name: Validate task eval dataset
-        run: python -m tests.eval.run_task_eval --validate-only
+        run: python -m evals.run_task_eval --validate-only
 
       # Unit + API tests are hermetic: unit tests mock LLM/embedding/DB; the
       # pytest session wipes & recreates ema_test (and creates it if missing,
@@ -87,6 +87,11 @@ jobs:
       # CI (requires real providers / local models).
       - name: Run checkpoint persistence test
         run: python -m pytest tests/integration/test_checkpointer_persistence.py -q --tb=short
+
+      # Tests for the eval harness itself (evals/tests) — pure functions over
+      # fabricated data, no DB / LLM, so they stay in the fast CI lane.
+      - name: Run eval harness tests
+        run: python -m pytest evals/tests -q --tb=short
 
   frontend:
     name: Frontend tests

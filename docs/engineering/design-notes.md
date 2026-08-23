@@ -245,7 +245,7 @@ fails safe 原则：
 1. **检索质量**：人工标注 query-doc 相关性，算 Recall@K、MRR、NDCG@K——EMA 有标注集（70 条，5 类 × 14，含 easy/medium/hard 难度分级），生产路径默认确定性基线 0.886 / 0.767
 2. **生成质量**：LLM-as-judge 从准确性、完整性、相关性打分；EMA 用 `chat_structured`（JSON Schema 校验）输出覆盖事实/忠实度/幻觉论断，四套件（工具选择 / 知识抽取 / 最终答案 / 端到端）见 [llm-eval.md](llm-eval.md)
 3. **端到端**：用户反馈（点赞/点踩）+ 后续追问率（追问多说明没答好）
-4. **现状**：检索与生成质量都有自动化评估（`python -m tests.eval.run_eval` / `run_llm_eval`），评估集 CI 每周自动跑
+4. **现状**：检索与生成质量都有自动化评估（`python -m evals.run_eval` / `run_llm_eval`），评估集 CI 每周自动跑
 
 **权衡**：LLM 评估有偏差，只做粗筛——裁判输出结构化事实而非 1-5 分，覆盖率/忠实度从判决直接算；关键改动仍人工抽检。检索与生成分开测——检索跑 run_eval 看 Recall/MRR，生成跑 run_llm_eval 看答案覆盖度与幻觉，前端 sources 面板展示检索来源方便定位。
 

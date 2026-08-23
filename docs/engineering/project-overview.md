@@ -79,4 +79,4 @@ EMA（Engineering Memory Agent）把研发过程中的代码、Git 历史、技�
 - [技术设计笔记](design-notes.md)：各技术主题的设计问答
 - [项目演进与决策复盘](lessons-learned.md)：演进过程中的决策复盘
 - [LLM 行为评测](llm-eval.md)：工具选择/抽取/答案/端到端评测
-- [检索评测报告](../../tests/eval/reports/eval-report.md)：检索 Recall@K / MRR / 阈值标定
+- [检索评测报告](../../evals/reports/eval-report.md)：检索 Recall@K / MRR / 阈值标定

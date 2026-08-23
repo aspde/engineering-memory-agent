@@ -167,7 +167,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 | < 0.60 | 全新插入 | `_insert_memory()` |
 
 **关键工程细节**：
-- **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `tests/eval/reports/archive/threshold_calibration_report.md`）
+- **阈值标定**：用 `threshold_calibration.py` 收集三类摘要对的 BGE-M3 相似度分布——同义改写（应 merge）0.84-0.97、同类不同记忆 ≤0.79、异类 ≤0.72。**旧值 0.92 高到一半该 merge 的同义对被漏成冲突检测，0.85 是分离点**，已从 0.92/0.75 改为 0.85/0.72（见 `evals/reports/archive/threshold_calibration_report.md`）
 - **容错降级**：LLM 合并失败保留原摘要（失败成本是"少合并一次"）；矛盾检测失败降级为 supplement 关联写入——不假定矛盾（不丢弃内容、不误路由 HITL），也不把新内容无标记写进冲突记忆，检测遗漏由周巡检兜底（见下节「写入侧质量防线」）
 - **冲突解决 4 选项**：keep_existing / overwrite / merge / keep_both，由 `resolve_conflict()` 实现
 - **冲突走 HITL**：`check_conflict_node` 检测到 conflict action 后 `interrupt()`，等用户选
@@ -201,7 +201,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 **第一版方案（已废弃）**：借鉴艾宾浩斯遗忘曲线，给每条记忆算一个 `decay_factor`，检索时按"相似度 × decay_factor"排序。公式 `R = e^(-t/S)`，`S = 1 + (recall_count + 1) × 12`，召回时自动更新。
 
-**为什么废弃（关键决策）**：decay A/B（`tests/eval/reports/decay_ab_report.md`）在合成老化分布上跑双臂——衰减加权 recall@5 **0.667**，纯相似度 **0.900**。项目的测量数据表明衰减让检索变差，而它的前提「近期/高频=相关」来自合成的老化分布，没有真实语料支撑。更微妙的是：连续调参三轮（S=2x→8x→12x + floor 0.10）本质是把曲线越调越接近 no-op（0.367→0.633→0.667，单调逼近 0.900）——这是"把一个该删的功能调成无害"的信号。于是把衰减移出排序路径。
+**为什么废弃（关键决策）**：decay A/B（`evals/reports/decay_ab_report.md`）在合成老化分布上跑双臂——衰减加权 recall@5 **0.667**，纯相似度 **0.900**。项目的测量数据表明衰减让检索变差，而它的前提「近期/高频=相关」来自合成的老化分布，没有真实语料支撑。更微妙的是：连续调参三轮（S=2x→8x→12x + floor 0.10）本质是把曲线越调越接近 no-op（0.367→0.633→0.667，单调逼近 0.900）——这是"把一个该删的功能调成无害"的信号。于是把衰减移出排序路径。
 
 **最终方案**：`search_memories` 纯相似度单段 HNSW 排序（删掉两段候选窗 + Python 重排），命中记忆记录 `recall_count`/`recalled_at` 作**元数据**（`record_recalls`，单条 `UPDATE ... WHERE id = ANY(:ids)`，无 N+1）。「是否过期」由人/LLM 判断：`search_memories_tool` 展示行带 `recalls` 和 `last_recalled`，每周 patrol 的过期记忆扫描直接让 LLM 读这两个字段做归档建议。判断从"机器算公式"变成"人读访问记录"。
 
@@ -239,19 +239,19 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 
 ## 五、量化成果（2 分钟）
 
-> 下方数据分两类：**实测**（tests/eval 跑出，可复现）与**待生产**（需部署后统计）。实测数字已回填，待生产项保留占位。
+> 下方数据分两类：**实测**（evals 跑出，可复现）与**待生产**（需部署后统计）。实测数字已回填，待生产项保留占位。
 
 | 指标 | 数值 | 来源 |
 |------|------|------|
 | 数据源接入数 | 4 个（Git / PingCode / CI / 飞书；连接器默认关闭，见 ADR-011） | — |
-| 记忆库规模 | 评估集 70 条种子记忆（生产待部署） | tests/eval/seed_memories.jsonl |
-| 检索 Recall@5 | **0.886（默认确定性基线，70 条）**；语义通道 opt-in 时 1.000（30 条时代的历史测量） | tests/eval 实测（memory:norank@k5；默认纯子串匹配，见 [memory-path-report-70.md](../../tests/eval/reports/memory_path_report_70.md)） |
+| 记忆库规模 | 评估集 70 条种子记忆（生产待部署） | evals/seed_memories.jsonl |
+| 检索 Recall@5 | **0.886（默认确定性基线，70 条）**；语义通道 opt-in 时 1.000（30 条时代的历史测量） | evals 实测（memory:norank@k5；默认纯子串匹配，见 [memory-path-report-70.md](../../evals/reports/memory_path_report_70.md)） |
 | 检索 MRR | **0.767（默认确定性基线，70 条）**；语义通道 opt-in 时 0.944（30 条时代） | 同上；此前的 0.983 是 chunk:vector 路径，非生产默认路径 |
 | 语义通道贡献 | 30 条时代 3 条（q018/q024/q026）仅靠 embedding 相似度判相关（0.900→1.000、0.844→0.944）；**语义通道是显式 opt-in，非默认**，当前 70 条门禁不依赖它 | 语义通道用被评测的 BGE-M3 自评（见 dataset.py），因自证故默认关闭、显式开启，贡献已如实披露 |
-| 检索判别力（hard-negative） | **纯向量 27 条陷阱集：综合通过仅 59.3%、MRR 0.790、11 条陷阱压过目标 → bounded cross-encoder top-3 重排后 81.5%、MRR 0.889、5 条** | [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md) 实测；纯向量对表层词重合高度宽容（陷阱与目标共享关键词时排序靠词面而非意图）；已实现 bounded-CE 重排修复（`query_memories(use_cross_encoder=True)`，默认关） |
-| 检索 NDCG@5 | 0.798（70 条默认）；0.959 为 30 条语义开启时的历史值 | tests/eval 实测（memory:norank@k5，见 [memory-path-report-70.md](../../tests/eval/reports/memory_path_report_70.md)） |
-| 检索延迟（稳态） | ~190ms（30 条 hybrid 无 rerank：embed + sparse + sort）；memory 路径 70 条平均 ~550ms | tests/eval 实测（hybrid:norank@k5 190ms；memory:norank@k5 552ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
-| cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | tests/eval 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
+| 检索判别力（hard-negative） | **纯向量 27 条陷阱集：综合通过仅 59.3%、MRR 0.790、11 条陷阱压过目标 → bounded cross-encoder top-3 重排后 81.5%、MRR 0.889、5 条** | [hard-negative-report.md](../../evals/reports/archive/hard_negative_report.md) 实测；纯向量对表层词重合高度宽容（陷阱与目标共享关键词时排序靠词面而非意图）；已实现 bounded-CE 重排修复（`query_memories(use_cross_encoder=True)`，默认关） |
+| 检索 NDCG@5 | 0.798（70 条默认）；0.959 为 30 条语义开启时的历史值 | evals 实测（memory:norank@k5，见 [memory-path-report-70.md](../../evals/reports/memory_path_report_70.md)） |
+| 检索延迟（稳态） | ~190ms（30 条 hybrid 无 rerank：embed + sparse + sort）；memory 路径 70 条平均 ~550ms | evals 实测（hybrid:norank@k5 190ms；memory:norank@k5 552ms）；hybrid+rerank 17.5s（cross-encoder CPU 瓶颈） |
+| cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | evals 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
 | 代码量 | backend 约 1.4 万行（不含 agent）+ agent 约 2.3 千行（纯 Python，无前端） | wc -l |
 | 测试覆盖 | 1396 测试用例 | pytest --collect-only |
 | Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875 | run_task_eval 8 任务实测（DeepSeek，deterministic judge，2026-08-09） |
@@ -267,7 +267,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 **评估集设计**：70 条标注 query，5 类 × 14 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard（18/30/22，hard 占 31%），每条标 1 条相关记忆。**三个如实披露的点**：
 1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5 只能证明"找得到"（当前默认基线 0.886），不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
 2. **语义通道已改为显式 opt-in（非默认）**：30 条时代 3 条靠"被评测的 BGE-M3 给自己打分"（embedding 相似度 ≥0.80）判为相关（0.900→1.000、0.844→0.944）。这部分是模型"认出自已"，不是独立判据——所以默认评估是**确定性纯子串基线**（70 条 recall 0.886 / MRR 0.767，无自证），语义通道显式开启才启用，贡献已在报告里如实披露。
-3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../tests/eval/reports/archive/hard_negative_report.md)。
+3. **hard-negative 判别力才是真实水平，且已用它改进检索**：`query_candidates.jsonl` 里 27 条陷阱集（每条配一个表面词重合但语义不同的陷阱记忆）实测——纯向量目标召回 100%（找得到），但陷阱入侵 96.3%（几乎都混进 top-5）、综合通过仅 **59.3%**、11 条陷阱排在目标前。**这个集驱动了真实改进**：A/B 实验对比 query 重写 / hybrid 融合 / 检索后意图判别三个方向后，落地了 bounded cross-encoder top-3 重排——只对相似度排序前 3 名（竞争区）用 cross-encoder 打分重排、其余保持原序，不 floor 过滤，把综合通过提至 **81.5%**、MRR 0.790→0.889、worse 11→5（默认关、显式启用，避免 CPU 延迟）。完整数字见 [hard-negative-report.md](../../evals/reports/archive/hard_negative_report.md)。
 
 **设计选择**：对抗性审查要求"hard negative 跑一遍还 1.0 吗"必须能回答——与其让 1.0 被当自证拆穿，不如主动把真实判别力数字摆出来：1.0 的局限是什么、用 27 条陷阱集量化了真实判别力、下一步怎么改进。诚实暴露比完美数字可信。
 

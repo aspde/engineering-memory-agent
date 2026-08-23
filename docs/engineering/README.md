@@ -24,10 +24,10 @@
 | 文档 | 内容 |
 |------|------|
 | [LLM 行为评测](llm-eval.md) | 工具选择 / 知识抽取 / 最终答案 / 端到端四套件评测的设计说明 |
-| [LLM 行为评测报告](../../tests/eval/reports/llm-eval-report.md) | LLM 行为评测报告（2026-08-09，39 条，LLM judge 通道） |
-| [检索评测报告](../../tests/eval/reports/eval-report.md) | 2026-08-07 检索评测历史报告 |
-| [检索评测（30 条库稀疏路径）](../../tests/eval/reports/archive/eval_30_db_sparse.md) | 早期 30 条语料检索评测 |
-| `tests/eval/reports/*` | 评测报告与基线全集：决策证据留在 `reports/`，一次性实验归档在 `reports/archive/`，索引见 [reports/README.md](../../tests/eval/reports/README.md) |
+| [LLM 行为评测报告](../../evals/reports/llm-eval-report.md) | LLM 行为评测报告（2026-08-09，39 条，LLM judge 通道） |
+| [检索评测报告](../../evals/reports/eval-report.md) | 2026-08-07 检索评测历史报告 |
+| [检索评测（30 条库稀疏路径）](../../evals/reports/archive/eval_30_db_sparse.md) | 早期 30 条语料检索评测 |
+| `evals/reports/*` | 评测报告与基线全集：决策证据留在 `reports/`，一次性实验归档在 `reports/archive/`，索引见 [reports/README.md](../../evals/reports/README.md) |
 
 ## 相关目录
 
