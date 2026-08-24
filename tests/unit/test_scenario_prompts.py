@@ -83,7 +83,7 @@ def _user_message(agent: AsyncMock) -> str:
 
 async def _invoke(compose, mock_agent, **kwargs):
     with patch(
-        "backend.service.agent_service.get_agent", return_value=mock_agent
+        "backend.runner.agent_service.get_agent", return_value=mock_agent
     ):
         return await compose(**kwargs)
 
@@ -94,7 +94,7 @@ async def _invoke(compose, mock_agent, **kwargs):
 class TestComposePostmortem:
     @pytest.mark.asyncio
     async def test_incident_id_flows_into_user_message(self):
-        from backend.service.scenarios.postmortem import compose_postmortem
+        from backend.runner.scenarios.postmortem import compose_postmortem
 
         agent = _mock_agent("复盘报告")
         result = await _invoke(compose_postmortem, agent, incident_memory_id="abc-123-def")
@@ -103,7 +103,7 @@ class TestComposePostmortem:
 
     @pytest.mark.asyncio
     async def test_no_incident_id_asks_for_recent_search(self):
-        from backend.service.scenarios.postmortem import compose_postmortem
+        from backend.runner.scenarios.postmortem import compose_postmortem
 
         agent = _mock_agent()
         await _invoke(compose_postmortem, agent)
@@ -116,7 +116,7 @@ class TestComposePostmortem:
 class TestComposeOnboarding:
     @pytest.mark.asyncio
     async def test_full_scope_mentions_whole_project(self):
-        from backend.service.scenarios.onboarding import compose_onboarding_guide
+        from backend.runner.scenarios.onboarding import compose_onboarding_guide
 
         agent = _mock_agent("Onboarding 全览")
         result = await _invoke(compose_onboarding_guide, agent)
@@ -125,7 +125,7 @@ class TestComposeOnboarding:
 
     @pytest.mark.asyncio
     async def test_entity_scope_names_the_entity(self):
-        from backend.service.scenarios.onboarding import compose_onboarding_guide
+        from backend.runner.scenarios.onboarding import compose_onboarding_guide
 
         agent = _mock_agent("模块指南")
         await _invoke(compose_onboarding_guide, agent, scope="PostgreSQL")
@@ -135,7 +135,7 @@ class TestComposeOnboarding:
     async def test_system_prompt_is_onboarding_specific(self):
         from langchain_core.messages import SystemMessage
 
-        from backend.service.scenarios.onboarding import compose_onboarding_guide
+        from backend.runner.scenarios.onboarding import compose_onboarding_guide
 
         agent = _mock_agent()
         await _invoke(compose_onboarding_guide, agent)
@@ -153,7 +153,7 @@ class TestComposeOnboarding:
 class TestComposeCodeReview:
     @pytest.mark.asyncio
     async def test_diff_and_description_both_flow_into_user_message(self):
-        from backend.service.scenarios.code_review import compose_review_context
+        from backend.runner.scenarios.code_review import compose_review_context
 
         agent = _mock_agent("审查结果")
         result = await _invoke(
@@ -169,7 +169,7 @@ class TestComposeCodeReview:
 
     @pytest.mark.asyncio
     async def test_long_diff_is_truncated(self):
-        from backend.service.scenarios.code_review import compose_review_context
+        from backend.runner.scenarios.code_review import compose_review_context
 
         agent = _mock_agent()
         long_diff = "x" * 12000
@@ -180,7 +180,7 @@ class TestComposeCodeReview:
 
     @pytest.mark.asyncio
     async def test_long_description_is_truncated(self):
-        from backend.service.scenarios.code_review import compose_review_context
+        from backend.runner.scenarios.code_review import compose_review_context
 
         agent = _mock_agent()
         await _invoke(compose_review_context, agent, pr_description="y" * 3000)
@@ -190,7 +190,7 @@ class TestComposeCodeReview:
     async def test_empty_input_still_invokes_the_agent(self):
         """No diff/description → guidance message, but the agent still runs so
         the checkpoint is populated."""
-        from backend.service.scenarios.code_review import compose_review_context
+        from backend.runner.scenarios.code_review import compose_review_context
 
         agent = _mock_agent("请提供 PR diff 或描述")
         result = await _invoke(compose_review_context, agent)
@@ -201,7 +201,7 @@ class TestComposeCodeReview:
     async def test_system_prompt_is_code_review_specific(self):
         from langchain_core.messages import SystemMessage
 
-        from backend.service.scenarios.code_review import compose_review_context
+        from backend.runner.scenarios.code_review import compose_review_context
 
         agent = _mock_agent()
         await _invoke(compose_review_context, agent, pr_diff="diff content")
@@ -222,7 +222,7 @@ class TestComposeTechDebt:
         """The compose takes no parameters — a fixed scan instruction pair."""
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from backend.service.scenarios.tech_debt import compose_tech_debt_report
+        from backend.runner.scenarios.tech_debt import compose_tech_debt_report
 
         agent = _mock_agent("技术债报告内容")
         result = await _invoke(compose_tech_debt_report, agent)
@@ -235,7 +235,7 @@ class TestComposeTechDebt:
 
     @pytest.mark.asyncio
     async def test_user_message_carries_scan_instructions(self):
-        from backend.service.scenarios.tech_debt import compose_tech_debt_report
+        from backend.runner.scenarios.tech_debt import compose_tech_debt_report
 
         agent = _mock_agent()
         await _invoke(compose_tech_debt_report, agent)

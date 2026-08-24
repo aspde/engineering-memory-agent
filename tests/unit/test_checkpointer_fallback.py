@@ -20,7 +20,7 @@ import pytest
 # 降级路径，降级行为在安装驱动的平台验证。
 pytest.importorskip("psycopg_pool")
 
-from backend.service.agent_service import _setup_checkpointer
+from backend.runner.agent_service import _setup_checkpointer
 
 
 @pytest.mark.asyncio
@@ -56,7 +56,7 @@ async def test_checkpointer_falls_back_when_pool_wait_times_out(
 
     # _setup_checkpointer writes _checkpointer in the module; import it
     # through the module so the assignment is observable.
-    import backend.service.agent_service as svc
+    import backend.runner.agent_service as svc
 
     await _setup_checkpointer()
     assert isinstance(svc._checkpointer, svc.InMemorySaver)

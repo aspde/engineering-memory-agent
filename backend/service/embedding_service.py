@@ -17,7 +17,7 @@ from typing import Any
 for _k, _v in {"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}.items():
     os.environ[_k] = _v  # force-override — setdefault may leave stale values
 
-from backend.model.embedding import EmbeddingProvider
+from backend.providers.embedding import EmbeddingProvider
 from backend.shared.config import EMBEDDING_DIMENSIONS, config
 from backend.shared.resilience import (
     call_with_resilience,

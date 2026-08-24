@@ -17,16 +17,16 @@ from pydantic import Field
 
 from backend.agent.nodes import _record_auto_memory_write
 from backend.agent.tool_envelope import build_tool_envelope
-from backend.service.chunk import chunk_code, chunk_text
-from backend.service.entity import (
+from backend.service.ingestion.chunk import chunk_code, chunk_text
+from backend.service.ingestion.entity import (
     get_entity_by_name,
     get_entity_relations_for_tool,
     get_memory_entities_batch,
 )
-from backend.service.extraction import extract_memory
-from backend.service.ingestion import ingest_repo
+from backend.service.ingestion.extraction import extract_memory
+from backend.service.ingestion.ingestion import ingest_repo
 from backend.service.memory import write_memory
-from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
+from backend.service.retrieval.retrieval import query_memories, retrieve_hybrid, write_chunks
 from backend.shared.config import current_thread_id
 
 # ── Retrieval tools ──────────────────────────────────────────────────

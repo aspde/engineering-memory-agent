@@ -12,7 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from backend.service.query_rewrite import rewrite_query
+from backend.service.retrieval.query_rewrite import rewrite_query
 
 
 def _patch_llm(monkeypatch, resp: str | None = None, *, raise_on_call: bool = False):

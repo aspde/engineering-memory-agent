@@ -27,7 +27,7 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as jsonschema_validate
 
-from backend.model.llm import LLMProvider, LLMStructuredError
+from backend.providers.llm import LLMProvider, LLMStructuredError
 from backend.service.llm_service import get_llm_provider
 from backend.shared.config import config
 from backend.shared.resilience import CircuitOpenError

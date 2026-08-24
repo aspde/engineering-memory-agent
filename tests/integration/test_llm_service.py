@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from backend.model.llm import LLMProvider
+from backend.providers.llm import LLMProvider
 
 
 @pytest.mark.skipif(

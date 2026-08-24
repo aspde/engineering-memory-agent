@@ -19,7 +19,7 @@ import sys
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.service.retrieval import _tokenize
+from backend.service.retrieval.retrieval import _tokenize
 
 
 async def backfill(dry_run: bool = False) -> int:

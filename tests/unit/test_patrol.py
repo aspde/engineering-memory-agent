@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.service.patrol import (
+from backend.runner.patrol import (
     _interrupt_payload,
     _is_conflict_interrupt,
     _parse_findings,
@@ -156,9 +156,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -193,10 +193,10 @@ class TestRunPatrol:
 
         with (
             patch(
-                "backend.service.patrol.get_agent", return_value=mock_agent
+                "backend.runner.patrol.get_agent", return_value=mock_agent
             ) as mock_get_agent,
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -237,10 +237,10 @@ class TestRunPatrol:
 
         with (
             patch(
-                "backend.service.patrol.get_agent", return_value=mock_agent
+                "backend.runner.patrol.get_agent", return_value=mock_agent
             ) as mock_get_agent,
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -265,10 +265,10 @@ class TestRunPatrol:
 
         with (
             patch(
-                "backend.service.patrol.get_agent", return_value=mock_agent
+                "backend.runner.patrol.get_agent", return_value=mock_agent
             ) as mock_get_agent,
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -298,9 +298,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -349,9 +349,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -392,12 +392,12 @@ class TestRunPatrol:
         mock_agent.ainvoke.return_value = {"__interrupt__": [conflict], "messages": []}
         mock_factory = _make_mock_session()
 
-        from backend.service.patrol import _MAX_AUTO_CONFLICT_RESOLUTIONS
+        from backend.runner.patrol import _MAX_AUTO_CONFLICT_RESOLUTIONS
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -434,9 +434,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -468,9 +468,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -505,9 +505,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -534,9 +534,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -559,9 +559,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -591,9 +591,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -636,9 +636,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -679,9 +679,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -706,9 +706,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session(running_row=("existing-log-id",))
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -736,9 +736,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),
         ):
@@ -768,9 +768,9 @@ class TestRunPatrol:
         mock_factory = _make_mock_session()
 
         with (
-            patch("backend.service.patrol.get_agent", return_value=mock_agent),
+            patch("backend.runner.patrol.get_agent", return_value=mock_agent),
             patch(
-                "backend.service.patrol.get_session_factory",
+                "backend.runner.patrol.get_session_factory",
                 return_value=mock_factory,
             ),pytest.raises(asyncio.CancelledError)
         ):
@@ -807,7 +807,7 @@ class TestMarkStalePatrols:
         ctx.__aexit__ = AsyncMock(return_value=None)
         factory = MagicMock(return_value=ctx)
 
-        with patch("backend.service.patrol.get_session_factory", return_value=factory):
+        with patch("backend.runner.patrol.get_session_factory", return_value=factory):
             count = await mark_stale_patrols_failed()
 
         assert count == 2
@@ -827,7 +827,7 @@ class TestMarkStalePatrols:
         ctx.__aexit__ = AsyncMock(return_value=None)
         factory = MagicMock(return_value=ctx)
 
-        with patch("backend.service.patrol.get_session_factory", return_value=factory):
+        with patch("backend.runner.patrol.get_session_factory", return_value=factory):
             count = await mark_stale_patrols_failed()
 
         assert count == 0

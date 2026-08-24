@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.model.llm import LLMStructuredError
-from backend.service.extraction import (
+from backend.providers.llm import LLMStructuredError
+from backend.service.ingestion.extraction import (
     extract_entities,
     extract_memory,
     extract_relations,
@@ -21,7 +21,7 @@ class TestExtractSummary:
         mock_llm = AsyncMock()
         mock_llm.chat.return_value = "A concise summary."
 
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_llm)
 
         result = await extract_summary("Some content about PostgreSQL migrations.")
@@ -34,7 +34,7 @@ def _patch_provider(monkeypatch: pytest.MonkeyPatch, mock_llm: AsyncMock) -> Non
     ``extraction.get_llm_provider`` (the function-calling channel resolves
     the provider there) and ``structured.get_llm_provider`` (which
     ``chat_structured`` resolves internally)."""
-    monkeypatch.setattr("backend.service.extraction.get_llm_provider", lambda: mock_llm)
+    monkeypatch.setattr("backend.service.ingestion.extraction.get_llm_provider", lambda: mock_llm)
     monkeypatch.setattr("backend.service.structured.get_llm_provider", lambda: mock_llm)
 
 
@@ -53,7 +53,7 @@ class TestExtractEntities:
     @pytest.mark.asyncio
     async def test_persistent_failure_degrades_to_empty(self, monkeypatch) -> None:
         """Structured output that never validates → loud degradation to []."""
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")
@@ -74,7 +74,7 @@ class TestExtractEntities:
         """Circuit breaker open → chat_structured fails fast with
         CircuitOpenError; enrichment must degrade to [] so the memory write
         proceeds instead of crashing write_memory."""
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
 
         async def _raise(*args, **kwargs):
             raise CircuitOpenError("Circuit breaker 'x' is open")
@@ -125,7 +125,7 @@ class TestExtractRelations:
 
     @pytest.mark.asyncio
     async def test_persistent_failure_degrades_to_empty(self, monkeypatch) -> None:
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")
@@ -145,7 +145,7 @@ class TestExtractRelations:
         """Circuit breaker open → chat_structured fails fast with
         CircuitOpenError; relation extraction must degrade to [] so the memory
         write proceeds instead of crashing write_memory."""
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
 
         async def _raise(*args, **kwargs):
             raise CircuitOpenError("Circuit breaker 'x' is open")
@@ -174,7 +174,7 @@ class TestExtractMemory:
             json.dumps([{"from": "PG", "to": "vector", "type": "depends_on"}]),
         ]
 
-        import backend.service.extraction as mod
+        import backend.service.ingestion.extraction as mod
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_llm)  # summary
         _patch_provider(monkeypatch, mock_llm)  # entities / relations
 
@@ -201,7 +201,7 @@ class TestFunctionCallingChannel:
 
     @staticmethod
     def _patch_provider(monkeypatch: pytest.MonkeyPatch, provider: MagicMock) -> None:
-        monkeypatch.setattr("backend.service.extraction.get_llm_provider", lambda: provider)
+        monkeypatch.setattr("backend.service.ingestion.extraction.get_llm_provider", lambda: provider)
         monkeypatch.setattr("backend.service.structured.get_llm_provider", lambda: provider)
 
     @pytest.mark.asyncio

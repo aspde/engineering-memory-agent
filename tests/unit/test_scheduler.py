@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from backend.service.scheduler import (
+from backend.runner.scheduler import (
     _SLOT_GRACE_SECONDS,
-    _slot_overshoot,
     PatrolScheduler,
+    _slot_overshoot,
     previous_daily_slot,
     previous_weekly_slot,
     should_catch_up,
@@ -100,7 +100,7 @@ class TestSchedulerTimeCalculation:
         # Mock datetime to a known time: 2026-01-15 10:30
         fixed_now = datetime(2026, 1, 15, 10, 30, 0)
 
-        with patch("backend.service.scheduler.datetime") as mock_dt:
+        with patch("backend.runner.scheduler.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             # Let timedelta, replace, etc. pass through to real datetime
             mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
@@ -140,7 +140,7 @@ class TestSchedulerTimeCalculation:
         # Thursday 2026-01-15 (weekday=3 for Thursday)
         fixed_now = datetime(2026, 1, 15, 10, 30, 0)
 
-        with patch("backend.service.scheduler.datetime") as mock_dt:
+        with patch("backend.runner.scheduler.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
 
@@ -190,8 +190,8 @@ def _poll_fixture(times, polls):
         if stop_after[0] < 0:
             raise _LoopStop()
 
-    with patch("backend.service.scheduler.asyncio.sleep", new=_fake_sleep), \
-            patch("backend.service.scheduler.datetime") as mock_dt:
+    with patch("backend.runner.scheduler.asyncio.sleep", new=_fake_sleep), \
+            patch("backend.runner.scheduler.datetime") as mock_dt:
         mock_dt.now.side_effect = lambda: next(times).astimezone()
         mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
         yield
@@ -270,7 +270,7 @@ class TestPollingLoop:
             datetime(2026, 1, 15, 13, 0, 0),
         ])
         with _poll_fixture(times, polls=1), \
-                patch("backend.service.scheduler.logger") as mock_logger:
+                patch("backend.runner.scheduler.logger") as mock_logger:
             scheduler.schedule_daily(hour=8, callback=callback)
             with pytest.raises(_LoopStop):
                 await scheduler._tasks[0]

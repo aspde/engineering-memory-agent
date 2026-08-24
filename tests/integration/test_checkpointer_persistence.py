@@ -38,7 +38,7 @@ from unittest.mock import AsyncMock
 import pytest
 from langchain_core.messages import HumanMessage
 
-from backend.service import agent_service as svc
+from backend.runner import agent_service as svc
 from tests._fake_llm import content_stream, sequential_stream
 
 pytest.importorskip("psycopg_pool")

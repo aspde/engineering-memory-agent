@@ -10,7 +10,7 @@ import asyncio
 import json
 import logging
 
-from backend.model.llm import LLMStructuredError
+from backend.providers.llm import LLMStructuredError
 from backend.service.llm_service import get_llm_provider
 from backend.service.prompts import get_prompt
 from backend.service.structured import chat_structured

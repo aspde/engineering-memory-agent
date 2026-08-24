@@ -27,7 +27,7 @@ from langgraph.types import Command, interrupt
 
 from backend.agent.state import AgentState
 from backend.agent.tool_envelope import envelope_display, truncate_tool_content
-from backend.service.extraction import extract_memory
+from backend.service.ingestion.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
 from backend.service.memory import resolve_conflict, write_memory
 from backend.service.prompts import get_prompt
@@ -804,7 +804,7 @@ def _has_substance(extracted: dict, source_content: str | None = None) -> bool:
     ``source_content`` (when supplied) lets the check reject a *degraded*
     extraction: when the LLM is unavailable, ``extract_summary`` falls back
     to the first 200 chars of the source verbatim (see
-    ``backend.service.extraction.extract_summary``) and entity/relation
+    ``backend.service.ingestion.extraction.extract_summary``) and entity/relation
     extraction degrades to empty lists — a combination that easily clears
     the length gate below.  A summary that is exactly the verbatim truncation
     AND carries no entities is a failure artifact, not knowledge; refusing it

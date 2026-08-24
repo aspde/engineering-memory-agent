@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
-from backend.model.llm import LLMProvider
+from backend.providers.llm import LLMProvider
 from backend.service.usage import begin_call, record_call
 from backend.shared.config import config
 from backend.shared.metrics import pop_scenario

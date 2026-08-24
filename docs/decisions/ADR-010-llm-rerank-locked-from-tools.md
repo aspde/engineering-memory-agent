@@ -19,7 +19,7 @@
 **把 `use_llm_rerank` 从三个检索工具（`search_memories_tool` / `retrieve_chunks_tool` / `query_rewrite_and_search_tool`）的 schema 中移除**，使模型在 agent 路径上无法再触发 LLM rerank：
 
 - 工具调用固定为纯相似度排序（hybrid 用 RRF 融合，均为确定性、零额外 LLM 调用）。
-- **LLM rerank 能力保留在服务层**：`rerank_llm()` 与各读函数的 `use_llm_rerank` 参数仍在，供**显式调用者**（eval 评测、未来的服务端调用方）使用。`backend/service/retrieval.py` 各签名已标注 `NOT exposed in agent tool schemas`，防止回归暴露。
+- **LLM rerank 能力保留在服务层**：`rerank_llm()` 与各读函数的 `use_llm_rerank` 参数仍在，供**显式调用者**（eval 评测、未来的服务端调用方）使用。`backend/service/retrieval/retrieval.py` 各签名已标注 `NOT exposed in agent tool schemas`，防止回归暴露。
 
 ## 理由
 

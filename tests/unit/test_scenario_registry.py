@@ -9,7 +9,7 @@ class TestScenarioRegistry:
     """SCENARIOS dict completeness and structure."""
 
     def test_registry_includes_all_four_scenarios(self):
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         assert set(SCENARIOS.keys()) == {
             "postmortem",
@@ -19,7 +19,7 @@ class TestScenarioRegistry:
         }
 
     def test_each_scenario_has_required_fields(self):
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         required = {"name", "compose", "triggers", "status"}
         for key, info in SCENARIOS.items():
@@ -29,7 +29,7 @@ class TestScenarioRegistry:
     def test_each_compose_path_is_valid_module(self):
         import importlib
 
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         for key, info in SCENARIOS.items():
             compose_path = info["compose"]
@@ -46,7 +46,7 @@ class TestScenarioRegistry:
         import importlib
         import inspect
 
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         for key, info in SCENARIOS.items():
             compose_path = info["compose"]
@@ -58,7 +58,7 @@ class TestScenarioRegistry:
             )
 
     def test_each_status_is_valid(self):
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         valid_statuses = {"active", "beta", "inactive"}
         for key, info in SCENARIOS.items():
@@ -71,7 +71,7 @@ class TestVisibleScenarios:
     """visible_scenarios() filtering behaviour."""
 
     def test_default_excludes_inactive(self):
-        from backend.service.scenarios import SCENARIOS, visible_scenarios
+        from backend.runner.scenarios import SCENARIOS, visible_scenarios
 
         original = SCENARIOS["postmortem"]["status"]
         try:
@@ -82,7 +82,7 @@ class TestVisibleScenarios:
             SCENARIOS["postmortem"]["status"] = original
 
     def test_include_beta_shows_beta(self):
-        from backend.service.scenarios import SCENARIOS, visible_scenarios
+        from backend.runner.scenarios import SCENARIOS, visible_scenarios
 
         original = SCENARIOS["postmortem"]["status"]
         try:
@@ -97,7 +97,7 @@ class TestVisibleScenarios:
             SCENARIOS["postmortem"]["status"] = original
 
     def test_active_always_visible(self):
-        from backend.service.scenarios import visible_scenarios
+        from backend.runner.scenarios import visible_scenarios
 
         visible = visible_scenarios()
         assert "code_review" in visible  # code_review is active by default

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.model.embedding import EmbeddingProvider
+from backend.providers.embedding import EmbeddingProvider
 
 
 class FakeEmbeddingProvider(EmbeddingProvider):

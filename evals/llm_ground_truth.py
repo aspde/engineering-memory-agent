@@ -12,7 +12,7 @@ three LLM-behavior dimensions:
   measures production behavior, not a stripped-down harness.
 - **extraction** — a source text + the entities / relations / summary
   keywords a correct ``extract_memory`` run should produce.  Entity and
-  relation types follow the enum in ``backend.service.extraction``.
+  relation types follow the enum in ``backend.service.ingestion.extraction``.
 - **answer** — a query + a golden retrieved *context* (the only fact source
   the model may use) + ``required_facts`` the answer must cover and
   ``prohibited_claims`` it must not make.  Measures groundedness and
@@ -62,7 +62,7 @@ ANSWER_CATEGORIES: tuple[str, ...] = (
     "negation",
 )
 
-# Entity / relation type enums — must match backend.service.extraction's
+# Entity / relation type enums — must match backend.service.ingestion.extraction's
 # schemas (duplicated here so the dataset module stays decoupled from the
 # production prompt internals; validation flags drift below).
 ENTITY_TYPES: tuple[str, ...] = (

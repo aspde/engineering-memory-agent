@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from backend.model.llm import LLMStructuredError
+from backend.providers.llm import LLMStructuredError
 from backend.service.memory import _detect_conflict
 
 

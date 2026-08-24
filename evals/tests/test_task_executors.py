@@ -22,13 +22,13 @@ import pytest
 from langchain_core.tools import tool
 
 from backend.agent.tool_envelope import build_tool_envelope
+from evals.task_executors import auto_approve_resume, make_task_runner
 from tests._fake_llm import (
     content_stream,
     sequential_stream,
     text_stream,
     tool_call_stream,
 )
-from evals.task_executors import auto_approve_resume, make_task_runner
 
 
 @pytest.fixture(autouse=True)

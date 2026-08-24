@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.model.llm import LLMProvider
+from backend.providers.llm import LLMProvider
 from backend.service.usage import pending_rows
 from backend.shared.metrics import pop_scenario
 from tests.support.process_state import reset_circuit_breakers, reset_usage_buffer

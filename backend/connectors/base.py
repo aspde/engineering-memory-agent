@@ -109,7 +109,7 @@ class Connector(ABC):
 
         When True, the webhook path spawns an analysis run after the
         delivery reaches a terminal state (see
-        ``backend/service/event_analysis.py``).  Default False — only
+        ``backend/runner/event_analysis.py``).  Default False — only
         connectors whose events warrant an immediate historical lookup
         opt in (currently CI failures).
         """

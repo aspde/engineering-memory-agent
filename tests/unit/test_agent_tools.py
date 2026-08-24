@@ -57,7 +57,7 @@ class TestRetrieveChunksTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
         from backend.agent import tools as mod
-        from backend.service.retrieval import RetrievalResult
+        from backend.service.retrieval.retrieval import RetrievalResult
 
         async def mock_retrieve(*args, **kwargs):
             return [RetrievalResult(content="def foo(): pass", score=0.88, metadata={"document_id": "test.py"})]
@@ -86,7 +86,7 @@ class TestRetrieveChunksTool:
 class TestQueryRewriteAndSearchTool:
     @pytest.mark.asyncio
     async def test_returns_formatted_results(self, monkeypatch) -> None:
-        from backend.service.retrieval import RetrievalResult
+        from backend.service.retrieval.retrieval import RetrievalResult
 
         async def mock_multi_query(*args, **kwargs):
             return [
@@ -98,7 +98,7 @@ class TestQueryRewriteAndSearchTool:
             ]
 
         monkeypatch.setattr(
-            "backend.service.retrieval.retrieve_multi_query", mock_multi_query
+            "backend.service.retrieval.retrieval.retrieve_multi_query", mock_multi_query
         )
 
         result = await query_rewrite_and_search_tool.ainvoke(
@@ -114,7 +114,7 @@ class TestQueryRewriteAndSearchTool:
     @pytest.mark.asyncio
     async def test_empty_results(self, monkeypatch) -> None:
         monkeypatch.setattr(
-            "backend.service.retrieval.retrieve_multi_query",
+            "backend.service.retrieval.retrieval.retrieve_multi_query",
             AsyncMock(return_value=[]),
         )
         result = await query_rewrite_and_search_tool.ainvoke({"query": "nothing"})
@@ -462,6 +462,37 @@ class TestConnectorAwareness:
         from backend.agent.tools import ALL_TOOLS
 
         assert len(ALL_TOOLS) == 9
+
+
+class TestRetrievalToolDescriptionBoundaries:
+    """Docstring boundaries steer single-decision tool selection
+    (task_eval unexpected_rate 0.375); a regression here silently re-invites
+    tool stacking."""
+
+    @staticmethod
+    def _flat(tool) -> str:
+        return " ".join(tool.description.split()).lower()
+
+    def test_retrieve_chunks_no_longer_invites_chaining(self) -> None:
+        desc = self._flat(retrieve_chunks_tool)
+        assert "doesn't return enough" not in desc
+        assert "only when the question targets document or file content" in desc
+
+    def test_search_memories_declared_default_first_choice(self) -> None:
+        desc = self._flat(search_memories_tool)
+        assert "default first choice" in desc
+        assert "use this first" in desc
+        assert "do not chain other search tools after it" in desc
+
+    def test_query_rewrite_narrowed_to_vague_first_search(self) -> None:
+        desc = self._flat(query_rewrite_and_search_tool)
+        # The old broad self-invitation is gone...
+        assert "conceptual or abstract queries where the user's wording" not in desc
+        # ...replaced by a narrow last-resort framing.
+        assert "so vague or abstract" in desc
+        assert "not as a retry after another search" in desc
+        # cost warning stays — it discourages casual use
+        assert "~500ms" in desc
 
 
 class TestToolParamBounds:

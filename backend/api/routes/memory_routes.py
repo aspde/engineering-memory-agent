@@ -9,10 +9,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.service.chunk import chunk_text
 from backend.service.conflicts import persist_pending_conflict
+from backend.service.ingestion.chunk import chunk_text
 from backend.service.memory import write_memory
-from backend.service.retrieval import query_memories, retrieve_hybrid, write_chunks
+from backend.service.retrieval.retrieval import query_memories, retrieve_hybrid, write_chunks
 
 router = APIRouter(prefix="/memory", tags=["memory"])
 

@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.model.llm import LLMStructuredError
+from backend.providers.llm import LLMStructuredError
 
 
 class _MockRow:
@@ -47,7 +47,7 @@ class TestNormalizeEntities:
     @pytest.mark.asyncio
     async def test_normalize_empty_entities_returns_empty(self):
         """Empty entity list returns an empty list immediately."""
-        from backend.service.entity import normalize_entities
+        from backend.service.ingestion.entity import normalize_entities
 
         result = await normalize_entities("some-id", [])
         assert result == []
@@ -55,14 +55,14 @@ class TestNormalizeEntities:
     @pytest.mark.asyncio
     async def test_normalize_new_entity_creates_record(self):
         """A brand-new entity with no similar existing entities creates a new row."""
-        from backend.service.entity import normalize_entities
+        from backend.service.ingestion.entity import normalize_entities
 
         with (
             patch(
-                "backend.service.entity.get_embedding_provider"
+                "backend.service.ingestion.entity.get_embedding_provider"
             ) as mock_emb_provider,
             patch(
-                "backend.service.entity.get_session_factory"
+                "backend.service.ingestion.entity.get_session_factory"
             ) as mock_sess_factory,
         ):
             mock_emb = AsyncMock()
@@ -96,17 +96,17 @@ class TestNormalizeEntities:
     @pytest.mark.asyncio
     async def test_normalize_entity_llm_confirms_match(self):
         """When LLM confirms a match, link to the existing entity."""
-        from backend.service.entity import normalize_entities
+        from backend.service.ingestion.entity import normalize_entities
 
         with (
             patch(
-                "backend.service.entity.get_embedding_provider"
+                "backend.service.ingestion.entity.get_embedding_provider"
             ) as mock_emb_provider,
             patch(
-                "backend.service.entity.get_session_factory"
+                "backend.service.ingestion.entity.get_session_factory"
             ) as mock_sess_factory,
             patch(
-                "backend.service.entity._llm_confirm_match"
+                "backend.service.ingestion.entity._llm_confirm_match"
             ) as mock_llm_confirm,
         ):
             mock_emb = AsyncMock()
@@ -146,17 +146,17 @@ class TestNormalizeEntities:
     @pytest.mark.asyncio
     async def test_normalize_entity_llm_rejects_match(self):
         """When LLM rejects all candidates, create a new entity."""
-        from backend.service.entity import normalize_entities
+        from backend.service.ingestion.entity import normalize_entities
 
         with (
             patch(
-                "backend.service.entity.get_embedding_provider"
+                "backend.service.ingestion.entity.get_embedding_provider"
             ) as mock_emb_provider,
             patch(
-                "backend.service.entity.get_session_factory"
+                "backend.service.ingestion.entity.get_session_factory"
             ) as mock_sess_factory,
             patch(
-                "backend.service.entity._llm_confirm_match"
+                "backend.service.ingestion.entity._llm_confirm_match"
             ) as mock_llm_confirm,
         ):
             mock_emb = AsyncMock()
@@ -198,17 +198,17 @@ class TestNormalizeEntities:
     @pytest.mark.asyncio
     async def test_normalize_entity_llm_rejects_match_creates_new(self):
         """When the LLM judges no match, a new entity is created."""
-        from backend.service.entity import normalize_entities
+        from backend.service.ingestion.entity import normalize_entities
 
         with (
             patch(
-                "backend.service.entity.get_embedding_provider"
+                "backend.service.ingestion.entity.get_embedding_provider"
             ) as mock_emb_provider,
             patch(
-                "backend.service.entity.get_session_factory"
+                "backend.service.ingestion.entity.get_session_factory"
             ) as mock_sess_factory,
             patch(
-                "backend.service.entity._llm_confirm_match"
+                "backend.service.ingestion.entity._llm_confirm_match"
             ) as mock_llm_confirm,
         ):
             mock_emb = AsyncMock()
@@ -255,7 +255,7 @@ class TestLLMConfirmMatch:
 
     @pytest.mark.asyncio
     async def test_returns_true_on_match(self, monkeypatch) -> None:
-        from backend.service.entity import _llm_confirm_match
+        from backend.service.ingestion.entity import _llm_confirm_match
 
         mock_llm = AsyncMock()
         mock_llm.chat_json.return_value = '{"match": true}'
@@ -265,7 +265,7 @@ class TestLLMConfirmMatch:
 
     @pytest.mark.asyncio
     async def test_returns_false_on_no_match(self, monkeypatch) -> None:
-        from backend.service.entity import _llm_confirm_match
+        from backend.service.ingestion.entity import _llm_confirm_match
 
         mock_llm = AsyncMock()
         mock_llm.chat_json.return_value = '{"match": false}'
@@ -277,7 +277,7 @@ class TestLLMConfirmMatch:
     async def test_propagates_on_exhaustion(self, monkeypatch) -> None:
         """Never silently defaults to \"no match\" (which would create a
         duplicate entity) when the structured judgement fails."""
-        from backend.service.entity import _llm_confirm_match
+        from backend.service.ingestion.entity import _llm_confirm_match
 
         async def _raise(*args, **kwargs):
             raise LLMStructuredError("no schema-valid JSON after retries")

@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from backend.model.llm import LLMProvider
+from backend.providers.llm import LLMProvider
 from backend.service.llm_service import get_judge_provider
 from backend.service.structured import chat_structured
 

@@ -141,7 +141,7 @@ class TestSoftDeleteEffects:
         provider = AsyncMock()
         provider.embed.return_value = [[0.1, 0.2] * 512]
         monkeypatch.setattr(
-            "backend.service.retrieval.get_embedding_provider", lambda: provider
+            "backend.service.retrieval.retrieval.get_embedding_provider", lambda: provider
         )
 
         session_factory = get_session_factory()

@@ -4,7 +4,7 @@ These wrap production functions; each test patches its production seam so
 the default path is exercised without a real LLM:
 
 - ``make_tool_selector`` → patch ``backend.agent.nodes.call_llm_node``.
-- ``make_extractor`` → patch ``backend.service.extraction.extract_memory``.
+- ``make_extractor`` → patch ``backend.service.ingestion.extraction.extract_memory``.
 - ``make_answer_generator`` → inject a fake provider (no patching needed —
   this is why the factory accepts ``provider``).
 """
@@ -66,7 +66,7 @@ class TestMakeExtractor:
             return canned
 
         monkeypatch.setattr(
-            "backend.service.extraction.extract_memory", fake_extract_memory
+            "backend.service.ingestion.extraction.extract_memory", fake_extract_memory
         )
         extractor = make_extractor()
         assert await extractor("some content") is canned
@@ -132,7 +132,7 @@ class TestMakeE2ERunner:
             ]
 
         monkeypatch.setattr(
-            "backend.service.retrieval.query_memories", fake_query_memories
+            "backend.service.retrieval.retrieval.query_memories", fake_query_memories
         )
         provider = FakeStreamingProvider(["答案是 pgvector"])
         runner = make_e2e_runner(top_k=5, retrieval_mode="memory", provider=provider)
@@ -155,7 +155,7 @@ class TestMakeE2ERunner:
 
     @pytest.mark.asyncio
     async def test_chunk_mode_wraps_as_doc(self, monkeypatch) -> None:
-        from backend.service.retrieval import RetrievalResult
+        from backend.service.retrieval.retrieval import RetrievalResult
 
         async def fake_retrieve_hybrid(query, top_k=5):
             return [
@@ -167,7 +167,7 @@ class TestMakeE2ERunner:
             ]
 
         monkeypatch.setattr(
-            "backend.service.retrieval.retrieve_hybrid", fake_retrieve_hybrid
+            "backend.service.retrieval.retrieval.retrieve_hybrid", fake_retrieve_hybrid
         )
         provider = FakeStreamingProvider(["分块"])
         runner = make_e2e_runner(top_k=5, retrieval_mode="chunk", provider=provider)
@@ -187,7 +187,7 @@ class TestMakeE2ERunner:
             return []
 
         monkeypatch.setattr(
-            "backend.service.retrieval.query_memories", fake_query_memories
+            "backend.service.retrieval.retrieval.query_memories", fake_query_memories
         )
         provider = FakeStreamingProvider(["没有找到"])
         outcome = await make_e2e_runner(provider=provider)("q")

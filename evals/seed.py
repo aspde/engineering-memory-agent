@@ -69,7 +69,7 @@ async def _clear_memories() -> int:
 
 async def _seed_chunks(seeds: Sequence[SeedMemory]) -> int:
     """Write each seed memory's content as one chunk. Returns count written."""
-    from backend.service.retrieval import write_chunks
+    from backend.service.retrieval.retrieval import write_chunks
 
     total = 0
     # One document_id for all seeds — keeps the seed corpus identifiable and

@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from backend.model.llm import LLMStructuredError
+from backend.providers.llm import LLMStructuredError
 from backend.service.structured import chat_structured
 from backend.shared.resilience import CircuitOpenError
 

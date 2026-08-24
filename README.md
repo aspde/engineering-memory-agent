@@ -55,7 +55,7 @@ cd frontend && npm run dev
 
 ```
 ema/
-├── backend/            # FastAPI + LangGraph Agent (api/agent/service/shared/db)
+├── backend/            # FastAPI + LangGraph Agent (api/runner/agent/service/providers/shared/db)
 ├── frontend/           # React + TypeScript + Vite SPA
 ├── tests/              # unit / integration / api
 ├── docs/               # 设计文档 & ADR

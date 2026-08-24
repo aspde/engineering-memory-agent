@@ -100,7 +100,7 @@ async def evaluate_item(item: dict[str, Any]) -> dict[str, Any]:
     ``seed_id`` was stamped at seed time (``evals/seed.py``), so we can
     map each ranked row back to its seed without any UUID coupling.
     """
-    from backend.service.retrieval import query_memories
+    from backend.service.retrieval.retrieval import query_memories
 
     target = str(item["seed_ids"][0])
     distractor = str(item["distractor_seed_ids"][0])

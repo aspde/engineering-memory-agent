@@ -56,7 +56,7 @@ def _load_baseline() -> dict[str, float]:
 
 async def _run_arm(*, use_function_calling: bool) -> dict[str, float]:
     """Run the extraction suite with the tool channel on/off."""
-    import backend.service.extraction as ext_mod
+    import backend.service.ingestion.extraction as ext_mod
 
     items = load_extraction_items()
     if not use_function_calling:

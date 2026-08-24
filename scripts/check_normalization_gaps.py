@@ -1,7 +1,7 @@
 """Check for entity-normalization gaps — memories that extracted entities
 but have no ``memory_entities`` link.
 
-Entity normalisation (``backend.service.entity.normalize_entities``) runs
+Entity normalisation (``backend.service.ingestion.entity.normalize_entities``) runs
 fire-and-forget after a memory write (``backend.service.memory``), so a
 failure — LLM/embedding timeout, connection-pool exhaustion — is logged and
 skipped silently: the memory is stored but its entities stay unlinked, and

@@ -57,7 +57,7 @@ Phase 4 的目标不是增加新能力，而是**为高频场景预组装解决�
 每个场景是一个自包含的 `.py` 文件，结构统一：
 
 ```
-backend/service/scenarios/
+backend/runner/scenarios/
   __init__.py          # 注册所有场景
   base.py               # Scenario 抽象（可选——四个场景足够简单，直接函数即可）
   postmortem.py         # compose_postmortem(incident_memory_id) → prompt + tools
@@ -83,25 +83,25 @@ backend/service/scenarios/
 SCENARIOS: dict[str, dict] = {
     "postmortem": {
         "name": "故障复盘",
-        "compose": "backend.service.scenarios.postmortem.compose_postmortem",
+        "compose": "backend.runner.scenarios.postmortem.compose_postmortem",
         "triggers": ["pingcode_workitem_resolved", "manual"],
         "status": "active",
     },
     "code_review": {
         "name": "代码审查助手",
-        "compose": "backend.service.scenarios.code_review.compose_review_context",
+        "compose": "backend.runner.scenarios.code_review.compose_review_context",
         "triggers": ["pr_opened", "manual"],
         "status": "active",
     },
     "onboarding": {
         "name": "新人 Onboarding",
-        "compose": "backend.service.scenarios.onboarding.compose_onboarding_guide",
+        "compose": "backend.runner.scenarios.onboarding.compose_onboarding_guide",
         "triggers": ["manual"],
         "status": "active",
     },
     "tech_debt": {
         "name": "技术债雷达",
-        "compose": "backend.service.scenarios.tech_debt.compose_tech_debt_report",
+        "compose": "backend.runner.scenarios.tech_debt.compose_tech_debt_report",
         "triggers": ["weekly_patrol", "manual"],
         "status": "active",
     },

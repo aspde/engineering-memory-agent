@@ -18,7 +18,7 @@ from prometheus_client import Counter, Gauge, Histogram, Summary
 
 import backend.agent.nodes as _nodes
 import backend.api.ratelimit as _ratelimit
-import backend.service.retrieval as _retrieval
+import backend.service.retrieval.retrieval as _retrieval
 import backend.service.usage as _usage
 import backend.shared.resilience as _resilience
 import backend.shared.runtime_metrics as _runtime_metrics

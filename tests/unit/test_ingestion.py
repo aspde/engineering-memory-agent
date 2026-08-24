@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from backend.service.ingestion import _check_repo_allowed
+from backend.service.ingestion.ingestion import _check_repo_allowed
 
 
 @pytest.fixture(autouse=True)
@@ -25,7 +25,7 @@ def _config():
 class TestCheckRepoAllowed:
     def test_fails_closed_when_no_roots_configured(self, _config, tmp_path) -> None:
         """Empty allow-list (the default) rejects every ingest."""
-        import backend.service.ingestion as mod
+        import backend.service.ingestion.ingestion as mod
 
         _config.repo_allow_roots = ()
         with pytest.raises(ValueError, match="REPO_ALLOW_ROOT"):
@@ -108,7 +108,7 @@ class TestIngestRepoSandbox:
     ) -> None:
         """``ingest_repo`` fails at the sandbox check, before pygit2 touches
         the path — no real repository is needed."""
-        from backend.service.ingestion import ingest_repo
+        from backend.service.ingestion.ingestion import ingest_repo
 
         root = tmp_path / "root"
         root.mkdir()
@@ -121,7 +121,7 @@ class TestIngestRepoSandbox:
 
     @pytest.mark.asyncio
     async def test_ingest_repo_fails_closed_without_config(self, _config, tmp_path) -> None:
-        from backend.service.ingestion import ingest_repo
+        from backend.service.ingestion.ingestion import ingest_repo
 
         _config.repo_allow_roots = ()
         with pytest.raises(ValueError, match="REPO_ALLOW_ROOT"):

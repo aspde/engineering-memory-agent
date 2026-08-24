@@ -13,7 +13,7 @@ class TestRerankLlmConcurrency:
 
     @pytest.mark.asyncio
     async def test_concurrent_llm_calls_capped_by_semaphore(self, monkeypatch) -> None:
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
         from backend.shared.config import config
 
         monkeypatch.setattr(config.llm, "rerank_concurrency", 2)
@@ -47,7 +47,7 @@ class TestRerankLlmConcurrency:
 
     @pytest.mark.asyncio
     async def test_empty_candidates(self) -> None:
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         assert await mod.rerank_llm("query", [], top_k=5) == []
 
@@ -56,7 +56,7 @@ class TestRerankLlmConcurrency:
         """When EVERY candidate's LLM call fails, rerank_llm returns [] — a
         channel-failure signal so callers fall back to the recall ranking
         instead of treating the outage as "nothing is relevant"."""
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         provider = MagicMock()
         provider.chat = AsyncMock(side_effect=RuntimeError("provider down"))
@@ -71,7 +71,7 @@ class TestRerankLlmConcurrency:
     async def test_llm_partial_failure_drops_failed_candidates(self, monkeypatch) -> None:
         """A partial outage is honest: the failed candidate is dropped and the
         surviving scores are trusted — not zeroed into the ranking."""
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         async def _chat(messages, **kwargs):
             if "Text: a" in messages[0]["content"]:
@@ -99,7 +99,7 @@ class TestCrossEncoderFirstLoad:
 
     @pytest.mark.asyncio
     async def test_load_offloaded_to_thread_pool(self, monkeypatch) -> None:
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         offloaded: list = []
 
@@ -122,7 +122,7 @@ class TestCrossEncoderFirstLoad:
 
     @pytest.mark.asyncio
     async def test_empty_candidates(self) -> None:
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         assert await mod.rerank_cross_encoder("q", [], top_k=5) == []
 
@@ -136,29 +136,29 @@ class TestRerankScoreParsing:
     """
 
     def test_bare_float(self) -> None:
-        from backend.service.rerank import _parse_score
+        from backend.service.retrieval.rerank import _parse_score
 
         assert _parse_score("0.85") == 0.85
 
     def test_prose_wrapped(self) -> None:
-        from backend.service.rerank import _parse_score
+        from backend.service.retrieval.rerank import _parse_score
 
         assert _parse_score("Relevance: 0.85") == 0.85
 
     def test_first_number_wins(self) -> None:
-        from backend.service.rerank import _parse_score
+        from backend.service.retrieval.rerank import _parse_score
 
         assert _parse_score("0.3 0.4") == 0.3
 
     def test_garbage_scores_zero(self) -> None:
-        from backend.service.rerank import _parse_score
+        from backend.service.retrieval.rerank import _parse_score
 
         assert _parse_score("not a number") == 0.0
         assert _parse_score("") == 0.0
         assert _parse_score(None) == 0.0  # type: ignore[arg-type]
 
     def test_out_of_range_clamped(self) -> None:
-        from backend.service.rerank import _parse_score
+        from backend.service.retrieval.rerank import _parse_score
 
         assert _parse_score("1.5") == 1.0
         assert _parse_score("-0.2") == 0.0
@@ -168,7 +168,7 @@ class TestRerankScoreParsing:
         """A prose-wrapped score flows through rerank_llm unpunished."""
         from unittest.mock import AsyncMock, MagicMock
 
-        from backend.service import rerank as mod
+        from backend.service.retrieval import rerank as mod
 
         provider = MagicMock()
         provider.chat = AsyncMock(return_value="Relevance: 0.9")

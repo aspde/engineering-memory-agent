@@ -16,8 +16,8 @@ from typing import Any
 from langgraph.types import Command
 
 from backend.db import get_session_factory
-from backend.service.agent_service import get_agent
-from backend.service.patrol_prompts import (
+from backend.runner.agent_service import get_agent
+from backend.runner.patrol_prompts import (
     DAILY_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )

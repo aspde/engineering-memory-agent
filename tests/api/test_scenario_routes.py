@@ -30,7 +30,7 @@ def mock_agent():
     return agent
 
 
-MOCK_AGENT_PATH = "backend.service.agent_service.get_agent"
+MOCK_AGENT_PATH = "backend.runner.agent_service.get_agent"
 
 
 @pytest.fixture(autouse=True)
@@ -41,7 +41,7 @@ def _reset_scenario_slots():
     scenario test that fails mid-run could otherwise leave its slot held and
     skew a later test's concurrency accounting.
     """
-    import backend.service.scenarios as scenarios_mod
+    import backend.runner.scenarios as scenarios_mod
 
     while scenarios_mod._scenario_slots.active > 0:
         scenarios_mod._scenario_slots.release()
@@ -128,7 +128,7 @@ class TestScenarioVisibility:
     """Scenario status filtering."""
 
     def test_inactive_scenario_not_in_list(self, client):
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         original = SCENARIOS["postmortem"]["status"]
         try:
@@ -142,7 +142,7 @@ class TestScenarioVisibility:
 
     def test_beta_scenario_hidden_by_default(self, client):
         """Beta scenarios are hidden unless explicitly requested."""
-        from backend.service.scenarios import SCENARIOS
+        from backend.runner.scenarios import SCENARIOS
 
         original = SCENARIOS["postmortem"]["status"]
         try:
@@ -161,7 +161,7 @@ class TestScenarioTimeout:
 
     async def test_slow_compose_is_timed_out(self, async_client, monkeypatch):
         """A compose function that exceeds the deadline returns 504."""
-        from backend.service.scenarios import postmortem
+        from backend.runner.scenarios import postmortem
         from backend.shared.config import config
 
         async def slow_compose(**kwargs: object) -> str:
@@ -184,7 +184,7 @@ class TestScenarioConcurrency:
 
     async def test_concurrency_cap_rejects_with_503(self, async_client, monkeypatch):
         """A run beyond the cap is refused with 503, and the slot frees after."""
-        from backend.service.scenarios import postmortem
+        from backend.runner.scenarios import postmortem
         from backend.shared.config import config
 
         started = asyncio.Event()

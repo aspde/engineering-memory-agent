@@ -9,7 +9,7 @@ the eval measures production behavior rather than a simplified harness.
   tool roster (real system prompt, real schema serialization, real message
   conversion, real streaming provider call).  Only the *decision* is
   measured — tools are never actually executed.
-- ``make_extractor`` — runs ``backend.service.extraction.extract_memory``
+- ``make_extractor`` — runs ``backend.service.ingestion.extraction.extract_memory``
   (summary + entities + relations with their production prompts).
 - ``make_answer_generator`` — builds the final-answer prompt exactly like
   ``generate_final_node`` does (the ``agent.system`` template with the
@@ -69,7 +69,7 @@ def make_extractor() -> Extractor:
     """Executor that runs the real memory-extraction pipeline."""
 
     async def _extract(content: str) -> dict[str, Any]:
-        from backend.service.extraction import extract_memory
+        from backend.service.ingestion.extraction import extract_memory
 
         return await extract_memory(content)
 
@@ -217,12 +217,12 @@ def make_e2e_runner(
 
     async def _run(query: str) -> E2EOutcome:
         if retrieval_mode == "memory":
-            from backend.service.retrieval import query_memories
+            from backend.service.retrieval.retrieval import query_memories
 
             results = await query_memories(query, top_k=top_k)
             display, source_ids = _format_memory_display(list(results))
         else:
-            from backend.service.retrieval import retrieve_hybrid
+            from backend.service.retrieval.retrieval import retrieve_hybrid
 
             results = await retrieve_hybrid(query, top_k=top_k)
             display, source_ids = _format_chunk_display(list(results))

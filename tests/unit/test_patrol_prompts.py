@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from backend.service.patrol_prompts import (
+from backend.runner.patrol_prompts import (
     DAILY_PATROL_PROMPT,
     WEEKLY_PATROL_PROMPT,
 )

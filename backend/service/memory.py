@@ -16,10 +16,10 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from backend.db import get_session_factory
-from backend.model.llm import LLMStructuredError
+from backend.providers.llm import LLMStructuredError
 from backend.service.embedding_service import get_embedding_provider
-from backend.service.entity import normalize_entities
-from backend.service.extraction import extract_memory
+from backend.service.ingestion.entity import normalize_entities
+from backend.service.ingestion.extraction import extract_memory
 from backend.service.prompts import get_prompt
 from backend.shared.config import current_thread_id
 from backend.shared.resilience import CircuitOpenError

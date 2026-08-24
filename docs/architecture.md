@@ -9,7 +9,9 @@ EMA (Engineering Memory Agent) — 面向研发团队的长期记忆智能体。
 ## High Level Architecture
 
 ```
-User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
+User → Frontend (React) → FastAPI Backend → Runner Layer
+                                                    ↓
+                                        Agent Layer (LangGraph)
                                                     ↓
                                               Memory Layer
                                                     ↓
@@ -26,6 +28,7 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 |-------|-----------|--------|
 | Frontend | React + TypeScript + Vite + Tailwind CSS | 聊天页、记忆库页、HITL 审批流已实现 |
 | Backend | FastAPI + Python 3.12 | 34 个 `/api` 路由 + `/health`/`/metrics` 等应用级端点已实现（含 SSE 流式 + HITL） |
+| Runner | Python（进程内编排） | agent_service / patrol / scheduler / scenarios / event_analysis 已实现 |
 | Agent | LangGraph (手动 StateGraph) | ReAct 循环已实现 (call_llm → tools ⇄ generate_final) |
 | Memory | PostgreSQL + pgvector | 记忆写入/检索/召回统计/去重全链路已实现 |
 | Entity Graph | PostgreSQL + pgvector | 实体归一化、一度关系查询、图谱可视化已实现 |
@@ -36,7 +39,8 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 ## Layer Responsibilities
 
 - **Frontend**: 用户交互、请求提交、结果展示
-- **Backend**: API 接口、请求生命周期、调用 Agent
+- **Backend**: API 接口、请求生命周期、调用 Runner
+- **Runner**: Agent 图生命周期编排（checkpointer、并发槽位、工具选择），单向依赖 api → runner → agent → service → db/providers；`service` 不反向依赖 `runner`
 - **Agent**: ReAct 工具调用循环、状态管理、Tool/Memory 编排
 - **Memory**: 长期记忆管理、检索、上下文构建、召回统计
 - **Storage**: 业务数据 + 向量存储
@@ -92,6 +96,23 @@ User → Frontend (React) → FastAPI Backend → Agent Layer (LangGraph)
 - **Framework**: FastAPI
 - **Async**: async/await + httpx
 
+#### Backend Package Structure
+
+```
+backend/
+  api/            # FastAPI 路由、认证、限流；只调 runner / service，不碰 agent 图
+  runner/         # Agent 运行编排层：agent_service（图生命周期/并发槽位）、patrol、scheduler、scenarios、event_analysis
+  agent/          # LangGraph 单 Agent：state、tools（@tool 薄封装）、nodes、graph
+  service/        # 领域服务：memory、conflicts、usage 等
+    ingestion/    # 摄取管线：chunk → extraction → entity → ingestion
+    retrieval/    # 检索管线：query_rewrite → recall → rerank → retrieval
+  providers/      # LLMProvider / EmbeddingProvider 抽象与各 provider 实现
+  shared/         # config、resilience、runtime_metrics 等横切设施
+  db/             # SQLAlchemy 模型与会话管理
+```
+
+依赖方向单向：`api → runner → agent → service → db/providers`；`service` 不反向依赖 `runner`。
+
 ### API Security (Authentication)
 
 所有 `/api` 路由（含 agent chat、memory 读写、ingest、connectors、patrol、webhooks）共享单一 API key 接入认证，实现于 `backend/api/auth.py`，作为全局依赖挂载在 `backend/api/router.py`（connectors/patrol/webhooks/scenarios 路由另受 ADR-011 的 `*_ENABLED` flag 控制，见上方端点表注释）：
@@ -144,7 +165,7 @@ provider 层内置传输层韧性（`backend/shared/resilience.py`）：
 
 ### Observability (LLM usage tracing)
 
-每次 LLM 调用都通过 provider 层（唯一咽喉点）记录一行观测，落 `llm_usage` 表（`backend/service/usage.py`）：
+每次 LLM 调用都通过 provider 包装层（唯一咽喉点）记录一行观测，落 `llm_usage` 表（`backend/service/usage.py`，由包装各 provider 的 `backend/service/llm_service.py` 打点）：
 
 - **数据流**：provider 方法内同步、轻量地把观测值 append 进内存缓冲（线程安全、有界，溢出丢最旧并告警）→ 后台 flusher（`backend/main.py` lifespan 启动）每 `USAGE_FLUSH_INTERVAL_SECONDS`（默认 10s）批量 INSERT；进程优雅退出时再 flush 一次。观测代码绝不阻塞/拖垮 LLM 热路径，落库失败仅告警。同时为每次调用打一条带 trace_id 的结构化 `llm_call ...` 日志。
 - **trace 链路**：入口处设置 `current_trace_id` contextvar（agent 的 `/chat`、`/chat/stream` 每请求一个新 uuid；patrol 用 `patrol_id`），provider 读取后为每条记录盖上 trace_id，`/api/usage/trace/{id}` 可端到端回放一次 agent 运行。会话维度由 `thread_id` 关联（webhook/连接器等未设 trace 的后台任务仍按 scenario 记录）。

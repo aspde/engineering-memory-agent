@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
-from backend.service.scenarios import (
+from backend.runner.scenarios import (
     SCENARIOS,
     _release_scenario_slot,
     _try_acquire_scenario_slot,
@@ -116,7 +116,7 @@ async def run_scenario(name: str, body: ScenarioRunRequest | None = None):
             ) from exc
 
         # Persist the client thread_id through the compose chain via ContextVar.
-        from backend.service.scenarios import scenario_thread_id
+        from backend.runner.scenarios import scenario_thread_id
 
         tid = body.thread_id or ""
         if tid:

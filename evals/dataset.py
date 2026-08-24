@@ -304,7 +304,7 @@ def make_chunk_retriever(
     Returns results as ``[{"content": str, "score": float, "metadata": dict}]``
     with ``match_field="content"``.
     """
-    from backend.service.retrieval import retrieve
+    from backend.service.retrieval.retrieval import retrieve
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         results = await retrieve(
@@ -340,7 +340,7 @@ def make_memory_retriever(
     with ``match_field="summary"``.  Ranking is raw similarity; recalls are
     recorded as metadata.
     """
-    from backend.service.retrieval import query_memories
+    from backend.service.retrieval.retrieval import query_memories
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         return await query_memories(
@@ -366,7 +366,7 @@ def make_vector_retriever(*, threshold: float = 0.0) -> RetrieverAdapter:
     BGE-M3 dense recall, or when cross-encoder CPU latency (~50s/query) is
     prohibitive. Returns chunks-table rows with ``match_field="content"``.
     """
-    from backend.service.retrieval import embed_query, vector_search
+    from backend.service.retrieval.retrieval import embed_query, vector_search
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         vec = await embed_query(query)
@@ -387,7 +387,7 @@ def make_hybrid_retriever(
     similarity, sparse jaccard) without cross-encoder — used to measure
     rerank's contribution.
     """
-    from backend.service.retrieval import retrieve_hybrid
+    from backend.service.retrieval.retrieval import retrieve_hybrid
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         results = await retrieve_hybrid(
@@ -418,7 +418,7 @@ def make_rewrite_retriever(
     Returns chunks-table rows (``content`` field).  Costs one extra LLM
     call for rewriting; fails safe to single-query on rewrite error.
     """
-    from backend.service.retrieval import retrieve_multi_query
+    from backend.service.retrieval.retrieval import retrieve_multi_query
 
     async def _fn(query: str, top_k: int) -> list[dict[str, Any]]:
         results = await retrieve_multi_query(

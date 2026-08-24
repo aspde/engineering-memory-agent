@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from backend.agent.tool_envelope import envelope_display
-from backend.service.agent_service import get_agent
+from backend.runner.agent_service import get_agent
 from backend.service.json_extraction import extract_json_object
 from backend.service.notification import send_feishu_message
 from backend.shared.config import (
@@ -247,8 +247,9 @@ async def persist_analysis(delivery_id: str, record: dict) -> None:
     already terminal; losing the analysis column must not crash the task
     after the work was done.
     """
-    from backend.db import get_session_factory
     from sqlalchemy import text
+
+    from backend.db import get_session_factory
 
     try:
         session_factory = get_session_factory()

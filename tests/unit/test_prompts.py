@@ -108,7 +108,7 @@ class TestModuleReExports:
     """patrol / scenario modules re-export the registry text unchanged."""
 
     def test_patrol_constants_match_registry(self) -> None:
-        from backend.service.patrol_prompts import (
+        from backend.runner.patrol_prompts import (
             DAILY_PATROL_PROMPT,
             WEEKLY_PATROL_PROMPT,
         )
@@ -117,10 +117,10 @@ class TestModuleReExports:
         assert WEEKLY_PATROL_PROMPT == get_prompt("patrol.weekly")[1]
 
     def test_scenario_constants_match_registry(self) -> None:
-        from backend.service.scenarios.code_review import CODE_REVIEW_SYSTEM_PROMPT
-        from backend.service.scenarios.onboarding import ONBOARDING_SYSTEM_PROMPT
-        from backend.service.scenarios.postmortem import POSTMORTEM_SYSTEM_PROMPT
-        from backend.service.scenarios.tech_debt import TECH_DEBT_SYSTEM_PROMPT
+        from backend.runner.scenarios.code_review import CODE_REVIEW_SYSTEM_PROMPT
+        from backend.runner.scenarios.onboarding import ONBOARDING_SYSTEM_PROMPT
+        from backend.runner.scenarios.postmortem import POSTMORTEM_SYSTEM_PROMPT
+        from backend.runner.scenarios.tech_debt import TECH_DEBT_SYSTEM_PROMPT
 
         assert CODE_REVIEW_SYSTEM_PROMPT == get_prompt("scenario.code_review")[1]
         assert ONBOARDING_SYSTEM_PROMPT == get_prompt("scenario.onboarding")[1]
@@ -129,8 +129,8 @@ class TestModuleReExports:
 
     def test_service_prompts_match_registry(self) -> None:
         import backend.service.memory as memory_mod
-        import backend.service.query_rewrite as qr_mod
-        from backend.service.extraction import (
+        import backend.service.retrieval.query_rewrite as qr_mod
+        from backend.service.ingestion.extraction import (
             _ENTITIES_SCHEMA,  # noqa: F401  (module imports fine)
         )
 

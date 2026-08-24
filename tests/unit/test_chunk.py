@@ -1,6 +1,6 @@
 """Tests for chunk strategies."""
 
-from backend.service.chunk import chunk_code, chunk_text
+from backend.service.ingestion.chunk import chunk_code, chunk_text
 
 
 class TestTextChunk:

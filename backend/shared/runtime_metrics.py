@@ -19,7 +19,7 @@ ones:
   open/closed state, how many times the breaker tripped, and how many
   calls were rejected while open.
 - **Agent concurrency** — the interactive-run slot counter in
-  ``backend/service/agent_service.py`` reports in-flight runs and the 503
+  ``backend/runner/agent_service.py`` reports in-flight runs and the 503
   rejections (the ``MAX_AGENT_CONCURRENCY`` cap).
 - **ReAct loop** — ``backend/api/routes/agent_routes.py`` observes the
   per-run step count, the same over-call signal the task eval measures

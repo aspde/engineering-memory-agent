@@ -3,8 +3,8 @@
 Two callers bound in-flight work with the same pattern — a thread-locked
 counter whose cap is read live from config:
 
-- interactive agent runs (``backend/service/agent_service.py``)
-- scenario runs (``backend/service/scenarios/__init__.py``)
+- interactive agent runs (``backend/runner/agent_service.py``)
+- scenario runs (``backend/runner/scenarios/__init__.py``)
 
 Both stay plain counters rather than ``asyncio.Semaphore`` so they are safe
 across pytest's function-scoped event loops (a semaphore binds to the loop

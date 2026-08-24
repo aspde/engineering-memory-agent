@@ -13,20 +13,20 @@ import pytest
 
 
 class TestInvokeScenarioAgent:
-    """The shared agent-invocation helper (backend.service.scenarios)."""
+    """The shared agent-invocation helper (backend.runner.scenarios)."""
 
     @pytest.mark.asyncio
     async def test_bypasses_approval_gate_for_automated_runs(self) -> None:
         """Automated scenarios pass an empty approval set — no human is
         attached to a scheduled / manual-trigger run, so write tools must not
         pause on approval."""
-        from backend.service.scenarios import invoke_scenario_agent
+        from backend.runner.scenarios import invoke_scenario_agent
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {"final_response": "ok", "messages": []}
 
         with patch(
-            "backend.service.agent_service.get_agent", return_value=mock_agent
+            "backend.runner.agent_service.get_agent", return_value=mock_agent
         ) as mock_get_agent:
             result = await invoke_scenario_agent("system prompt", "user message")
 
@@ -37,7 +37,7 @@ class TestInvokeScenarioAgent:
     async def test_returns_interrupt_message_not_fabricated_result(self) -> None:
         """A HITL interrupt (conflict pause) surfaces as an explicit message —
         never as a silent fallback to the last AIMessage."""
-        from backend.service.scenarios import invoke_scenario_agent
+        from backend.runner.scenarios import invoke_scenario_agent
 
         interrupt = MagicMock()
         interrupt.value = {
@@ -59,7 +59,7 @@ class TestInvokeScenarioAgent:
         }
 
         with patch(
-            "backend.service.agent_service.get_agent", return_value=mock_agent
+            "backend.runner.agent_service.get_agent", return_value=mock_agent
         ):
             result = await invoke_scenario_agent("system prompt", "user message")
 
@@ -70,13 +70,13 @@ class TestInvokeScenarioAgent:
     @pytest.mark.asyncio
     async def test_returns_error_message_on_exception(self) -> None:
         """Agent failures return an error message, not an exception."""
-        from backend.service.scenarios import invoke_scenario_agent
+        from backend.runner.scenarios import invoke_scenario_agent
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.side_effect = RuntimeError("boom")
 
         with patch(
-            "backend.service.agent_service.get_agent", return_value=mock_agent
+            "backend.runner.agent_service.get_agent", return_value=mock_agent
         ):
             result = await invoke_scenario_agent("system prompt", "user message")
 
@@ -86,7 +86,7 @@ class TestInvokeScenarioAgent:
     @pytest.mark.asyncio
     async def test_falls_back_to_last_message_when_no_final_response(self) -> None:
         """The last-message fallback is preserved for the normal path."""
-        from backend.service.scenarios import invoke_scenario_agent
+        from backend.runner.scenarios import invoke_scenario_agent
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {
@@ -101,7 +101,7 @@ class TestInvokeScenarioAgent:
         }
 
         with patch(
-            "backend.service.agent_service.get_agent", return_value=mock_agent
+            "backend.runner.agent_service.get_agent", return_value=mock_agent
         ):
             result = await invoke_scenario_agent("system prompt", "user message")
 

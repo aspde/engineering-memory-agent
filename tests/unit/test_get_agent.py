@@ -11,13 +11,13 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from backend.service.agent_service import APPROVAL_REQUIRED_TOOLS, get_agent
+from backend.runner.agent_service import APPROVAL_REQUIRED_TOOLS, get_agent
 
 
 class TestGetAgentApprovalSet:
     def test_none_falls_back_to_default_approval_set(self):
         with patch(
-            "backend.service.agent_service.build_agent_graph"
+            "backend.runner.agent_service.build_agent_graph"
         ) as mock_build:
             mock_build.return_value = "graph"
             get_agent()
@@ -30,7 +30,7 @@ class TestGetAgentApprovalSet:
         """Unattended runs pass frozenset() and must get exactly that —
         a re-armed approval gate would pause an agent no human watches."""
         with patch(
-            "backend.service.agent_service.build_agent_graph"
+            "backend.runner.agent_service.build_agent_graph"
         ) as mock_build:
             mock_build.return_value = "graph"
             get_agent(approval_required_tools=frozenset())
@@ -40,7 +40,7 @@ class TestGetAgentApprovalSet:
         from backend.agent.nodes import CHAT_APPROVAL_TOOLS
 
         with patch(
-            "backend.service.agent_service.build_agent_graph"
+            "backend.runner.agent_service.build_agent_graph"
         ) as mock_build:
             mock_build.return_value = "graph"
             get_agent(approval_required_tools=CHAT_APPROVAL_TOOLS)

@@ -350,7 +350,7 @@ class AppConfig:
     # number of concurrent scenarios would together saturate the provider rate
     # limit and can only be stopped by a restart.  Beyond this cap the scenario
     # endpoint answers 503 (refuse, not queue) — see scenario_routes' slot
-    # counter in ``backend.service.scenarios``.
+    # counter in ``backend.runner.scenarios``.
     max_scenario_concurrency: int = field(
         default_factory=lambda: int(os.getenv("MAX_SCENARIO_CONCURRENCY", "2"))
     )

@@ -17,7 +17,7 @@ Phase 3 主动 Agent 需要定时触发巡检（每日 / 每周 / 技术债扫�
 
 ## 决策
 
-**巡检调度器内嵌 FastAPI 主进程**（`backend/service/scheduler.py` 的 `PatrolScheduler`），在 `backend/main.py` 的 lifespan 中启动、shutdown 时取消。不引入 APScheduler、Celery、Redis、Bull 等任何任务调度依赖，不使用持久化任务队列。
+**巡检调度器内嵌 FastAPI 主进程**（`backend/runner/scheduler.py` 的 `PatrolScheduler`），在 `backend/main.py` 的 lifespan 中启动、shutdown 时取消。不引入 APScheduler、Celery、Redis、Bull 等任何任务调度依赖，不使用持久化任务队列。
 
 实现形态（2026-08-23 起为**墙钟短轮询**）：
 
@@ -55,7 +55,7 @@ async def _loop():
 
 调度循环只在进程存活期间起作用——服务在计划时间点停机（重启 / 部署 / 崩溃）时，那个 slot 不会被触发。
 
-**缓解**：启动时用 `should_catch_up()`（[scheduler.py](../../backend/service/scheduler.py)）对比最近调度 slot 与 `patrol_logs` 历史——有历史且该 slot 之后没跑过，就在后台补跑一次（trigger 记为 `cron_catchup`）。历史 guard 保证全新安装不会在首次启动时误触发巡检。补跑与定时跑之间的并发重叠由 `run_patrol` 的 overlap guard 防止。
+**缓解**：启动时用 `should_catch_up()`（[scheduler.py](../../backend/runner/scheduler.py)）对比最近调度 slot 与 `patrol_logs` 历史——有历史且该 slot 之后没跑过，就在后台补跑一次（trigger 记为 `cron_catchup`）。历史 guard 保证全新安装不会在首次启动时误触发巡检。补跑与定时跑之间的并发重叠由 `run_patrol` 的 overlap guard 防止。
 
 ### 代价 2：单进程故障导致巡检不可用
 

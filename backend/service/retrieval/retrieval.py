@@ -418,7 +418,7 @@ async def _rerank_and_filter(
     if not use_llm_rerank and not use_cross_encoder:
         return _rank_by_similarity(candidates, top_k)
 
-    from backend.service.rerank import rerank_cross_encoder, rerank_llm
+    from backend.service.retrieval.rerank import rerank_cross_encoder, rerank_llm
 
     reranker = rerank_llm if use_llm_rerank else rerank_cross_encoder
     ranked = await reranker(
@@ -677,7 +677,7 @@ async def retrieve_multi_query(
     LLM call (~500ms) for the rewrite; fails safe to single-query if the
     rewrite errors.
     """
-    from backend.service.query_rewrite import rewrite_query
+    from backend.service.retrieval.query_rewrite import rewrite_query
 
     queries = await rewrite_query(query)
 
@@ -771,7 +771,7 @@ async def query_memories(
     ``_RERANK_FLOOR`` filtering applies only on an explicit rerank path; the
     default path trusts ``threshold`` (which already gated recall).
     """
-    from backend.service.rerank import rerank_cross_encoder, rerank_llm
+    from backend.service.retrieval.rerank import rerank_cross_encoder, rerank_llm
 
     t0 = time.perf_counter()
 
@@ -884,7 +884,7 @@ async def query_memories(
     # N+1 writes).  A tracking failure must not fail the search — it is
     # metadata, not a ranking input.
     try:
-        from backend.service.recall import record_recalls
+        from backend.service.retrieval.recall import record_recalls
 
         await record_recalls([candidates[idx]["id"] for idx, _ in surviving])
     except Exception:

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from backend.runner.scenarios import invoke_scenario_agent
 from backend.service.prompts import get_prompt
-from backend.service.scenarios import invoke_scenario_agent
 
 # Prompt text lives in the central registry; re-exported for compatibility.
 ONBOARDING_SYSTEM_PROMPT = get_prompt("scenario.onboarding")[1]

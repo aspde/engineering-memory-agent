@@ -45,7 +45,7 @@ async def invoke_scenario_agent(
     """
     import uuid
 
-    from backend.service.agent_service import get_agent
+    from backend.runner.agent_service import get_agent
 
     # Scenario runs are unattended (manual trigger / scheduled scan) — no
     # human can approve a paused write/ingest call, so pass an empty approval
@@ -137,28 +137,28 @@ SCENARIOS: dict[str, dict[str, Any]] = {
     "postmortem": {
         "name": "故障复盘",
         "description": "从故障记录自动生成复盘草稿，包含时间线、相似故障匹配和根因分析",
-        "compose": "backend.service.scenarios.postmortem.compose_postmortem",
+        "compose": "backend.runner.scenarios.postmortem.compose_postmortem",
         "triggers": ["manual"],
         "status": "active",
     },
     "code_review": {
         "name": "代码审查助手",
         "description": "分析 PR 变更文件，标记高风险代码和历史故障关联，检查与已有决策的一致性",
-        "compose": "backend.service.scenarios.code_review.compose_review_context",
+        "compose": "backend.runner.scenarios.code_review.compose_review_context",
         "triggers": ["manual"],
         "status": "active",
     },
     "onboarding": {
         "name": "新人 Onboarding",
         "description": "生成项目结构化概览、推荐阅读顺序和决策溯源",
-        "compose": "backend.service.scenarios.onboarding.compose_onboarding_guide",
+        "compose": "backend.runner.scenarios.onboarding.compose_onboarding_guide",
         "triggers": ["manual"],
         "status": "active",
     },
     "tech_debt": {
         "name": "技术债雷达",
         "description": "扫描未解决的临时方案、文档缺口，自动检测已解决的 workaround",
-        "compose": "backend.service.scenarios.tech_debt.compose_tech_debt_report",
+        "compose": "backend.runner.scenarios.tech_debt.compose_tech_debt_report",
         "triggers": ["weekly_patrol", "manual"],
         "status": "active",
     },

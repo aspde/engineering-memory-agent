@@ -20,7 +20,7 @@ from sqlalchemy import text
 from backend.agent.nodes import CHAT_APPROVAL_TOOLS
 from backend.agent.tool_envelope import parse_tool_envelope
 from backend.db import get_session_factory
-from backend.service.agent_service import (
+from backend.runner.agent_service import (
     CHAT_LLM_TOOLS,
     _release_agent_slot,
     _try_acquire_agent_slot,

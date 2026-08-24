@@ -47,7 +47,7 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 
 每个用户轮次的 ReAct 循环有硬性上限：`step_count` 达到 `MAX_AGENT_STEPS`（默认 5，`config.max_agent_steps`）时，`_make_route_after_call_llm`（`backend/agent/graph.py`）强制把路由导向 `generate_final`，而不是继续循环。`step_count` 在每一轮新用户消息到达时重置（`call_llm_node` 通过 `_is_new_user_turn` 归零），所以上限约束的是**单轮内的工具循环**，不跨轮次累积。
 
-选择「到顶即收束」而不是「到顶报错」：LLM 偶尔会在复杂任务上多转几圈，强行报错会中断本来可以完成的回答；导向 `generate_final` 则把已拿到的工具结果收束成最终回答。默认 5 是交互场景的折中——大多数轮次 1-2 步即完成，5 步足以覆盖多工具链路（搜索 → 实体查询 → 写入），同时把单轮 LLM 调用成本控制在有界范围。自动化巡检（patrol）按类型放宽到 15/20 步（`backend/service/patrol.py` 的 `_PATROL_MAX_STEPS`），因为全量扫描需要的搜索步数远超交互轮次。
+选择「到顶即收束」而不是「到顶报错」：LLM 偶尔会在复杂任务上多转几圈，强行报错会中断本来可以完成的回答；导向 `generate_final` 则把已拿到的工具结果收束成最终回答。默认 5 是交互场景的折中——大多数轮次 1-2 步即完成，5 步足以覆盖多工具链路（搜索 → 实体查询 → 写入），同时把单轮 LLM 调用成本控制在有界范围。自动化巡检（patrol）按类型放宽到 15/20 步（`backend/runner/patrol.py` 的 `_PATROL_MAX_STEPS`），因为全量扫描需要的搜索步数远超交互轮次。
 
 ### 为什么 Tool 返回 string
 
@@ -135,7 +135,7 @@ backend/
     nodes.py    # call_llm_node, check_approval_node, check_conflict_node, generate_final_node
     graph.py    # build_agent_graph(), get_default_agent()
   api/routes/agent_routes.py    # POST /api/agent/chat
-  service/agent_service.py      # get_agent(), get_agent_for_thread()
+  runner/agent_service.py       # get_agent(), get_agent_for_thread()
 ```
 
 ## 关键约束

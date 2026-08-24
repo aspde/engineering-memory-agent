@@ -13,17 +13,17 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from backend.db import get_session_factory
+from backend.runner.patrol import (
+    VALID_PATROL_TYPES,
+    get_patrol_prompt,
+    run_patrol,
+)
 from backend.service.conflicts import (
     build_patrol_deferred,
     load_patrol_pair,
     persist_patrol_conflict,
 )
 from backend.service.memory import resolve_conflict
-from backend.service.patrol import (
-    VALID_PATROL_TYPES,
-    get_patrol_prompt,
-    run_patrol,
-)
 
 logger = logging.getLogger(__name__)
 

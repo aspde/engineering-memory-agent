@@ -295,7 +295,7 @@ async def _process_delivery(
         # analysis — there is nothing meaningful to match against history.
         if delivery_terminal:
             try:
-                from backend.service.event_analysis import EventContext, maybe_analyze_event
+                from backend.runner.event_analysis import EventContext, maybe_analyze_event
 
                 await maybe_analyze_event(
                     EventContext(

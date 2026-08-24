@@ -8,8 +8,8 @@
     "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b"
   },
   "agent.system": {
-    "version": "5",
-    "sha256": "37a76130c025ed2110ba537fda8d52762fba08a04025c262cbb220b7c947c1fd"
+    "version": "6",
+    "sha256": "7ef8ab2e73b50045a185f706fe4c119917f8ad0662c5e3c5178f0a194454d64c"
   },
   "event.ci_failure": {
     "version": "1",

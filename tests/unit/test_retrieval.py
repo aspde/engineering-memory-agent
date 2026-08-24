@@ -20,7 +20,7 @@ def _row(id: str, content: str, meta: dict | None = None, chunk_index: int = 0):
     Includes a ``tokens`` field (jieba segmentation) to mirror what the
     DB-side ``sparse_search`` query returns after the GIN-index migration.
     """
-    from backend.service.retrieval import _tokenize
+    from backend.service.retrieval.retrieval import _tokenize
 
     r = MagicMock()
     r._mapping = {
@@ -62,7 +62,7 @@ class TestTokenize:
     """The jieba-based tokenizer is the core of sparse_search."""
 
     def test_chinese_segmented(self) -> None:
-        from backend.service.retrieval import _tokenize
+        from backend.service.retrieval.retrieval import _tokenize
 
         tokens = _tokenize("为什么用 pgvector 做向量检索")
         # Chinese is segmented into multi-char tokens; stopwords dropped
@@ -74,13 +74,13 @@ class TestTokenize:
         assert len(tokens) > 0
 
     def test_stopwords_dropped(self) -> None:
-        from backend.service.retrieval import _tokenize
+        from backend.service.retrieval.retrieval import _tokenize
 
         tokens = _tokenize("的 了 是 在")
         assert tokens == set()
 
     def test_ascii_single_char_kept(self) -> None:
-        from backend.service.retrieval import _tokenize
+        from backend.service.retrieval.retrieval import _tokenize
 
         # Single ASCII chars (e.g. variable names) carry signal — kept.
         tokens = _tokenize("variable c")
@@ -88,13 +88,13 @@ class TestTokenize:
         assert "variable" in tokens
 
     def test_empty_string(self) -> None:
-        from backend.service.retrieval import _tokenize
+        from backend.service.retrieval.retrieval import _tokenize
 
         assert _tokenize("") == set()
 
     def test_tokenize_chunks_batch(self) -> None:
         """_tokenize_chunks tokenizes each chunk independently, in order."""
-        from backend.service.retrieval import _tokenize, _tokenize_chunks
+        from backend.service.retrieval.retrieval import _tokenize, _tokenize_chunks
 
         batches = _tokenize_chunks(["pgvector 向量检索", "的 了 是", "variable c"])
         assert len(batches) == 3
@@ -111,7 +111,7 @@ class TestTokenize:
         """
         import threading
 
-        from backend.service.retrieval import _tokenize
+        from backend.service.retrieval.retrieval import _tokenize
 
         sample = "pgvector 向量检索 和 PostgreSQL 的 embedding 支持"
         results: list[set[str]] = []
@@ -138,7 +138,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_chinese_query_rescues_keyword_overlap(self) -> None:
         """A Chinese query with shared keywords should rank matching chunks."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [
             _row("c1", "PostgresSaver Windows 兼容性问题导致 checkpoint 写入失败"),
@@ -158,7 +158,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_no_overlap_returns_empty(self) -> None:
         """A query sharing no tokens with any chunk returns nothing."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [_row("c1", "完全无关的内存内容关于饮食偏好")]
         with patch.object(
@@ -170,7 +170,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_stopword_only_query_returns_empty(self) -> None:
         """A query that tokenizes to nothing (all stopwords) short-circuits."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [_row("c1", "some chunk")]
         with patch.object(
@@ -182,7 +182,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_empty_db_returns_empty(self) -> None:
         """No chunks in DB → empty result."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         with patch.object(
             mod, "get_session_factory", return_value=_mock_session_factory([])
@@ -193,7 +193,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_top_k_limit(self) -> None:
         """Result count respects top_k even when more chunks match."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [
             _row(f"c{i}", f"pgvector 向量检索 chunk {i}") for i in range(10)
@@ -210,7 +210,7 @@ class TestSparseSearch:
     async def test_overlap_fetch_is_limit_capped(self) -> None:
         """Stage-1 overlap fetch carries a LIMIT so a hot token can't pull
         an unbounded hit set into Python."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [_row("c1", "pgvector 向量检索 chunk")]
         mock_session = AsyncMock()
@@ -234,7 +234,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_ranking_descending_by_jaccard(self) -> None:
         """Chunks with higher token overlap rank higher."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [
             # c1 shares all query tokens → highest Jaccard
@@ -255,7 +255,7 @@ class TestSparseSearch:
     @pytest.mark.asyncio
     async def test_result_shape(self) -> None:
         """Returned dicts carry id/content/meta/chunk_index/rank."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         rows = [_row("c1", "pgvector 向量检索", {"doc": "a.py"}, 2)]
         with patch.object(
@@ -274,7 +274,7 @@ class TestRetrieveHybrid:
     """Union/dedup/fallback orchestration in retrieve_hybrid."""
 
     def _patch_sources(self, monkeypatch, dense, sparse):
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
         monkeypatch.setattr(mod, "vector_search", AsyncMock(return_value=dense))
@@ -282,7 +282,7 @@ class TestRetrieveHybrid:
 
     @pytest.mark.asyncio
     async def test_union_dedup_by_chunk_id(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1 dense", "meta": {}, "similarity": 0.8},
@@ -295,7 +295,7 @@ class TestRetrieveHybrid:
         ]
         self._patch_sources(monkeypatch, dense, sparse)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9), (1, 0.8), (2, 0.2)]),
         )
 
@@ -309,7 +309,7 @@ class TestRetrieveHybrid:
         """A chunk in BOTH sets contributes BOTH ranks to its RRF score —
         not the old max(dense, sparse), where the dense-only score would
         have ignored the sparse rank entirely."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.5}]
         sparse = [{"id": "c1", "content": "c1", "meta": {}, "rank": 0.9}]
@@ -331,7 +331,7 @@ class TestRetrieveHybrid:
         if the default flips back, ``rerank_cross_encoder`` (mocked to
         raise) would be invoked and this test would error.
         """
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.7},
@@ -340,7 +340,7 @@ class TestRetrieveHybrid:
         sparse = [{"id": "c2", "content": "c2", "meta": {}, "rank": 0.6}]
         self._patch_sources(monkeypatch, dense, sparse)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("rerank must not run by default")),
         )
 
@@ -355,7 +355,7 @@ class TestRetrieveHybrid:
 
     @pytest.mark.asyncio
     async def test_skip_rerank_sorts_by_rrf(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.7},
@@ -377,7 +377,7 @@ class TestRetrieveHybrid:
 
     @pytest.mark.asyncio
     async def test_floor_filters_below_threshold(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -385,7 +385,7 @@ class TestRetrieveHybrid:
         ]
         self._patch_sources(monkeypatch, dense, [])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9), (1, 0.1)]),
         )
 
@@ -400,7 +400,7 @@ class TestRetrieveHybrid:
         """Same fallback on the hybrid path: an LLM rerank channel failure
         (empty list = every candidate's call failed) returns the recall-ranked
         union instead of []."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -409,7 +409,7 @@ class TestRetrieveHybrid:
         sparse = [{"id": "c3", "content": "c3", "meta": {}, "rank": 0.9}]
         self._patch_sources(monkeypatch, dense, sparse)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[]),
         )
 
@@ -422,7 +422,7 @@ class TestRetrieveHybrid:
 
     @pytest.mark.asyncio
     async def test_no_candidates_returns_empty(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         self._patch_sources(monkeypatch, [], [])
 
@@ -433,7 +433,7 @@ class TestRetrieveHybrid:
     async def test_dense_recall_applies_recall_threshold(self, monkeypatch) -> None:
         """The dense recall must pass ``_RECALL_THRESHOLD`` to vector_search
         so garbage queries (cosine ≈ 0) are filtered before RRF ranking."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         vs = AsyncMock(return_value=[])
         monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
@@ -451,7 +451,7 @@ class TestRetrieve:
     and LLM rerank are explicit opt-ins."""
 
     def _patch_sources(self, monkeypatch, dense):
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
         monkeypatch.setattr(mod, "vector_search", AsyncMock(return_value=dense))
@@ -460,7 +460,7 @@ class TestRetrieve:
     async def test_default_skips_cross_encoder(self, monkeypatch) -> None:
         """Default read path ranks by similarity and must NOT load the
         cross-encoder (mocked to raise)."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -468,7 +468,7 @@ class TestRetrieve:
         ]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("rerank must not run by default")),
         )
 
@@ -481,7 +481,7 @@ class TestRetrieve:
     async def test_use_cross_encoder_reranks_and_filters_floor(self, monkeypatch) -> None:
         """Explicit ``use_cross_encoder=True`` runs the reranker and applies
         the relevance floor."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -489,7 +489,7 @@ class TestRetrieve:
         ]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9), (1, 0.1)]),
         )
 
@@ -502,16 +502,16 @@ class TestRetrieve:
     @pytest.mark.asyncio
     async def test_use_llm_rerank_selects_llm(self, monkeypatch) -> None:
         """``use_llm_rerank=True`` routes to the LLM pointwise reranker."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8}]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("llm path must not call cross-encoder")),
         )
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[(0, 0.85)]),
         )
 
@@ -524,7 +524,7 @@ class TestRetrieve:
         """An LLM rerank channel failure (empty list = every candidate's call
         failed) must NOT collapse the read path to an empty result — it falls
         back to the raw recall ranking so real matches stay reachable."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -532,7 +532,7 @@ class TestRetrieve:
         ]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[]),
         )
 
@@ -548,7 +548,7 @@ class TestRetrieve:
         """A non-empty LLM rerank whose scores all fall below the floor is a
         genuine "nothing is relevant" verdict — it must NOT fall back to the
         recall ranking (that would resurrect what the model just rejected)."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -556,7 +556,7 @@ class TestRetrieve:
         ]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[(0, 0.05), (1, 0.1)]),
         )
 
@@ -569,7 +569,7 @@ class TestRetrieve:
         """A rerank signal that still clears the floor for SOME candidates is
         trusted — only a channel with no signal at all falls back.  Here c1's
         call failed (0.0, dropped below floor) while c2 scored 0.85."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8},
@@ -577,7 +577,7 @@ class TestRetrieve:
         ]
         self._patch_sources(monkeypatch, dense)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[(0, 0.0), (1, 0.85)]),
         )
 
@@ -589,7 +589,7 @@ class TestRetrieve:
 
     @pytest.mark.asyncio
     async def test_no_candidates_returns_empty(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         self._patch_sources(monkeypatch, [])
         results = await mod.retrieve("query", top_k=5)
@@ -599,7 +599,7 @@ class TestRetrieve:
     async def test_vector_recall_applies_recall_threshold(self, monkeypatch) -> None:
         """``retrieve`` must pass ``_RECALL_THRESHOLD`` to vector_search so a
         junk query returning only near-zero cosine matches yields no results."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         vs = AsyncMock(return_value=[])
         monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
@@ -631,15 +631,15 @@ class TestQueryMemoriesRecall:
         }
 
     def _patch(self, monkeypatch, candidates, ranked, recall_raises=False):
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1]])
         monkeypatch.setattr(mod, "get_embedding_provider", lambda: provider)
         monkeypatch.setattr(mod, "search_memories", AsyncMock(return_value=candidates))
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=ranked),
         )
         if recall_raises:
@@ -662,8 +662,8 @@ class TestQueryMemoriesRecall:
         sequential commits (the N+1 fix).  Exercises the explicit cross-encoder
         path: the reranker ranks, floor passes both, then recalls are recorded
         in one batch."""
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1"), self._candidate("m2", 0.5)]
         self._patch(
@@ -683,13 +683,13 @@ class TestQueryMemoriesRecall:
         raise) — candidates rank by raw similarity and the batch recall write
         still runs.  Regression guard for the eval finding that the 568M
         reranker costs ~90x latency without recall gain."""
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("rerank must not run by default")),
         )
         monkeypatch.setattr(recall_mod, "record_recalls", AsyncMock(return_value=None))
@@ -706,7 +706,7 @@ class TestQueryMemoriesRecall:
     async def test_recall_failure_does_not_sink_search(self, monkeypatch) -> None:
         """A recall-write failure must not fail the search — results are
         returned and the error is logged, not propagated."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1", 0.8)]
         self._patch(monkeypatch, cands, [(0, 0.9)], recall_raises=True)
@@ -725,7 +725,7 @@ class TestQueryMemoriesRecall:
         A low zone score must NOT evict the candidate (the old _RERANK_FLOOR
         had falsely dropped a relevant memory — the hard-negative q022 case).
         """
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1"), self._candidate("m2")]
         # Both are inside the zone (2 candidates, N=3).  m2 scores far below
@@ -742,7 +742,7 @@ class TestQueryMemoriesRecall:
         scored; the rest keep their similarity order untouched."""
         from unittest.mock import AsyncMock
 
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [
             self._candidate("m1", 0.9),
@@ -761,7 +761,7 @@ class TestQueryMemoriesRecall:
             return_value=[(2, 0.95), (0, 0.9), (1, 0.85)]
         )
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder", rerank_mock
+            "backend.service.retrieval.rerank.rerank_cross_encoder", rerank_mock
         )
 
         results = await mod.query_memories("q", top_k=5, use_cross_encoder=True)
@@ -775,7 +775,7 @@ class TestQueryMemoriesRecall:
     @pytest.mark.asyncio
     async def test_bounded_ce_truncates_to_top_k(self, monkeypatch) -> None:
         """bounded-CE result is capped at top_k like the other paths."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [
             self._candidate(f"m{i}", (5 - i) * 0.1) for i in range(1, 6)
@@ -796,13 +796,13 @@ class TestQueryMemoriesRecall:
         """An LLM rerank channel failure must not empty memory search —
         candidates fall back to the similarity ranking, and the recall batch
         still records them."""
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.8)])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[]),
         )
 
@@ -819,13 +819,13 @@ class TestQueryMemoriesRecall:
         """Same honesty on the memory path: an all-below-floor LLM verdict is
         kept as an empty result, not silently replaced by the similarity
         ranking — and no recall is recorded for an empty result."""
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         cands = [self._candidate("m1", 0.9), self._candidate("m2", 0.5)]
         self._patch(monkeypatch, cands, [(0, 0.9), (1, 0.5)])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_llm",
+            "backend.service.retrieval.rerank.rerank_llm",
             AsyncMock(return_value=[(0, 0.05), (1, 0.1)]),
         )
 
@@ -841,8 +841,8 @@ class TestQueryMemoriesRecall:
         """query_memories must embed through ``embed_query``'s LRU cache — a
         repeat query (SSE reconnect / re-ask / eval re-run) skips the provider
         after the first call."""
-        from backend.service import recall as recall_mod
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import recall as recall_mod
+        from backend.service.retrieval import retrieval as mod
 
         clear_embed_query_cache()
         provider = MagicMock()
@@ -863,10 +863,10 @@ class TestRetrieveMultiQuery:
     """Multi-query rewrite → batch embed → union → dedup → rerank."""
 
     def _patch_llm_and_embed(self, monkeypatch, queries, vector_search):
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         monkeypatch.setattr(
-            "backend.service.query_rewrite.rewrite_query",
+            "backend.service.retrieval.query_rewrite.rewrite_query",
             AsyncMock(return_value=queries),
         )
         provider = MagicMock()
@@ -878,7 +878,7 @@ class TestRetrieveMultiQuery:
     @pytest.mark.asyncio
     async def test_unions_and_dedups_across_variations(self, monkeypatch) -> None:
         """Union/dedup orchestration on the explicit cross-encoder path."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         queries = ["原查询", "变体一", "变体二"]
         vector_search = AsyncMock(side_effect=[
@@ -889,7 +889,7 @@ class TestRetrieveMultiQuery:
         ])
         provider = self._patch_llm_and_embed(monkeypatch, queries, vector_search)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9), (1, 0.8), (2, 0.7)]),
         )
 
@@ -904,7 +904,7 @@ class TestRetrieveMultiQuery:
     async def test_default_path_skips_cross_encoder(self, monkeypatch) -> None:
         """Default multi-query path ranks by recall similarity and must NOT
         run the cross-encoder (mocked to raise)."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         vector_search = AsyncMock(side_effect=[
             [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.7}],
@@ -913,7 +913,7 @@ class TestRetrieveMultiQuery:
         ])
         self._patch_llm_and_embed(monkeypatch, ["q1", "q2", "q3"], vector_search)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(side_effect=AssertionError("rerank must not run by default")),
         )
 
@@ -925,7 +925,7 @@ class TestRetrieveMultiQuery:
 
     @pytest.mark.asyncio
     async def test_empty_results_returns_empty(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         self._patch_llm_and_embed(
             monkeypatch, ["query"], AsyncMock(return_value=[])
@@ -937,14 +937,14 @@ class TestRetrieveMultiQuery:
     @pytest.mark.asyncio
     async def test_floor_filters_low_scores(self, monkeypatch) -> None:
         """The relevance floor only applies on the explicit cross-encoder path."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         vector_search = AsyncMock(return_value=[
             {"id": "c1", "content": "c1", "meta": {}, "similarity": 0.9},
         ])
         self._patch_llm_and_embed(monkeypatch, ["query"], vector_search)
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.1)]),
         )
 
@@ -958,7 +958,7 @@ class TestWriteChunksIdempotency:
     @pytest.mark.asyncio
     async def test_reingest_skips_all_existing_chunks(self) -> None:
         """Re-ingesting an unchanged document embeds/writes nothing."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         chunks = ["chunk one", "chunk two"]
         existing_hashes = [mod._content_hash(c) for c in chunks]
@@ -987,7 +987,7 @@ class TestWriteChunksIdempotency:
     @pytest.mark.asyncio
     async def test_partial_reingest_writes_only_new_chunks(self) -> None:
         """Only chunks whose hash isn't stored yet are embedded + inserted."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         chunks = ["brand new chunk", "unchanged chunk"]
         existing_hashes = [mod._content_hash(chunks[1])]  # second already stored
@@ -1035,7 +1035,7 @@ class TestDocumentIdTraceability:
     """
 
     def _patch_sources(self, monkeypatch, dense, sparse):
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         monkeypatch.setattr(mod, "embed_query", AsyncMock(return_value=[0.1]))
         monkeypatch.setattr(mod, "vector_search", AsyncMock(return_value=dense))
@@ -1043,7 +1043,7 @@ class TestDocumentIdTraceability:
 
     @pytest.mark.asyncio
     async def test_rerank_path_attaches_document_id(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "document_id": "a.py", "content": "c1",
@@ -1051,7 +1051,7 @@ class TestDocumentIdTraceability:
         ]
         self._patch_sources(monkeypatch, dense, [])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9)]),
         )
 
@@ -1064,7 +1064,7 @@ class TestDocumentIdTraceability:
 
     @pytest.mark.asyncio
     async def test_skip_rerank_path_attaches_document_id(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [
             {"id": "c1", "document_id": "a.py", "content": "c1",
@@ -1080,7 +1080,7 @@ class TestDocumentIdTraceability:
     @pytest.mark.asyncio
     async def test_sparse_only_source_attaches_document_id(self, monkeypatch) -> None:
         """A chunk found only via sparse search still carries its document."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         sparse = [
             {"id": "c1", "document_id": "b.md", "content": "c1",
@@ -1096,12 +1096,12 @@ class TestDocumentIdTraceability:
     @pytest.mark.asyncio
     async def test_missing_document_id_keeps_metadata_clean(self, monkeypatch) -> None:
         """Rows without a ``document_id`` key don't gain a None entry."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         dense = [{"id": "c1", "content": "c1", "meta": {}, "similarity": 0.8}]
         self._patch_sources(monkeypatch, dense, [])
         monkeypatch.setattr(
-            "backend.service.rerank.rerank_cross_encoder",
+            "backend.service.retrieval.rerank.rerank_cross_encoder",
             AsyncMock(return_value=[(0, 0.9)]),
         )
 
@@ -1121,7 +1121,7 @@ class TestEmbedQueryCache:
         clear_embed_query_cache()
 
     def _mock_provider(self, monkeypatch):
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = MagicMock()
         provider.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
@@ -1131,7 +1131,7 @@ class TestEmbedQueryCache:
     @pytest.mark.asyncio
     async def test_identical_query_hits_cache(self, monkeypatch) -> None:
         """Second call with the same query must not re-embed."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = self._mock_provider(monkeypatch)
         first = await mod.embed_query("pgvector 检索")
@@ -1142,7 +1142,7 @@ class TestEmbedQueryCache:
 
     @pytest.mark.asyncio
     async def test_different_queries_embed_separately(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = self._mock_provider(monkeypatch)
         await mod.embed_query("查询 A")
@@ -1152,7 +1152,7 @@ class TestEmbedQueryCache:
     @pytest.mark.asyncio
     async def test_returns_list_for_pgvector_syntax(self, monkeypatch) -> None:
         """str(vec) must yield [..] (list), not (..) (tuple) — pgvector input."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         self._mock_provider(monkeypatch)
         vec = await mod.embed_query("x")
@@ -1161,7 +1161,7 @@ class TestEmbedQueryCache:
 
     @pytest.mark.asyncio
     async def test_lru_evicts_least_recently_used(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = self._mock_provider(monkeypatch)
         monkeypatch.setattr(mod, "_QUERY_EMBED_CACHE_MAX", 2)
@@ -1180,7 +1180,7 @@ class TestEmbedQueryCache:
     @pytest.mark.asyncio
     async def test_hit_reorders_lru_slot(self, monkeypatch) -> None:
         """A hit makes the key newest, so it survives a later eviction."""
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = self._mock_provider(monkeypatch)
         monkeypatch.setattr(mod, "_QUERY_EMBED_CACHE_MAX", 2)
@@ -1199,7 +1199,7 @@ class TestEmbedQueryCache:
 
     @pytest.mark.asyncio
     async def test_clear_embed_query_cache(self, monkeypatch) -> None:
-        from backend.service import retrieval as mod
+        from backend.service.retrieval import retrieval as mod
 
         provider = self._mock_provider(monkeypatch)
         await mod.embed_query("q")
@@ -1208,7 +1208,7 @@ class TestEmbedQueryCache:
         assert provider.embed.await_count == 2
 
 
-# ── Recall tracking (backend.service.recall) ─────────────────────
+# ── Recall tracking (backend.service.retrieval.recall) ─────────────────────
 # Ranking is pure similarity; ``record_recalls`` is the caller-side write
 # that bumps recall counters after a search.  It must stay atomic, batched,
 # and never feed back into ranking.
@@ -1219,7 +1219,7 @@ class TestRecordRecallsUnit:
 
     @pytest.mark.asyncio
     async def test_empty_list_is_noop(self, monkeypatch) -> None:
-        from backend.service import recall as mod
+        from backend.service.retrieval import recall as mod
 
         monkeypatch.setattr(
             mod, "get_session_factory", lambda: (_ for _ in ()).throw(AssertionError("must not touch DB"))
@@ -1230,7 +1230,7 @@ class TestRecordRecallsUnit:
     async def test_records_are_bumped(self, monkeypatch) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
-        from backend.service import recall as mod
+        from backend.service.retrieval import recall as mod
 
         session = MagicMock()
         session.execute = AsyncMock()
@@ -1260,7 +1260,7 @@ class TestSearchMemoriesRanking:
         """The decay Python mirror is gone; only the similarity query remains."""
         import inspect
 
-        from backend.service import retrieval
+        from backend.service.retrieval import retrieval
 
         source = inspect.getsource(retrieval.search_memories)
         assert "exp(-" not in source

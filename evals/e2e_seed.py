@@ -110,7 +110,7 @@ async def _seed_memory_item(item: E2EItem) -> int:
 
 async def _seed_chunk_item(item: E2EItem) -> int:
     """Insert one chunk-mode item as a searchable chunk."""
-    from backend.service.retrieval import write_chunks
+    from backend.service.retrieval.retrieval import write_chunks
 
     return await write_chunks(
         document_id=SEED_DOCUMENT_ID,

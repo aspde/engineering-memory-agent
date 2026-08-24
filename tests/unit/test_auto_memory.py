@@ -202,7 +202,7 @@ class TestAutoMemorySubstance:
         degradation fallback and the substance gate.
         """
         import backend.agent.nodes as mod
-        from backend.service.extraction import extract_memory
+        from backend.service.ingestion.extraction import extract_memory
 
         _set_auto_memory(monkeypatch, True)
         # A declarative statement that passes the keyword-heuristic gate
@@ -225,7 +225,7 @@ class TestAutoMemorySubstance:
 
         down = _DownLLM()
         monkeypatch.setattr(
-            "backend.service.extraction.get_llm_provider", lambda: down
+            "backend.service.ingestion.extraction.get_llm_provider", lambda: down
         )
         monkeypatch.setattr(
             "backend.service.structured.get_llm_provider", lambda: down

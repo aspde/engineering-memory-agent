@@ -1,4 +1,4 @@
-"""Tests for the event-driven analysis runner (backend/service/event_analysis.py).
+"""Tests for the event-driven analysis runner (backend/runner/event_analysis.py).
 
 Pure-logic tests for the cooldown gate, output-contract validation,
 Feishu card formatting, and runner configuration — plus runner tests with
@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import backend.service.event_analysis as ea
-from backend.service.event_analysis import (
+import backend.runner.event_analysis as ea
+from backend.runner.event_analysis import (
     EventContext,
     build_event_user_message,
     format_feishu_card,
@@ -262,7 +262,7 @@ class TestRunEventAnalysis:
         agent.ainvoke = AsyncMock(return_value=_agent_result(_VALID_JSON))
         persist = AsyncMock()
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", persist),
             patch.object(ea, "send_feishu_message", AsyncMock(return_value=(True, "0"))),
         ):
@@ -278,7 +278,7 @@ class TestRunEventAnalysis:
         agent.ainvoke = AsyncMock(return_value=_agent_result(_VALID_JSON))
         with (
             patch(
-                "backend.service.event_analysis.get_agent", return_value=agent
+                "backend.runner.event_analysis.get_agent", return_value=agent
             ) as mock_get,
             patch.object(ea, "persist_analysis", AsyncMock()),
         ):
@@ -306,7 +306,7 @@ class TestRunEventAnalysis:
         agent.ainvoke = AsyncMock(return_value=_agent_result("not json at all"))
         persist = AsyncMock()
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", persist),
         ):
             await self._run("d3")
@@ -325,7 +325,7 @@ class TestRunEventAnalysis:
         persist = AsyncMock()
         saved = {"timeout_seconds": config.event_analysis.timeout_seconds}
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", persist),
         ):
             _set_event_analysis(timeout_seconds=1)
@@ -346,7 +346,7 @@ class TestRunEventAnalysis:
         )
         persist = AsyncMock()
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", persist),
         ):
             await self._run("d5")
@@ -359,7 +359,7 @@ class TestRunEventAnalysis:
         agent.ainvoke = AsyncMock(return_value=_agent_result(low_json))
         send = AsyncMock(return_value=(True, "0"))
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", AsyncMock()),
             patch.object(ea, "send_feishu_message", send),
         ):
@@ -371,7 +371,7 @@ class TestRunEventAnalysis:
         agent.ainvoke = AsyncMock(side_effect=RuntimeError("boom"))
         persist = AsyncMock()
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", persist),
         ):
             await self._run("d7")
@@ -392,7 +392,7 @@ class TestRunEventAnalysis:
 
         agent.ainvoke = _invoke
         with (
-            patch("backend.service.event_analysis.get_agent", return_value=agent),
+            patch("backend.runner.event_analysis.get_agent", return_value=agent),
             patch.object(ea, "persist_analysis", AsyncMock()),
         ):
             await self._run("delivery-x")
@@ -460,7 +460,7 @@ class TestMaybeAnalyzeEvent:
         with (
             patch.object(ea.config.event_analysis, "enabled", True),
             patch.object(ea, "run_event_analysis", runner),
-            caplog.at_level(logging.ERROR, logger="backend.service.event_analysis"),
+            caplog.at_level(logging.ERROR, logger="backend.runner.event_analysis"),
         ):
             await self._dispatch("ci_build", "d9b", _BrokenConnector())
         runner.assert_not_awaited()

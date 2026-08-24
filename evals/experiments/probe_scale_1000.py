@@ -230,7 +230,7 @@ async def _insert_distractors(entries: list[str], concurrency: int = 6) -> int:
     Each ``write_chunks`` call opens its own session, so concurrent calls are
     isolated.  Returns total inserted.
     """
-    from backend.service.retrieval import write_chunks
+    from backend.service.retrieval.retrieval import write_chunks
 
     batches = [
         entries[i : i + BATCH_SIZE]

@@ -113,7 +113,7 @@ async def lifespan(app: FastAPI):
 
     # Create checkpoint table for conversation persistence
     try:
-        from backend.service.agent_service import _setup_checkpointer
+        from backend.runner.agent_service import _setup_checkpointer
 
         await _setup_checkpointer()
     except Exception as _exc:
@@ -156,12 +156,12 @@ async def lifespan(app: FastAPI):
     _catchup_tasks: list[asyncio.Task[None]] = []
     if config.patrol_active:
         try:
-            from backend.service.patrol import (
+            from backend.runner.patrol import (
                 get_patrol_prompt,
                 mark_stale_patrols_failed,
                 run_patrol,
             )
-            from backend.service.scheduler import (
+            from backend.runner.scheduler import (
                 PatrolScheduler,
                 previous_daily_slot,
                 previous_weekly_slot,
@@ -240,7 +240,7 @@ async def lifespan(app: FastAPI):
 
                     _log = logging.getLogger(__name__)
                     try:
-                        from backend.service.scenarios.tech_debt import (
+                        from backend.runner.scenarios.tech_debt import (
                             compose_tech_debt_report,
                         )
 
@@ -300,7 +300,7 @@ async def lifespan(app: FastAPI):
 
     # Close checkpointer pool on shutdown
     try:
-        from backend.service.agent_service import _close_checkpointer
+        from backend.runner.agent_service import _close_checkpointer
 
         await _close_checkpointer()
     except Exception:
