@@ -104,6 +104,37 @@ class TestAgentSystemTemplate:
         assert "Context:\nhello" in rendered
 
 
+class TestAgentSystemToolDiscipline:
+    """agent.system v6 replaced "search memories and documents" with
+    store-selection + stop discipline (task_eval: unexpected_rate 0.375)."""
+
+    def test_guides_store_selection_by_answer_location(self) -> None:
+        _, text = get_prompt("agent.system")
+        assert "where the answer lives" in text.lower()
+        assert "long-term memories" in text
+        assert "document chunks" in text
+
+    def test_contains_stop_discipline(self) -> None:
+        _, text = get_prompt("agent.system")
+        flat = " ".join(text.split())
+        assert "One search per information need." in flat
+        assert "answer immediately" in flat
+        assert "need no search at all" in flat
+
+    def test_query_rewrite_framed_as_last_resort_not_default(self) -> None:
+        _, text = get_prompt("agent.system")
+        assert "so vague or abstract it cannot match" in (
+            " ".join(text.split())
+        )
+
+    def test_prose_still_never_names_tools(self) -> None:
+        _, text = get_prompt("agent.system")
+        assert "search_memories_tool" not in text
+        assert "write_memory_tool" not in text
+        assert "retrieve_chunks_tool" not in text
+        assert "query_rewrite_and_search_tool" not in text
+
+
 class TestModuleReExports:
     """patrol / scenario modules re-export the registry text unchanged."""
 

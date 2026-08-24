@@ -253,10 +253,10 @@ fails safe 原则：
 
 1. **任务级端到端评测**（`run_task_eval`）：8 个真实多步任务驱动**完整 Agent 图**——ReAct 循环 + 真实工具执行 + HITL 门，测的是整条轨迹而非单次决策
 2. **指标**：`completed`（调齐必备工具 + 实质答案 + 无错误）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）
-3. **实测**（DeepSeek）：tool_recall 0.94、groundedness 1.00、0 执行错误；但 **completed 只有 0.5**——`unexpected_rate 0.375` 说明模型过度调用工具，这是组件级评测永远看不到的轨迹级问题
+3. **实测**（DeepSeek）：tool_recall 0.94、groundedness 1.00、0 执行错误；基线 **completed 0.5**——`unexpected_rate 0.375` 暴露模型过度调用工具，这是组件级评测永远看不到的轨迹级问题
 4. **HITL 处理**：评测自动放行（审批通过、冲突 keep_existing），隔离"人的决策"与"Agent 能力"；要测拒绝路径就注入自定义 resume 策略
 
-**completed 为什么只有 0.5**：不是工具选不对（tool_recall 0.94 说明该调的几乎都调了），而是过度调用——task-006 回答一个记忆问题调了 4 次工具（search×2 + retrieve_chunks + query_entity），task-004 概念查询循环 8 次撞 max_steps。这是真实的行为短板。改进方向：强化工具描述边界、轨迹级节流（检索结果已覆盖就停手）、max_steps 兜底但 5 步对概念查询仍偏松。
+**completed 为什么只有 0.5**：不是工具选不对（tool_recall 0.94 说明该调的几乎都调了），而是过度调用——task-006 回答一个记忆问题调了 4 次工具（search×2 + retrieve_chunks + query_entity），task-004 概念查询循环 8 次撞 max_steps。**已修复（2026-08-24）**：根因是引导文本鼓励双库都查且无停手纪律——`agent.system` v6 改为按答案位置选存储 + 一需求一检索 + 覆盖即作答，三个检索工具 docstring 收紧边界，零机制变更。三次复测 unexpected_rate 全部归零，task-001 从错调两个工具变为精确一次调用；合法的双库检索（多段问题）未被误伤（[ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)）。
 
 **这个评估的额外收获**：抓出一个生产 bug——拒绝审批后写操作仍被执行。根因是 LangGraph 1.2.10 resume 被 interrupt 暂停的节点时，Command(goto) 和节点的静态边会同时生效，拒绝路径的静态边把路由拉到 tools。删掉静态边、Command 唯一路由，加了图级回归测试。单测和组件评测都发现不了这种跨节点编排问题。
 
@@ -272,7 +272,7 @@ fails safe 原则：
 | 四级阈值 | 0.85合并 / 0.72冲突 / 0.60关联 / <0.60新增 |
 | Agent 节点 | 5 个：call_llm/check_approval/tools/check_conflict/generate_final |
 | HITL 卡点 | 2 个：写前审批 + 冲突仲裁 |
-| Agent 任务级指标 | 8 任务 completed 0.5 / tool_recall 0.94 / grounded 1.0 |
+| Agent 任务级指标 | 8 任务 completed 0.5 / tool_recall 0.94 / grounded 1.0；unexpected_rate 已修复归零（[ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)） |
 | 工具数 | 9 个 |
 | 冲突解决选项 | 4 个：keep_existing/overwrite/merge/keep_both |
 | LangGraph 持久化 | PostgresSaver，thread_id 关联 |

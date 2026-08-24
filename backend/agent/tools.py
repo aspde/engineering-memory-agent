@@ -39,18 +39,19 @@ async def search_memories_tool(
     query: str,
     top_k: int = Field(default=5, ge=1, le=20),
 ) -> str:
-    """Search long-term engineering memories for knowledge, decisions,
-    lessons learned, and past context.
+    """Search long-term engineering memories — the DEFAULT first choice
+    for questions about team knowledge.
 
     Memories come from multiple sources: manual conversations, PingCode
     work items (pingcode / pingcode_bug), CI/CD builds (ci_build /
     ci_regression), 飞书 discussions (feishu), Git commits, and document
     ingestion.  This tool searches across ALL sources by default.
 
-    Use this when the user asks about project history, technical
-    decisions, architecture, past discussions, or anything that might
-    have been recorded as a memory — regardless of which source it
-    came from.
+    Use this FIRST for project history, technical decisions,
+    architecture, incidents, past discussions, or anything the team
+    might have recorded — regardless of which source it came from.
+    When its results already answer the question, stop: do not chain
+    other search tools after it.
 
     Args:
         query: Natural-language search query.
@@ -112,8 +113,12 @@ async def retrieve_chunks_tool(
     """Hybrid search over ingested document chunks (dense vector + BM25 keyword).
 
     Combines BGE-M3 semantic recall with Postgres tsvector keyword recall
-    for better coverage on conceptual queries.  Use this as the default
-    document search, or when memory search doesn't return enough context.
+    for better coverage on conceptual queries.  Use this ONLY when the
+    question targets document or file content — READMEs, specs, API
+    docs, code files.  Questions about team knowledge (decisions,
+    incidents, discussions) belong to the memory search, and a memory
+    search that already answered the question must not be followed up
+    with this tool.
 
     Args:
         query: Natural-language search query.
@@ -151,21 +156,24 @@ async def query_rewrite_and_search_tool(
     """Multi-query retrieval: LLM rewrites the query into variations,
     then unions and reranks results from all variations.
 
-    Use this for conceptual or abstract queries where the user's wording
-    may not match the stored memory's wording — e.g. "之前出过什么问题",
-    "会不会陷入死循环", "同名实体怎么归一化".  The LLM expands such
+    Use this ONLY for queries so vague or abstract that their wording
+    cannot match how anything is stored — e.g. "同名实体怎么归一化",
+    "检索结果排序异常怎么排查" — and only as the FIRST search for that
+    need, not as a retry after another search.  The LLM expands such
     queries into concrete terms (component names, error types) that
-    surface in the knowledge base.
+    surface in the knowledge base.  Questions about past incidents or
+    team history (e.g. "之前出过什么问题") belong to the ordinary memory
+    search, not here.
 
-    Costs one extra LLM call (~500ms) for rewriting.  For specific
-    technical queries (e.g. "pgvector 向量检索"), prefer
-    retrieve_chunks_tool instead.
+    Costs one extra LLM call (~500ms) for rewriting.  Specific
+    technical queries and questions about team history get no benefit
+    from rewriting — use the ordinary memory or document search.
 
     Args:
-        query: Natural-language search query (especially conceptual ones).
+        query: Natural-language search query (especially vague ones).
         top_k: Number of results (1-20).
     """
-    from backend.service.retrieval import retrieve_multi_query
+    from backend.service.retrieval.retrieval import retrieve_multi_query
 
     results = await retrieve_multi_query(query, top_k=min(top_k, 20))
     if not results:

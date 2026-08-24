@@ -20,7 +20,7 @@
 
 ### 4. 评估数字 1.0 是自证吗？数字可信吗？
 
-早期 Recall@5=1.0 是 30 条种子语料上的自评结果，query 从种子记忆手工标注、每条只标一条相关记忆，含金量有限——定位为回归基线而不是能力上限，并把评估集扩充到 70 条（5 类 × 14、hard 占 30%，语料和 query 都翻倍）。生产 memory 路径**默认确定性基线**现在 0.886/0.767（纯子串匹配，70 条语料上 8 条 miss）；语义通道是显式 opt-in（用被评测模型自评所以非默认）。真实判别力看 27 条 hard-negative：纯向量综合通过仅 59.3%，已用 bounded cross-encoder top-3 重排提到 81.5%。`task completed=0.5` 和 `unexpected_rate=0.375`（DeepSeek 过度调工具）比任何完美数字更能说明 Agent 的生产行为。
+早期 Recall@5=1.0 是 30 条种子语料上的自评结果，query 从种子记忆手工标注、每条只标一条相关记忆，含金量有限——定位为回归基线而不是能力上限，并把评估集扩充到 70 条（5 类 × 14、hard 占 30%，语料和 query 都翻倍）。生产 memory 路径**默认确定性基线**现在 0.886/0.767（纯子串匹配，70 条语料上 8 条 miss）；语义通道是显式 opt-in（用被评测模型自评所以非默认）。真实判别力看 27 条 hard-negative：纯向量综合通过仅 59.3%，已用 bounded cross-encoder top-3 重排提到 81.5%。历史上 `task completed=0.5` 和 `unexpected_rate=0.375`（DeepSeek 过度调工具）比任何完美数字更能说明 Agent 的生产行为；该过度调用已由工具纪律 prompt 修复归零（三次复测稳定，见 [ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)）——评估抓出真实短板、修复后可复测验证，正是这套体系的价值。
 
 ### 5. LLM judge 可信吗？
 

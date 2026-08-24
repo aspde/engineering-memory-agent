@@ -51,7 +51,7 @@ EMA（Engineering Memory Agent）把研发过程中的代码、Git 历史、技�
 | 检索判别力 | 27 条 hard-negative | 纯向量综合通过 59.3% → bounded cross-encoder top-3 重排后 81.5% |
 | sparse 检索 | O(N) → O(log N) | jieba 分词落 chunks.tokens 列 + GIN 索引，1000 条语料延迟 -69% |
 | rerank | 17.5s → 0.19s | A/B 验证小语料下 cross-encoder 有害（0.15 floor 误伤低分相关），默认跳过 |
-| Agent 任务级 | completed 0.5 / tool_recall 0.94 / grounded 1.0 | 8 个多步任务驱动完整图，0 执行错误；unexpected_rate 0.375 暴露过度调用 |
+| Agent 任务级 | completed 0.5 / tool_recall 0.94 / grounded 1.0 | 8 个多步任务驱动完整图，0 执行错误；过度调用（unexpected 0.375）已由工具纪律 prompt 修复归零（[ADR-012](decisions/ADR-012-tool-discipline-prompt.md)） |
 | 压测 | 10 并发 QPS 4.8 / P95 110ms | 热路径（重复查询命中 LRU）；冷路径 10 并发 QPS 2.6，P95 19s 长尾在并发控制修复后降到 690ms（见 [gap-remediation.md](gap-remediation.md) §5.3） |
 | 规模 | 后端+agent 约 1.7 万行 / 1400 测试 | — |
 
@@ -64,7 +64,7 @@ EMA（Engineering Memory Agent）把研发过程中的代码、Git 历史、技�
 3. **语料质量决定"瓶颈"真假**：把语料改成真实工程记录后，BGE-M3 稠密召回直接到 1.00——当时的 5 个 miss 一部分是语料/标注问题，不是纯检索算法缺陷。
 4. **真瓶颈是中文 sparse O(N) 扫描**：jieba 分词落库 + GIN 索引解决，1000 条语料延迟 -69%。
 5. **rerank 收益 scale-dependent**：cross-encoder + 0.15 floor 在小语料下误伤低分相关结果（q015 打分 0.142 被滤掉），跳过 rerank 延迟从 17.5s 降到 0.19s。别假设"更重的模型一定更好"。
-6. **Agent 质量要靠整条轨迹测**：任务级端到端评测（8 个多步任务驱动完整图）抓出过度调用（unexpected 0.375）——组件级评测永远看不到的轨迹级问题。这套评测还抓出并修复了一个生产 HITL bug（拒绝审批后写操作仍被执行）。
+6. **Agent 质量要靠整条轨迹测**：任务级端到端评测（8 个多步任务驱动完整图）抓出过度调用（unexpected 0.375）——组件级评测永远看不到的轨迹级问题。这套评测还抓出并修复了一个生产 HITL bug（拒绝审批后写操作仍被执行）。过度调用随后由工具纪律 prompt 修复归零（0.375→0.000，三次复测稳定，[ADR-012](decisions/ADR-012-tool-discipline-prompt.md)）。
 
 ## 工程实践
 

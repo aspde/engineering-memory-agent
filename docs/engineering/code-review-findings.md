@@ -237,6 +237,6 @@
 
 ### 🗣 P2-16 生产可靠性是 Agent 工程的重点考查面
 
-**证据**：本清单的 P0 项暴露了评估体系的自证与口径问题——已通过 hard-negative 判别集（P0-1）、语义通道 opt-in（P0-2）、多次均值门禁（P0-4）修正；P2-1 的无限流与前端 key 暴露已落地令牌桶限流 + 构建期注入；task completed=0.5 与 unexpected_rate=0.375 是组件级评测看不到的轨迹级过度调用信号，任务级端到端评测正是为此引入（见 [llm-eval.md](./llm-eval.md)）。
+**证据**：本清单的 P0 项暴露了评估体系的自证与口径问题——已通过 hard-negative 判别集（P0-1）、语义通道 opt-in（P0-2）、多次均值门禁（P0-4）修正；P2-1 的无限流与前端 key 暴露已落地令牌桶限流 + 构建期注入；task completed=0.5 与 unexpected_rate=0.375 是组件级评测看不到的轨迹级过度调用信号，任务级端到端评测正是为此引入（见 [llm-eval.md](./llm-eval.md)）；该过度调用信号随后驱动了工具纪律 prompt 修复并复测归零（见 [ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)）。
 
 → 完整分析见 [decision-faq.md](./decision-faq.md) 第 4 节（评估数字 1.0 是自证吗）。

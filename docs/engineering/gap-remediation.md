@@ -112,7 +112,7 @@ def ndcg_at_k(retrieved_ids: List[str], relevant_ids: List[str], k: int = 5) -> 
 """跑评估：对每个 query 调检索，算指标"""
 
 import asyncio
-from backend.service.retrieval import query_memories
+from backend.service.retrieval.retrieval import query_memories
 from evals.ground_truth import GROUND_TRUTH
 from evals.metrics import recall_at_k, mrr, ndcg_at_k
 
@@ -230,7 +230,7 @@ python -m evals.run_eval --retriever memory
 | Agent 单轮对话 P95 | 在 `/api/agent/chat` 加计时 | **10 轮真实对话实测 P95 73.6s**(P50 43.2s / mean 35.9s / min 12.7s / max 73.6s,2026-08-11,DeepSeek deepseek-v4-flash + 本地 BGE-M3)。已定位根因并从工具 schema 锁死 LLM rerank(§3.1.1) | 那 73.6s 里约 40s 是每轮 ~19 次 `rerank_llm`(模型自主把 `use_llm_rerank=True` 传给检索工具)。锁死后对话检索走纯相似度排序(~2s/query,recall@5 0.90 基线),预期 P95 降至 ~25s 量级 |
 | 单次对话平均 token 数 | LLMProvider 加计数(见 §4) | **≈28.6k tokens/轮**(10 轮合计 285.9k;估 $0.008/轮 ≈ ¥0.06,用内置价格表) | 成本大头是 rerank_llm(75.6k tokens)+ agent_chat(165.8k,其中 144k 是 cache_read 折扣价)——缓存命中大幅压低实际成本 |
 | 单次对话平均 tool 调用数 | 在 Agent 加计数 | 2.6 次/任务(task 轨迹均值) | 任务级评测 8 任务平均 2.6 次 LLM 调用,概念查询会到 5 |
-| Agent 任务级完成率 | `python -m evals.run_task_eval --judge deterministic` | completed 0.500 / tool_recall 0.938 / within_budget 0.875 | 8 任务实测:工具选择意图准(0.94)但过度调用(unexpected 0.375)拉低严格完成率,是轨迹级真实短板 |
+| Agent 任务级完成率 | `python -m evals.run_task_eval --judge deterministic` | completed **0.625**（2026-08-24 干净复测,历史最高）/ tool_recall 0.688 / within_budget 0.875;**unexpected_rate 0.375→0.000**（工具纪律 prompt 修复后连续 4 轮归零,见 §3.1.2） | 过度调用曾是轨迹级真实短板(基线 completed 0.375-0.500),已由 agent.system v6 + 工具描述边界修复(§3.1.2);tool_recall 的下降主体是 task-008 零调用取舍(ADR-012) |
 | Agent 答案接地 | 同上(judge 对工具上下文判定) | groundedness 1.000 / citation 0.875 / 0 执行错误 | 答案全部接地、无捏造、零错误;过度调用而非幻觉是主要问题 |
 | BGE-M3 embed 单条延迟 | `time` 包裹 `embed()` | 150-230ms(CPU)；限并发后 ~300ms/条 | embed CPU 推理；并发超卖时被拖慢到 366→1120ms，限并发(§5.3.2)后单条稳定 ~300ms |
 | 检索 Recall@5 | `python -m evals.run_eval --retriever memory` | 0.886(70 条默认确定性基线,2026-08-11) | 生产默认路径(query_memories,threshold 0.3)70 条标注集默认纯子串实测 recall@5=0.886;语义通道自证故默认关 |
@@ -275,7 +275,7 @@ python -m evals.run_eval --retriever memory
 
 1. **rerank_llm 是对话路径延迟和成本的双第一**:延迟占 58.6%、成本占 46%,是 agent_chat 本身(124s)的 3.8 倍。
 2. **是否走 rerank 是对话 P95 的决定性变量**:走 rerank 的轮 67-110s,没走的轮 12-40s——关掉 LLM rerank,P95 预计从 73.6s 降到 ~25s,成本省 ~46%。
-3. **这不是删功能**:eval 已证 LLM rerank 在小语料下只微调排序不改变召回集合(recall@5 同为 0.900,MRR +0.014)。修复动作是把 `use_llm_rerank` 从工具 schema 移除(见 §2.4 复测),服务层签名保留仅供显式调用者 / eval 使用(`backend/service/retrieval.py` 各函数签名已标注"NOT exposed in agent tool schemas")。本决策已记录为 [ADR-010](../decisions/ADR-010-llm-rerank-locked-from-tools.md)。
+3. **这不是删功能**:eval 已证 LLM rerank 在小语料下只微调排序不改变召回集合(recall@5 同为 0.900,MRR +0.014)。修复动作是把 `use_llm_rerank` 从工具 schema 移除(见 §2.4 复测),服务层签名保留仅供显式调用者 / eval 使用(`backend/service/retrieval/retrieval.py` 各函数签名已标注"NOT exposed in agent tool schemas")。本决策已记录为 [ADR-010](../decisions/ADR-010-llm-rerank-locked-from-tools.md)。
 
 **锁死 LLM rerank 后的复测**(2026-08-11,见 [task_eval_norerank_report.md](../../evals/reports/task_eval_norerank_report.md)):
 
@@ -288,6 +288,17 @@ python -m evals.run_eval --retriever memory
 | `citation_rate` | 0.875 | 0.750 | -0.13(同上,噪声范围) |
 
 结论:移除 LLM rerank 不伤害任务完成率与答案忠实度(`completed` 持平、`groundedness` 1.000),且 `within_budget` 改善——与检索侧 eval 的结论一致(rerank 不改变 recall@5,只微调排序)。
+
+### 3.1.2 工具纪律 prompt 修复过度调用(2026-08-24,ADR-012)
+
+`unexpected_rate 0.375`(3 次基线观测全部稳定)的修复不靠机制(不加轨迹节流),靠引导文本:`agent.system` v5→v6(store-selection + 停手纪律 + 寒暄免检索)、三个检索工具 docstring 边界收紧(search_memories 声明默认首选并禁止链式 / retrieve_chunks 删除"memory search 不够再查我" / query_rewrite 收窄为 last-resort)、tsel-006 重标对齐。详见 [ADR-012](../decisions/ADR-012-tool-discipline-prompt.md) 与 [task_eval_report.md](../../evals/reports/task_eval_report.md)。
+
+| 指标 | 基线(3 次观测) | 改动后(3 次复测) | Δ |
+|------|---------------|------------------|-----|
+| `unexpected_rate` | **0.375 / 0.375 / 0.375** | **0.000 / 0.000 / 0.000** | **-0.375,归零** |
+| tool_selection accuracy | —(门限 0.68) | **0.933**(15 条 14 对) | 高于 CI 门限 |
+
+轨迹形态:task-001 从"调错两个工具+漏掉预期工具"变为复测精确一次调用;task-002 双库合法检索未被误伤;task-007 寒暄保持零调用。**干净轮复测(2026-08-24 run 4,provider 零故障)**:completed **0.625**(历史最高,基线 0.375-0.500)、groundedness/citation 双 1.000、unexpected_rate 第 4 轮连续归零;唯一 within_budget miss 是 task-001 撞 AGENT_TIMEOUT=180s 墙钟(provider 慢,非行为回归)。已知取舍:task-008(agent 自身功能问题)三次零调用直接作答——事实可检索(memory 0.675/chunk 1.0 排第一),是模型判断"问我自己的功能不用查库",答案仍 groundedness 1.000 无捏造;消除属后续 prompt 迭代(ADR-012「代价与保留」)。
 
 ### 3.2 计时日志埋点示例
 
@@ -393,7 +404,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 2. **tradeoff 在 40 并发显现**:延迟大幅改善(P95 9.4s→1.9s)但吞吐受限(60s 完成 30 vs 290)——conc=2 限死了 embed 并行度。这是 CPU 密集系统的固有取舍:低并发高质量 or 高并发高延迟。
 3. **配置匹配核数是最优默认**:2×4=8 线程峰值 = 核数,零超卖。高并发场景按需上调 conc,代价是 P95 上升——可量化的旋钮,不是黑盒。
 
-> Windows 启动注:Windows 上 uvicorn 默认 ProactorEventLoop 与 psycopg 异步不兼容,`_pool.wait()` 会无限重试挂起 lifespan。已修复:`_setup_checkpointer` 给 wait 加 10s 超时,超时降级 InMemorySaver(`backend/service/agent_service.py` + `tests/unit/test_checkpointer_fallback.py`)。Linux 容器(Dockerfile)无此问题。
+> Windows 启动注:Windows 上 uvicorn 默认 ProactorEventLoop 与 psycopg 异步不兼容,`_pool.wait()` 会无限重试挂起 lifespan。已修复:`_setup_checkpointer` 给 wait 加 10s 超时,超时降级 InMemorySaver(`backend/runner/agent_service.py` + `tests/unit/test_checkpointer_fallback.py`)。Linux 容器(Dockerfile)无此问题。
 
 ---
 
@@ -470,13 +481,13 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 |------|------|---------|------|
 | 四级去重 + 冲突 | 深 | [memory.py:146-176](../../backend/service/memory.py) 四分支 + `_deferred` 载荷 + 关系三元组去重 | 核心深度点 |
 | 双 HITL LangGraph | 深 | [graph.py:41-51](../../backend/agent/graph.py) max_steps 防循环 + Command(goto) 动态路由 | 核心深度点 |
-| 实体归一化双层 | 深 | [entity.py:67-91](../../backend/service/entity.py) 向量粗筛 + [entity.py:160-189](../../backend/service/entity.py) LLM 精判 fails safe | 核心深度点 |
+| 实体归一化双层 | 深 | [entity.py:67-91](../../backend/service/ingestion/entity.py) 向量粗筛 + [entity.py:160-189](../../backend/service/ingestion/entity.py) LLM 精判 fails safe | 核心深度点 |
 | LLMProvider 抽象 | 中深 | [llm_service.py:191-199](../../backend/service/llm_service.py) Anthropic system 拆分 + tool_calls 双形态处理 | |
-| 召回统计 | 中 | [recall.py](../../backend/service/recall.py) 单条 UPDATE 批量记召回 + 纯相似度排序 | 用 A/B 数据移除衰减的决策 |
-| 三阶段提取 | 中深 | [extraction.py](../../backend/service/extraction.py) gather 并行 + few-shot prompt v3 + 函数调用通道 | A/B 数字见 §10 |
-| rerank | 薄 | [rerank.py:57](../../backend/service/rerank.py) SDK 调用 + pointwise gather | cross-encoder 原理需掌握;已实证 scale-dependent |
-| vector_search | 薄 | [retrieval.py](../../backend/service/retrieval.py) 白名单 filter | SQL 可见 |
-| RAG 高级技巧 | 有 | jieba 中文分词 hybrid + query_rewrite tool([retrieval.py](../../backend/service/retrieval.py) sparse_search / [tools.py](../../backend/agent/tools.py)) | 三次假设迭代是亮点(§11) |
+| 召回统计 | 中 | [recall.py](../../backend/service/retrieval/recall.py) 单条 UPDATE 批量记召回 + 纯相似度排序 | 用 A/B 数据移除衰减的决策 |
+| 三阶段提取 | 中深 | [extraction.py](../../backend/service/ingestion/extraction.py) gather 并行 + few-shot prompt v3 + 函数调用通道 | A/B 数字见 §10 |
+| rerank | 薄 | [rerank.py:57](../../backend/service/retrieval/rerank.py) SDK 调用 + pointwise gather | cross-encoder 原理需掌握;已实证 scale-dependent |
+| vector_search | 薄 | [retrieval.py](../../backend/service/retrieval/retrieval.py) 白名单 filter | SQL 可见 |
+| RAG 高级技巧 | 有 | jieba 中文分词 hybrid + query_rewrite tool([retrieval.py](../../backend/service/retrieval/retrieval.py) sparse_search / [tools.py](../../backend/agent/tools.py)) | 三次假设迭代是亮点(§11) |
 | Prompt 高级技巧 | 有 | 提取 prompt 已加 few-shot examples(v3,`backend/service/prompts.py`),有量化对比 | 见 §10 |
 | 模型微调 | 无 | 直接用预训练 BGE-M3 | 后续方向 |
 
@@ -514,7 +525,7 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 ### 10.2 优化 1:Few-shot Examples
 
-在 entity 和 relation 提取的 prompt 里加 2-3 个 few-shot examples,提升准确率 + 降低 JSON 解析失败率。实现见 `backend/service/extraction.py` 的 prompt(`extraction.entities`/`extraction.relations` v3):
+在 entity 和 relation 提取的 prompt 里加 2-3 个 few-shot examples,提升准确率 + 降低 JSON 解析失败率。实现见 `backend/service/ingestion/extraction.py` 的 prompt(`extraction.entities`/`extraction.relations` v3):
 
 ```python
 _ENTITIES_PROMPT = """\
@@ -540,7 +551,7 @@ Now extract entities from the text above. Output ONLY the JSON array:"""
 
 ### 10.3 优化 2:Function Calling 强制结构化输出
 
-用 LLM 的 function calling 替代 `json.loads`,从机制上杜绝格式错误。实现见 `backend/service/extraction.py` 的 `extract_entities` / `extract_relations` 工具(OpenAI 兼容 provider 优先,降级 `chat_structured`):
+用 LLM 的 function calling 替代 `json.loads`,从机制上杜绝格式错误。实现见 `backend/service/ingestion/extraction.py` 的 `extract_entities` / `extract_relations` 工具(OpenAI 兼容 provider 优先,降级 `chat_structured`):
 
 ```python
 _EXTRACT_ENTITIES_TOOL = {
@@ -583,7 +594,7 @@ _EXTRACT_ENTITIES_TOOL = {
 # evals/extraction_eval.py
 """评估三阶段提取的准确率"""
 
-from backend.service.extraction import extract_memory
+from backend.service.ingestion.extraction import extract_memory
 from evals.ground_truth import EXTRACTION_GT  # 人工标注集
 
 
@@ -694,7 +705,7 @@ async def rewrite_query(query: str, n_variations: int = 3) -> list[str]:
 
 **目标**:dense vector 召回不了的概念查询,用 sparse(BM25 关键词)补位。两者并集后 rerank。
 
-关键实现:Postgres 原生 tsvector 的 `simple` 分词器对中文返回 0 行,故换成 jieba 分词 + GIN 索引 + Jaccard(见 [retrieval.py](../../backend/service/retrieval.py) `sparse_search`)。
+关键实现:Postgres 原生 tsvector 的 `simple` 分词器对中文返回 0 行,故换成 jieba 分词 + GIN 索引 + Jaccard(见 [retrieval.py](../../backend/service/retrieval/retrieval.py) `sparse_search`)。
 
 ```python
 async def sparse_search(query: str, top_k: int = 20) -> list[dict]:

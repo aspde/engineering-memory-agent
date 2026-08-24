@@ -183,7 +183,7 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 | 层 | 防线 | 失败语义 | 代码位置 |
 |----|------|---------|---------|
 | 1 精确去重 | content-hash 幂等门：精确重复在 LLM 抽取前停住；`meta.prior_hashes` 保留被合并/覆盖的旧 hash，重放与重摄取永远命中 | 零 LLM 成本，防重放污染 | `write_memory()` / `_find_by_content_hash()` |
-| 2 抽取降级 | 摘要 LLM 挂 → 原文前 200 字回退；实体/关系重试耗尽 → 降级 `[]` + ERROR + `ema_structured_failures_total` 计数；关系端点必须落在已提取实体集合内，否则丢弃（防幻觉端点） | 增强类失败降级，内容不丢 | `backend/service/extraction.py` |
+| 2 抽取降级 | 摘要 LLM 挂 → 原文前 200 字回退；实体/关系重试耗尽 → 降级 `[]` + ERROR + `ema_structured_failures_total` 计数；关系端点必须落在已提取实体集合内，否则丢弃（防幻觉端点） | 增强类失败降级，内容不丢 | `backend/service/ingestion/extraction.py` |
 | 3 阈值分级 | 四级相似度去重，阈值经标定：0.85 合并 / 0.72 冲突 / 0.60 关联 / <0.60 新增 | 边界带本身有噪声（embedding 只是信号，LLM 判断有主观性），所以"冲突"的后果不落在默认路径上 | `write_memory()` 分级 |
 | 4 矛盾不静默 | agent 路径 `interrupt()` 等人；webhook/连接器入 `pending_conflicts` 队列；检测失败降级 supplement（内容不丢）；每周巡检全量矛盾扫描兜底"写入时漏掉"的旧矛盾（巡检默认关闭，`PATROL_ENABLED=true` 开启，见 ADR-011） | 单点漏判不会变成永久的自相矛盾 | `_detect_conflict()` / `check_conflict_node` / `run_patrol()` |
 | 5 HITL 审批 | 写/摄取工具执行前等人确认；巡检无人值守，冲突自动 keep_both（上限 3 次） | 产品层最后防线 | `check_approval_node` |
@@ -254,15 +254,15 @@ Phase 4: 垂直场景（复盘/审查/Onboarding/技术债）  ← 纯消费层�
 | cross-encoder rerank 延迟 | 17.5s/query（CPU 瓶颈） | evals 实测，BGE-reranker-v2-m3 568M，待 GPU 优化 |
 | 代码量 | backend 约 1.4 万行（不含 agent）+ agent 约 2.3 千行（纯 Python，无前端） | wc -l |
 | 测试覆盖 | 1396 测试用例 | pytest --collect-only |
-| Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875 | run_task_eval 8 任务实测（DeepSeek，deterministic judge，2026-08-09） |
-| Agent 任务轨迹质量 | groundedness 1.000 / citation 0.875 / **0 执行错误**；unexpected_rate 0.375 暴露过度调用 | 同上次运行，详见 [llm-eval.md](llm-eval.md) |
+| Agent 任务级完成率 | **completed 0.500** / tool_recall 0.938 / within_budget 0.875（2026-08-09 基线） | run_task_eval 8 任务实测（DeepSeek，deterministic judge）；过度调用已于 2026-08-24 修复（见下行与 [ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)） |
+| Agent 任务轨迹质量 | groundedness 1.000 / citation 0.875 / **0 执行错误**；unexpected_rate **0.375→0.000**（工具纪律 prompt v6 后三次复测稳定归零） | 基线同上次运行；修复后数据见 [task_eval_report.md](../../evals/reports/task_eval_report.md) |
 | 日均检索次数 | [待生产部署后统计] | — |
 | Agent 单轮平均 tool 调用 | 2.6 次（任务级实测，task 轨迹均值） | run_task_eval 8 任务 n_steps 均值 |
 | 对话 P95 延迟 | **73.6s（10 轮真实对话实测，P50 43.2s / mean 35.9s）** | tests/perf/measure_chat_p95.py（2026-08-11，DeepSeek deepseek-v4-flash + 本地 BGE-M3；主要耗时在每轮约 19 次 rerank_llm 约 40s） |
 | 单轮对话 token / 成本 | **≈28.6k tokens/轮 ≈¥0.06**（10 轮合计 285.9k tokens / 估 $0.081） | 同上；成本大头 rerank_llm 75.6k + agent_chat 165.8k（含 144k cache_read 折扣价，见 [usage.py](../../backend/service/usage.py) `estimate_cost`） |
 | 项目周期 | 3 个月，端到端推进 | — |
 
-**任务级评估设计**：8 个真实多步任务驱动**完整 Agent 图**（ReAct 循环 + 真实工具执行 + HITL 自动放行），测的不是单次决策而是整条轨迹——`completed`（调齐必备工具 + 实质答案）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）。HITL 自动放行是为了隔离"人的决策"与"Agent 能力"。**实测最有价值的不是分数，而是它暴露了组件级评测看不到的轨迹级问题**：DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了 4 次），概念查询甚至撞 max_steps——`unexpected_rate 0.375` 是 completed 掉到 0.5 的主因，改进方向是强化工具描述边界与轨迹节流。这套评估还顺带抓出并修复了一个生产 HITL 正确性 bug（拒绝审批后写操作仍被静态边路由执行），见 [llm-eval.md](llm-eval.md) 末尾。
+**任务级评估设计**：8 个真实多步任务驱动**完整 Agent 图**（ReAct 循环 + 真实工具执行 + HITL 自动放行），测的不是单次决策而是整条轨迹——`completed`（调齐必备工具 + 实质答案）/ `tool_recall` / `within_budget`（未撞 max_steps 强制终止）/ 答案接地（judge 对 Agent 实际看到的工具上下文判定）。HITL 自动放行是为了隔离"人的决策"与"Agent 能力"。**实测最有价值的不是分数，而是它暴露了组件级评测看不到的轨迹级问题**：DeepSeek 对单检索任务过度调用工具（task-006 回答一个记忆问题调了 4 次），概念查询甚至撞 max_steps——`unexpected_rate 0.375` 是 completed 掉到 0.5 的主因。该短板已由工具纪律 prompt（agent.system v6 + 检索工具描述边界，零机制变更）修复：三次复测 unexpected_rate 全部归零、task-001 轨迹从错调两个工具变为精确一次调用（[ADR-012](../decisions/ADR-012-tool-discipline-prompt.md)）。这套评估还顺带抓出并修复了一个生产 HITL 正确性 bug（拒绝审批后写操作仍被静态边路由执行），见 [llm-eval.md](llm-eval.md) 末尾。
 
 **评估集设计**：70 条标注 query，5 类 × 14 条，用**内容指纹**而非 UUID 匹配相关结果（可移植、CI 友好）；difficulty 分 easy/medium/hard（18/30/22，hard 占 31%），每条标 1 条相关记忆。**三个如实披露的点**：
 1. **主评估集是"自问自答"构造的**——每条 query 由目标记忆反向生成、每条只有 1 条相关记忆，Recall@5 只能证明"找得到"（当前默认基线 0.886），不能证明"判别力"。它测的是"记住答案"而非"检索能力"，是回归基线不是能力上限。
