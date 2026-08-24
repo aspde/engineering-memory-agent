@@ -101,38 +101,18 @@ class TestPingCodeNormalize:
 
 class TestPingCodeSourceType:
     @pytest.mark.asyncio
-    async def test_bug_uses_pingcode_bug(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_bug_uses_pingcode_bug(self):
         conn = PingCodeConnector()
-        await conn.process("content", {"item_type": "缺陷"})
+        _, source_type, _ = await conn.prepare("content", {"item_type": "缺陷"})
 
-        assert calls[0]["source_type"] == "pingcode_bug"
+        assert source_type == "pingcode_bug"
 
     @pytest.mark.asyncio
-    async def test_requirement_uses_pingcode(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_requirement_uses_pingcode(self):
         conn = PingCodeConnector()
-        await conn.process("content", {"item_type": "需求"})
+        _, source_type, _ = await conn.prepare("content", {"item_type": "需求"})
 
-        assert calls[0]["source_type"] == "pingcode"
+        assert source_type == "pingcode"
 
 
 class TestPingCodeBuildMetadata:

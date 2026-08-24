@@ -100,52 +100,26 @@ class TestConnectorABC:
         assert results == ["Test: a", "Test: b", "Test: c"]
 
 
-class TestConnectorProcess:
-    """The default process() calls write_memory() — test that wiring."""
+class TestConnectorPrepare:
+    """The default prepare() is a pass-through tagged with source_type."""
 
     @pytest.mark.asyncio
-    async def test_default_process_calls_write_memory(self, monkeypatch):
-        """Default process() delegates to write_memory with correct params."""
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write_memory(content, source_type, metadata):
-            calls.append(
-                {"content": content, "source_type": source_type, "metadata": metadata}
-            )
-            return {"id": "fake-id", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write_memory)
-
+    async def test_default_prepare_passes_through(self):
+        """Default prepare() returns (content, source_type, metadata) unchanged."""
         conn = _TestConnector()
-        result = await conn.process("hello", {"key": "val"})
+        content, source_type, metadata = await conn.prepare("hello", {"key": "val"})
 
-        assert result["id"] == "fake-id"
-        assert len(calls) == 1
-        assert calls[0]["content"] == "hello"
-        assert calls[0]["source_type"] == "test_source"
-        assert calls[0]["metadata"] == {"key": "val"}
+        assert content == "hello"
+        assert source_type == "test_source"
+        assert metadata == {"key": "val"}
 
     @pytest.mark.asyncio
-    async def test_default_process_metadata_none(self, monkeypatch):
-        """Default process() handles metadata=None gracefully."""
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write_memory(content, source_type, metadata):
-            calls.append(
-                {"content": content, "source_type": source_type, "metadata": metadata}
-            )
-            return {"id": "id2", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write_memory)
-
+    async def test_default_prepare_metadata_none(self):
+        """Default prepare() handles metadata=None gracefully."""
         conn = _TestConnector()
-        await conn.process("content only")
+        _, _, metadata = await conn.prepare("content only")
 
-        assert calls[0]["metadata"] is None
+        assert metadata is None
 
 
 # ── Registry tests ────────────────────────────────────────────────────

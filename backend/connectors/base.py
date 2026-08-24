@@ -1,9 +1,10 @@
 """Connector abstract base class.
 
 Every external data source adapter implements these four methods.
-The ``process()`` method has a sensible default that writes directly
-to the memory pipeline — individual connectors can override it when
-they need custom storage logic.
+The ``prepare()`` method produces storage-ready data — individual
+connectors override it when they need enrichment or derived source
+types.  Writing to the memory pipeline belongs to the caller (the
+webhook route), keeping this package free of storage-layer imports.
 """
 
 from __future__ import annotations
@@ -165,17 +166,15 @@ class Connector(ABC):
         """
         return [self.normalize(p) for p in payloads]
 
-    async def process(self, content: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Write *content* into EMA's memory pipeline.
+    async def prepare(
+        self, content: str, metadata: dict[str, Any] | None = None
+    ) -> tuple[str, str, dict[str, Any] | None]:
+        """Produce storage-ready ``(content, source_type, metadata)``.
 
-        The default implementation calls ``write_memory()``.  Override
-        when a connector needs custom storage (e.g. writing chunks in
-        addition to memories, or using a specific similarity threshold).
+        The default implementation is a plain pass-through tagged with
+        this connector's ``source_type``.  Override when a connector
+        needs enrichment or a derived source type (e.g. CI regression
+        detection).  The caller — the webhook route — owns the actual
+        ``write_memory()`` call.
         """
-        from backend.service.memory import write_memory
-
-        return await write_memory(
-            content,
-            source_type=self.source_type,
-            metadata=metadata,
-        )
+        return content, self.source_type, metadata

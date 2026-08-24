@@ -157,34 +157,32 @@ class CIConnector(Connector):
 
         return meta
 
-    async def process(
+    async def prepare(
         self, content: str, metadata: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        """Write to memory, enriching with GitHub Actions data.
+    ) -> tuple[str, str, dict[str, Any] | None]:
+        """Enrich with GitHub Actions data and detect duration regressions.
 
         When ``config.ci_github.token`` is set and the metadata carries
         GitHub identifiers, ``_enrich_github`` fetches the authoritative job
         duration, a median-duration baseline, and a bounded full job log —
         each step degrading independently on GitHub-side failure.  The
         regression check then runs on the enriched values; without a
-        baseline the memory stays ``ci_build``.
+        baseline the source stays ``ci_build``.
         """
-        from backend.service.memory import write_memory
-
         meta = metadata or {}
         content, meta = await self._enrich_github(content, meta)
 
         duration = meta.get("duration_seconds")
         baseline = meta.get("baseline_duration_seconds")
 
-        effective_source = "ci_build"
+        source_type = "ci_build"
         if (
             isinstance(duration, (int, float))
             and isinstance(baseline, (int, float))
             and baseline > 0
             and duration > baseline * REGRESSION_RATIO
         ):
-            effective_source = "ci_regression"
+            source_type = "ci_regression"
             # Enrich content with regression context
             ratio = duration / baseline
             content = (
@@ -193,7 +191,7 @@ class CIConnector(Connector):
                 + content
             )
 
-        return await write_memory(content, source_type=effective_source, metadata=meta)
+        return content, source_type, meta
 
     def _github_identifiers(
         self, meta: dict[str, Any]

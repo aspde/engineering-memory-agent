@@ -17,7 +17,6 @@ from httpx import ASGITransport, AsyncClient, ConnectError
 from backend.connectors.ci import CIConnector
 from backend.connectors.registry import register_connector
 from backend.main import app
-
 from tests.api.test_webhook_routes import _signed_post, _wait_for_status
 
 
@@ -60,7 +59,7 @@ def _register_ci_connector(monkeypatch):
     monkeypatch.setattr(ci_module, "GitHubActionsClient", _DownGHClient)
     register_connector("ci", CIConnector(), status="active")
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
     ) as mock_write:
         mock_write.return_value = {
@@ -123,7 +122,7 @@ async def test_github_down_memory_receives_plain_content(
     # Override the autouse stub for this test (the background task runs after
     # the response returns, so the override must outlive the POST).
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
         side_effect=_capture,
     ):

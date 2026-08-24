@@ -5,9 +5,9 @@ pipeline:
 
   Request (fast, ~ms):  verify signature → validate → normalize →
                         write a ``received`` delivery log → return 202.
-  Background (slow):    connector.process() (LLM extraction + embedding)
-                        → update the delivery log to processed /
-                        conflict_pending / failed.
+  Background (slow):    connector.prepare() (enrichment) → write_memory()
+                        (LLM extraction + embedding) → update the delivery
+                        log to processed / conflict_pending / failed.
 
 The background dispatch is in-process (``asyncio.create_task``), matching
 the same availability tradeoff as the InMemorySaver checkpointer fallback:
@@ -38,6 +38,7 @@ from sqlalchemy import text
 from backend.connectors.registry import get_connector, list_connectors
 from backend.db import get_session_factory
 from backend.service.conflicts import persist_pending_conflict
+from backend.service.memory import write_memory
 from backend.shared.config import config, current_trace_id
 
 logger = logging.getLogger(__name__)
@@ -238,9 +239,13 @@ async def _process_delivery(
 ) -> None:
     """Run the connector's (slow) extraction pipeline, then record the outcome.
 
-    Runs as an ``asyncio.create_task`` spawned by ``receive_webhook``; the
-    delivery-log row was written with ``status='received'`` at accept time.
-    Every exit path releases the concurrency slot it consumed.
+    The connector ``prepare()`` step produces storage-ready content and
+    source type (enrichment, regression detection); the actual
+    ``write_memory()`` call lives here so connectors stay free of
+    storage-layer imports.  Runs as an ``asyncio.create_task`` spawned by
+    ``receive_webhook``; the delivery-log row was written with
+    ``status='received'`` at accept time.  Every exit path releases the
+    concurrency slot it consumed.
     """
     # Link every LLM call this ingestion makes to one trace (the agent chat
     # and patrol paths already set a trace id) so ``GET /api/usage/trace/{id}``
@@ -251,7 +256,10 @@ async def _process_delivery(
     delivery_terminal = False
     try:
         try:
-            result = await connector.process(content, metadata)
+            content_prepared, source_type, meta = await connector.prepare(content, metadata)
+            result = await write_memory(
+                content_prepared, source_type=source_type, metadata=meta
+            )
             memory_id: str | None = result.get("id") if isinstance(result, dict) else None
             conflict_id: str | None = None
             if isinstance(result, dict) and result.get("action") == "conflict":

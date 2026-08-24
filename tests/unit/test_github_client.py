@@ -163,7 +163,7 @@ class TestBaseline:
         missing_name: list[int] | None = None,
         non_success: list[int] | None = None,
         missing_duration: list[int] | None = None,
-    ) -> "httpx.MockTransport":
+    ) -> httpx.MockTransport:
         missing_name = missing_name or []
         non_success = non_success or []
         missing_duration = missing_duration or []

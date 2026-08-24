@@ -1,7 +1,5 @@
 """Unit tests for CIConnector — pure data transformation, no IO."""
 
-from unittest.mock import AsyncMock
-
 import pytest
 
 from backend.connectors.ci import CIConnector
@@ -80,20 +78,171 @@ def gh_enabled(monkeypatch) -> _FakeGHClient:
     return fake
 
 
-def _fake_write_recorder(monkeypatch) -> list[dict]:
-    """Patch ``write_memory`` to record calls; returns the record list."""
-    from backend.service import memory as mem_module
+# ── GitHub enrichment via prepare ─────────────────────────────────────
 
-    calls: list[dict] = []
 
-    async def _fake_write(content, source_type, metadata=None):
-        calls.append(
-            {"content": content, "source_type": source_type, "metadata": metadata}
+class TestGithubEnrichment:
+    _CONTENT = (
+        "CI Build: unit-tests — FAILURE\n"
+        "Commit: abc123\n"
+        "Branch: main\n"
+        "Duration: 5.0s\n"
+        "Error:\nboom"
+    )
+
+    def _meta(self, **extra) -> dict:
+        return {
+            "job_name": "unit-tests",
+            "branch": "main",
+            "github_owner": "octo",
+            "github_repo": "repo",
+            "github_run_id": 123,
+            "github_job_id": 456,
+            **extra,
+        }
+
+    @pytest.mark.asyncio
+    async def test_no_token_client_never_constructed(self, monkeypatch):
+        """With the default empty token, enrichment stays fully off."""
+
+        def _boom(**kw):
+            raise AssertionError("GitHubActionsClient constructed without a token")
+
+        from backend.connectors import ci as ci_module
+
+        monkeypatch.setattr(ci_module, "GitHubActionsClient", _boom)
+
+        conn = CIConnector()
+        content, source_type, meta = await conn.prepare("content", self._meta())
+
+        assert source_type == "ci_build"
+        assert content == "content"
+
+    @pytest.mark.asyncio
+    async def test_token_with_ids_enriches_to_regression(self, gh_enabled):
+        fake = gh_enabled
+        fake.baseline_result = 30.0
+        fake.job_log_result = "Run some step\n"
+
+        conn = CIConnector()
+        content, source_type, meta = await conn.prepare(self._CONTENT, self._meta())
+
+        assert source_type == "ci_regression"
+        assert "4.0×" in content           # 120 / 30
+        assert "Duration: 120.0s" in content  # authoritative duration
+        assert "GitHub Actions Log:" in content
+        assert "Run some step" in content
+        assert meta["duration_seconds"] == 120.0
+        assert meta["baseline_duration_seconds"] == 30.0
+        assert meta["log_enrichment"] is True
+        assert meta["github_owner"] == "octo"  # original meta preserved
+
+    @pytest.mark.asyncio
+    async def test_baseline_error_keeps_log_and_duration(self, gh_enabled):
+        fake = gh_enabled
+        fake.baseline_error = RuntimeError("gh down")
+        fake.job_log_result = "log line"
+
+        conn = CIConnector()
+        content, source_type, meta = await conn.prepare(self._CONTENT, self._meta())
+
+        # No baseline → no regression, but the duration + log enrichment survived.
+        assert source_type == "ci_build"
+        assert "GitHub Actions Log:" in content
+        assert meta["duration_seconds"] == 120.0
+        assert "baseline_duration_seconds" not in meta
+
+    @pytest.mark.asyncio
+    async def test_all_calls_fail_returns_inbound_content(self, gh_enabled):
+        fake = gh_enabled
+        fake.get_job_error = RuntimeError("gh down")
+        fake.baseline_error = RuntimeError("gh down")
+        fake.job_log_error = RuntimeError("gh down")
+
+        conn = CIConnector()
+        content, source_type, _ = await conn.prepare(self._CONTENT, self._meta())
+
+        # Content is byte-for-byte identical to the inbound input.
+        assert source_type == "ci_build"
+        assert content == self._CONTENT
+
+    @pytest.mark.asyncio
+    async def test_empty_log_no_log_section(self, gh_enabled):
+        fake = gh_enabled
+        fake.baseline_result = 30.0
+        fake.job_log_result = ""
+
+        conn = CIConnector()
+        content, source_type, meta = await conn.prepare(self._CONTENT, self._meta())
+
+        assert source_type == "ci_regression"
+        assert "GitHub Actions Log:" not in content
+        assert "log_enrichment" not in meta
+
+    @pytest.mark.asyncio
+    async def test_baseline_none_with_duration_is_ci_build(self, gh_enabled):
+        fake = gh_enabled
+        fake.baseline_result = None
+
+        conn = CIConnector()
+        _, source_type, meta = await conn.prepare(self._CONTENT, self._meta())
+
+        assert source_type == "ci_build"
+        assert "baseline_duration_seconds" not in meta
+
+    @pytest.mark.asyncio
+    async def test_no_job_id_baseline_still_runs(self, gh_enabled):
+        """owner/repo/run_id without job_id → baseline runs, job calls don't."""
+        fake = gh_enabled
+        fake.baseline_result = 30.0
+
+        conn = CIConnector()
+        _, _, meta = await conn.prepare(
+            "CI Build: unit-tests — FAILURE\nCommit: abc",
+            self._meta(github_job_id=None),
         )
-        return {"id": "x", "action": "inserted", "summary": content}
 
-    monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-    return calls
+        kinds = [c[0] for c in fake.calls]
+        assert "baseline" in kinds
+        assert "get_job" not in kinds
+        assert "job_log" not in kinds
+        assert meta["baseline_duration_seconds"] == 30.0
+
+    @pytest.mark.asyncio
+    async def test_github_build_url_resolves_identifiers(self, gh_enabled):
+        """Owner/repo/run_id/job_id parsed from a GitHub build_url."""
+        fake = gh_enabled
+        fake.baseline_result = 30.0
+        fake.job_log_result = "log"
+
+        conn = CIConnector()
+        meta = {
+            "job_name": "unit-tests",
+            "branch": "main",
+            "source_url": "https://github.com/o/r/actions/runs/5/job/6",
+        }
+        _, _, out_meta = await conn.prepare(self._CONTENT, meta)
+
+        job_calls = [c for c in fake.calls if c[0] == "get_job"]
+        assert job_calls, "get_job must be called with identifiers from build_url"
+        assert job_calls[0][1:] == ("o", "r", "6")
+        assert out_meta["duration_seconds"] == 120.0
+
+    @pytest.mark.asyncio
+    async def test_jenkins_build_url_skips_enrichment(self, gh_enabled):
+        fake = gh_enabled
+
+        conn = CIConnector()
+        meta = {
+            "job_name": "unit-tests",
+            "branch": "main",
+            "source_url": "https://jenkins.example.com/job/x/42",
+        }
+        content, source_type, _ = await conn.prepare("content", meta)
+
+        assert fake.calls == []  # no GitHub identifiers → no client calls
+        assert source_type == "ci_build"
+        assert content == "content"
 
 
 def _make_payload(
@@ -266,101 +415,55 @@ class TestCIBuildMetadata:
 
 class TestCIRegression:
     @pytest.mark.asyncio
-    async def test_normal_build_uses_ci_build_source(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type, "content": content})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_normal_build_uses_ci_build_source(self):
         conn = CIConnector()
-        await conn.process("content", {"duration_seconds": 30, "baseline_duration_seconds": 45})
+        content, source_type, _ = await conn.prepare(
+            "content", {"duration_seconds": 30, "baseline_duration_seconds": 45}
+        )
 
-        assert calls[0]["source_type"] == "ci_build"
-        assert "[DURATION REGRESSION" not in calls[0]["content"]
+        assert source_type == "ci_build"
+        assert "[DURATION REGRESSION" not in content
 
     @pytest.mark.asyncio
-    async def test_regression_uses_ci_regression_source(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type, "content": content})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_regression_uses_ci_regression_source(self):
         conn = CIConnector()
-        await conn.process(
+        content, source_type, _ = await conn.prepare(
             "original content",
             {"duration_seconds": 120, "baseline_duration_seconds": 30},
         )
 
-        assert calls[0]["source_type"] == "ci_regression"
-        assert "[DURATION REGRESSION" in calls[0]["content"]
-        assert "4.0×" in calls[0]["content"]
-        assert "120.0s" in calls[0]["content"]
-        assert "30.0s" in calls[0]["content"]
+        assert source_type == "ci_regression"
+        assert "[DURATION REGRESSION" in content
+        assert "4.0×" in content
+        assert "120.0s" in content
+        assert "30.0s" in content
 
     @pytest.mark.asyncio
-    async def test_no_baseline_no_regression(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_no_baseline_no_regression(self):
         conn = CIConnector()
-        await conn.process("content", {"duration_seconds": 999})
+        _, source_type, _ = await conn.prepare("content", {"duration_seconds": 999})
 
-        assert calls[0]["source_type"] == "ci_build"
+        assert source_type == "ci_build"
 
     @pytest.mark.asyncio
-    async def test_zero_baseline_no_division_error(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_zero_baseline_no_division_error(self):
         conn = CIConnector()
         # baseline=0 should not trigger regression (division by zero avoided)
-        await conn.process("content", {"duration_seconds": 100, "baseline_duration_seconds": 0})
+        _, source_type, _ = await conn.prepare(
+            "content", {"duration_seconds": 100, "baseline_duration_seconds": 0}
+        )
 
-        assert calls[0]["source_type"] == "ci_build"
+        assert source_type == "ci_build"
 
     @pytest.mark.asyncio
-    async def test_exactly_at_threshold_no_regression(self, monkeypatch):
-        from backend.service import memory as mem_module
-
-        calls: list[dict] = []
-
-        async def _fake_write(content, source_type, metadata):
-            calls.append({"source_type": source_type})
-            return {"id": "x", "action": "inserted", "summary": content}
-
-        monkeypatch.setattr(mem_module, "write_memory", _fake_write)
-
+    async def test_exactly_at_threshold_no_regression(self):
         conn = CIConnector()
         # Exactly 2.0× (not strictly greater) → no regression
-        await conn.process(
+        _, source_type, _ = await conn.prepare(
             "content", {"duration_seconds": 60, "baseline_duration_seconds": 30}
         )
 
-        assert calls[0]["source_type"] == "ci_build"
+        assert source_type == "ci_build"
 
 
 # ── build_metadata: GitHub identifiers ────────────────────────────────
@@ -411,187 +514,3 @@ class TestCIBuildMetadataGithub:
         )
         assert meta["source_url"] == "https://jenkins.example.com/job/x/42"
         assert not any(key.startswith("github_") for key in meta)
-
-
-# ── GitHub enrichment via process ─────────────────────────────────────
-
-
-class TestGithubEnrichment:
-    _CONTENT = (
-        "CI Build: unit-tests — FAILURE\n"
-        "Commit: abc123\n"
-        "Branch: main\n"
-        "Duration: 5.0s\n"
-        "Error:\nboom"
-    )
-
-    def _meta(self, **extra) -> dict:
-        return {
-            "job_name": "unit-tests",
-            "branch": "main",
-            "github_owner": "octo",
-            "github_repo": "repo",
-            "github_run_id": 123,
-            "github_job_id": 456,
-            **extra,
-        }
-
-    @pytest.mark.asyncio
-    async def test_no_token_client_never_constructed(self, monkeypatch):
-        """With the default empty token, enrichment stays fully off."""
-
-        def _boom(**kw):
-            raise AssertionError("GitHubActionsClient constructed without a token")
-
-        from backend.connectors import ci as ci_module
-
-        monkeypatch.setattr(ci_module, "GitHubActionsClient", _boom)
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process("content", self._meta())
-
-        assert calls[0]["source_type"] == "ci_build"
-        assert calls[0]["content"] == "content"
-
-    @pytest.mark.asyncio
-    async def test_token_with_ids_enriches_to_regression(self, gh_enabled, monkeypatch):
-        fake = gh_enabled
-        fake.baseline_result = 30.0
-        fake.job_log_result = "Run some step\n"
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(self._CONTENT, self._meta())
-
-        out = calls[0]
-        assert out["source_type"] == "ci_regression"
-        assert "4.0×" in out["content"]           # 120 / 30
-        assert "Duration: 120.0s" in out["content"]  # authoritative duration
-        assert "GitHub Actions Log:" in out["content"]
-        assert "Run some step" in out["content"]
-        assert out["metadata"]["duration_seconds"] == 120.0
-        assert out["metadata"]["baseline_duration_seconds"] == 30.0
-        assert out["metadata"]["log_enrichment"] is True
-        assert out["metadata"]["github_owner"] == "octo"  # original meta preserved
-
-    @pytest.mark.asyncio
-    async def test_baseline_error_keeps_log_and_duration(self, gh_enabled, monkeypatch):
-        fake = gh_enabled
-        fake.baseline_error = RuntimeError("gh down")
-        fake.job_log_result = "log line"
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(self._CONTENT, self._meta())
-
-        out = calls[0]
-        # No baseline → no regression, but the duration + log enrichment survived.
-        assert out["source_type"] == "ci_build"
-        assert "GitHub Actions Log:" in out["content"]
-        assert out["metadata"]["duration_seconds"] == 120.0
-        assert "baseline_duration_seconds" not in out["metadata"]
-
-    @pytest.mark.asyncio
-    async def test_all_calls_fail_returns_inbound_content(self, gh_enabled, monkeypatch):
-        fake = gh_enabled
-        fake.get_job_error = RuntimeError("gh down")
-        fake.baseline_error = RuntimeError("gh down")
-        fake.job_log_error = RuntimeError("gh down")
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(self._CONTENT, self._meta())
-
-        # Content is byte-for-byte identical to the inbound input.
-        assert calls[0]["source_type"] == "ci_build"
-        assert calls[0]["content"] == self._CONTENT
-
-    @pytest.mark.asyncio
-    async def test_empty_log_no_log_section(self, gh_enabled, monkeypatch):
-        fake = gh_enabled
-        fake.baseline_result = 30.0
-        fake.job_log_result = ""
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(self._CONTENT, self._meta())
-
-        assert calls[0]["source_type"] == "ci_regression"
-        assert "GitHub Actions Log:" not in calls[0]["content"]
-        assert "log_enrichment" not in calls[0]["metadata"]
-
-    @pytest.mark.asyncio
-    async def test_baseline_none_with_duration_is_ci_build(
-        self, gh_enabled, monkeypatch
-    ):
-        fake = gh_enabled
-        fake.baseline_result = None
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(self._CONTENT, self._meta())
-
-        assert calls[0]["source_type"] == "ci_build"
-        assert "baseline_duration_seconds" not in calls[0]["metadata"]
-
-    @pytest.mark.asyncio
-    async def test_no_job_id_baseline_still_runs(self, gh_enabled, monkeypatch):
-        """owner/repo/run_id without job_id → baseline runs, job calls don't."""
-        fake = gh_enabled
-        fake.baseline_result = 30.0
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        await conn.process(
-            "CI Build: unit-tests — FAILURE\nCommit: abc",
-            self._meta(github_job_id=None),
-        )
-
-        kinds = [c[0] for c in fake.calls]
-        assert "baseline" in kinds
-        assert "get_job" not in kinds
-        assert "job_log" not in kinds
-        assert calls[0]["metadata"]["baseline_duration_seconds"] == 30.0
-
-    @pytest.mark.asyncio
-    async def test_github_build_url_resolves_identifiers(
-        self, gh_enabled, monkeypatch
-    ):
-        """Owner/repo/run_id/job_id parsed from a GitHub build_url."""
-        fake = gh_enabled
-        fake.baseline_result = 30.0
-        fake.job_log_result = "log"
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        meta = {
-            "job_name": "unit-tests",
-            "branch": "main",
-            "source_url": "https://github.com/o/r/actions/runs/5/job/6",
-        }
-        await conn.process(self._CONTENT, meta)
-
-        job_calls = [c for c in fake.calls if c[0] == "get_job"]
-        assert job_calls, "get_job must be called with identifiers from build_url"
-        assert job_calls[0][1:] == ("o", "r", "6")
-        assert calls[0]["metadata"]["duration_seconds"] == 120.0
-
-    @pytest.mark.asyncio
-    async def test_jenkins_build_url_skips_enrichment(
-        self, gh_enabled, monkeypatch
-    ):
-        fake = gh_enabled
-        calls = _fake_write_recorder(monkeypatch)
-
-        conn = CIConnector()
-        meta = {
-            "job_name": "unit-tests",
-            "branch": "main",
-            "source_url": "https://jenkins.example.com/job/x/42",
-        }
-        await conn.process("content", meta)
-
-        assert fake.calls == []  # no GitHub identifiers → no client calls
-        assert calls[0]["source_type"] == "ci_build"
-        assert calls[0]["content"] == "content"

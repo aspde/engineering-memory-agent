@@ -23,7 +23,6 @@ from backend.connectors.registry import CONNECTOR_REGISTRY, register_connector
 from backend.db import get_session_factory
 from backend.main import app
 from backend.shared.config import config
-
 from tests.api.test_webhook_routes import _signed_post, _wait_for_status
 
 
@@ -40,7 +39,7 @@ def _register_ci_connector(monkeypatch):
     monkeypatch.setenv("WEBHOOK_CI_SECRET", "testsecret123")
     register_connector("ci", CIConnector(), status="active")
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
     ) as mock_write:
         mock_write.return_value = {
@@ -55,7 +54,7 @@ def _register_ci_connector(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_cooldowns():
-    from backend.service.event_analysis import reset_cooldowns_for_tests
+    from backend.runner.event_analysis import reset_cooldowns_for_tests
 
     reset_cooldowns_for_tests()
     yield
@@ -99,7 +98,7 @@ class TestWebhookTriggersEventAnalysis:
         with (
             patch.object(config.event_analysis, "enabled", True),
             patch(
-                "backend.service.event_analysis.run_event_analysis", runner
+                "backend.runner.event_analysis.run_event_analysis", runner
             ) as _runner_patch,
         ):
             # The webhook task imports maybe_analyze_event at call time;
@@ -116,7 +115,7 @@ class TestWebhookTriggersEventAnalysis:
     async def test_disabled_by_default_no_analysis(
         self, async_client: AsyncClient
     ):
-        import backend.service.event_analysis as ea
+        import backend.runner.event_analysis as ea
 
         gate = AsyncMock(wraps=ea.maybe_analyze_event)
         with (
@@ -152,7 +151,7 @@ class TestWebhookTriggersEventAnalysis:
 
         with (
             patch.object(config.event_analysis, "enabled", True),
-            patch("backend.service.event_analysis.run_event_analysis", _slow_runner),
+            patch("backend.runner.event_analysis.run_event_analysis", _slow_runner),
         ):
             raw, headers = _signed_post(dict(_CI_PAYLOAD, job_name="build-slot"))
             resp = await async_client.post("/api/webhook/ci", content=raw, headers=headers)
@@ -174,7 +173,7 @@ class TestWebhookTriggersEventAnalysis:
         with (
             patch.object(config.event_analysis, "enabled", True),
             patch(
-                "backend.service.event_analysis.run_event_analysis",
+                "backend.runner.event_analysis.run_event_analysis",
                 AsyncMock(side_effect=RuntimeError("analysis exploded")),
             ),
         ):
@@ -201,7 +200,7 @@ class TestWebhookTriggersEventAnalysis:
         with (
             patch.object(config.event_analysis, "enabled", True),
             patch(
-                "backend.service.event_analysis.get_agent", return_value=agent
+                "backend.runner.event_analysis.get_agent", return_value=agent
             ),
         ):
             raw, headers = _signed_post(dict(_CI_PAYLOAD, job_name="build-persist"))

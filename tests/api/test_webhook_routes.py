@@ -101,7 +101,7 @@ def _register_test_connector(monkeypatch):
     register_connector("fake_ci", _FakeConnector(), status="active")
     # Mock write_memory so we don't hit the real embedding pipeline
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
     ) as mock_write:
         mock_write.return_value = {
@@ -339,7 +339,7 @@ class TestWebhookLogging:
         # The background task runs after the response returns, so the failure
         # patch must stay installed until the delivery log shows the outcome.
         with patch(
-            "backend.service.memory.write_memory",
+            "backend.api.routes.webhook_routes.write_memory",
             new_callable=AsyncMock,
             side_effect=RuntimeError("LLM provider down"),
         ):
@@ -403,7 +403,7 @@ async def test_background_processing_sets_trace_id(async_client) -> None:
         }
 
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
         side_effect=_capture,
     ):
@@ -451,7 +451,7 @@ class TestWebhookConflict:
         # task runs after the response returns, so the override must stay
         # installed until the delivery log shows the conflict outcome.
         with patch(
-            "backend.service.memory.write_memory",
+            "backend.api.routes.webhook_routes.write_memory",
             new_callable=AsyncMock,
             return_value=conflict_result,
         ):
@@ -513,7 +513,7 @@ async def test_background_delivery_task_is_held_by_strong_reference(
         }
 
     with patch(
-        "backend.service.memory.write_memory",
+        "backend.api.routes.webhook_routes.write_memory",
         new_callable=AsyncMock,
         side_effect=_blocking_write,
     ):

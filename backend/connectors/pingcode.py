@@ -81,16 +81,14 @@ class PingCodeConnector(Connector):
 
         return meta
 
-    async def process(
+    async def prepare(
         self, content: str, metadata: dict[str, Any] | None = None
-    ) -> dict[str, Any]:
-        """写入记忆，缺陷类型使用 pingcode_bug 标记。"""
-        from backend.service.memory import write_memory
-
+    ) -> tuple[str, str, dict[str, Any] | None]:
+        """判定 source_type，缺陷类型使用 pingcode_bug 标记。"""
         meta = metadata or {}
         item_type: str = meta.get("item_type", "")
-        effective_source = (
+        source_type = (
             "pingcode_bug" if item_type in ("缺陷", "bug", "故障") else "pingcode"
         )
 
-        return await write_memory(content, source_type=effective_source, metadata=meta)
+        return content, source_type, meta
