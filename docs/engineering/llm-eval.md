@@ -279,6 +279,16 @@ evals/
 自动写入）说明它测于哪个通道。跨通道数字**不可比**——基线只在同通道上可比，
 换模型后的动作按此收敛：
 
+0. **新通道冒烟（先于一切数字）**：换模型先跑
+   `python -m evals.run_llm_eval --suite write_conflict,write_merge,auto_gate --sample 3`
+   和 task-eval 的 8 个任务，不等每周 CI。不同模型在"机器接口"上的差异比能力
+   差异更容易立刻爆炸——结构化输出是否合规、JSON 契约能否通过、工具调用格式
+   对不对。粗破损在冒烟层解决，别让全量 run 烧完 token 才发现模型不吐 JSON。
+0b. **task-eval 核对 prompt 适配性**：ADR-012 的工具纪律结论（unexpected_rate
+   多轮归零、task-008 零调用收口）是在特定模型上验证的**模型行为学结论**，
+   跨模型不保证迁移——停手纪律这类"教模型听话"的 prompt，不同模型服从性不同。
+   换模型后跑一轮 task-eval 确认 unexpected_rate 仍为 0、零调用收口未复发；
+   首个新模型轮次同时给 task-eval 门禁（暂未设置）提供校准数据。
 1. **本地实验通道（不产基线）**：换模型试效果，用
    `compare_baseline --baseline <当前基线>` 看相对当前基线的 delta，或改动前后
    同通道各跑一次做 A/B。实验通道的数字不提交为基线、不进 eval.yml。
@@ -286,7 +296,9 @@ evals/
    `LLM_PROVIDER=<CI 通道> LLM_API_KEY=<key> python -m evals.run_llm_eval
    --suite <该 job 的套件> --judge llm --report-json evals/reports/<基线名>.json`，
    确认 0 执行错误 / 0 judge 降级后提交；基线 JSON 自带
-   `run_provenance`，无需再文档考古。
+   `run_provenance`，无需再文档考古。**基线匿名不可提交**——
+   `evals/tests/test_baseline_provenance.py` 会拦下没有 model/judge 字段的
+   基线（write 基线曾匿名入库、事后考古回填的事故不再重演）。
 3. **门禁阈值何时动**：默认**不动**——写入门禁 floors（0.90/0.85 级别）是能力
    底线，换同量级模型通常仍贴近满分，门禁照常工作。只有 CI 连续误红（新模型
    压线）时，按新基线重推 floors 并去掉 YAML 里的 provisional 标注。
@@ -294,6 +306,9 @@ evals/
    faithfulness 等）跨 judge 不可比，语义基线需要重跑；确定性门禁不受影响。
 5. **embedding 模型换**：另一个量级——全库重嵌入 + 检索基线全部作废重测，
    本 runbook 不覆盖。
+6. **成本追踪同步**：`backend/service/usage.py` 的价格表对新模型回落保守默认
+   价（不报 0 但不准，且无提示）。换模型时按 provider 定价把新模型加进
+   `_PRICE_RULES`（一行正则匹配），否则成本仪表盘每次换模型静默降级为估算。
 
 ### 为什么门禁不用 LLM judge
 
