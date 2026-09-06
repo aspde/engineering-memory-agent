@@ -35,6 +35,27 @@ from backend.shared.resilience import CircuitOpenError
 logger = logging.getLogger(__name__)
 
 
+def _parse_strict_json(raw: str) -> Any:
+    """``json.loads`` with one markdown-fence fallback.
+
+    Models asked for pure JSON sometimes wrap it in ``` fences anyway
+    (observed 2026-09-06 on the CI llm-eval run: the retry after a provider
+    timeout returned fenced JSON and burned a second structured attempt on a
+    parse error).  Fence-stripping is deterministic and safe — it never
+    alters unfenced text — so it belongs in the parse path, not the retry
+    loop: one saved LLM round-trip per occurrence.
+    """
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        from backend.service.json_extraction import strip_markdown_fence
+
+        stripped = strip_markdown_fence(raw)
+        if stripped == raw:
+            raise
+        return json.loads(stripped)
+
+
 async def chat_structured(
     messages: list[dict[str, str]],
     *,
@@ -86,7 +107,7 @@ async def chat_structured(
             raw = await llm.chat_json(
                 prompt, json_schema=json_schema, scenario=scenario, **kwargs
             )
-            data = json.loads(raw)
+            data = _parse_strict_json(raw)
             jsonschema_validate(data, json_schema)
             return data
         except (json.JSONDecodeError, ValidationError, TypeError) as exc:

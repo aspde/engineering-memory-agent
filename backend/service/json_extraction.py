@@ -18,6 +18,31 @@ logger = logging.getLogger(__name__)
 _RAW_OUTPUT_CAP = 5000
 
 
+def strip_markdown_fence(text: str) -> str:
+    """Return the contents of the first markdown code fence, else *text*.
+
+    Models instructed to emit pure JSON still wrap it in ``` fences (observed
+    on the structured-output channel: the retry after a provider timeout
+    came back fenced and the strict ``json.loads`` in ``chat_structured``
+    rejected it).  Shared by :func:`extract_json_object` (already had this
+    logic inline) and ``chat_structured``'s parse retry.
+    """
+    if "```" not in text:
+        return text
+    lines = text.split("\n")
+    in_fence = False
+    fence_lines: list[str] = []
+    for line in lines:
+        if line.strip().startswith("```"):
+            if in_fence:
+                break
+            in_fence = True
+            continue
+        if in_fence:
+            fence_lines.append(line)
+    return "\n".join(fence_lines) if fence_lines else text
+
+
 def extract_json_object(raw_text: str, *, label: str = "findings") -> dict | None:
     """Try to parse *raw_text* as a JSON object.
 
@@ -36,23 +61,12 @@ def extract_json_object(raw_text: str, *, label: str = "findings") -> dict | Non
         pass
 
     # Markdown code fences
-    if "```" in text:
-        lines = text.split("\n")
-        in_fence = False
-        fence_lines: list[str] = []
-        for line in lines:
-            if line.strip().startswith("```"):
-                if in_fence:
-                    break
-                in_fence = True
-                continue
-            if in_fence:
-                fence_lines.append(line)
-        if fence_lines:
-            try:
-                return json.loads("\n".join(fence_lines))
-            except json.JSONDecodeError:
-                pass
+    fenced = strip_markdown_fence(text)
+    if fenced != text:
+        try:
+            return json.loads(fenced)
+        except json.JSONDecodeError:
+            pass
 
     # Greedy last-{ to first-} window
     m = re.search(r"\{[\s\S]*\}", text)

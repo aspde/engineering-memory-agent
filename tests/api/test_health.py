@@ -60,8 +60,29 @@ class TestSpaFallbackApiBoundary:
         resp = await async_client.get("/memories")
         assert resp.status_code == 200
 
+    @pytest.fixture
+    def built_spa(self, monkeypatch, tmp_path):
+        """A minimal frontend/dist so the cache tests don't depend on the
+        build artifacts.
+
+        These tests assert the *serving headers* of the SPA fallback, but
+        ``spa_fallback`` only emits Cache-Control/ETag when index.html
+        exists — and CI's backend-tests job never builds the frontend, so
+        the module-level ``_FRONTEND_DIST`` pointed at an empty directory
+        and the tests saw the "Frontend not built" JSON branch instead
+        (red since 2026-08-15).  Point it at a temp dir with a stub
+        index.html; header logic is what's under test, not Vite output.
+        """
+        import backend.main as main_mod
+
+        (tmp_path / "index.html").write_text(
+            "<!doctype html><html><body>spa-test</body></html>",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(main_mod, "_FRONTEND_DIST", tmp_path)
+
     @pytest.mark.asyncio
-    async def test_index_html_is_not_cached(self, async_client) -> None:
+    async def test_index_html_is_not_cached(self, async_client, built_spa) -> None:
         # index.html must revalidate on every load so a new deploy's HTML
         # (which references new hashed asset filenames) is picked up
         # immediately instead of serving the stale bundle.
@@ -70,7 +91,7 @@ class TestSpaFallbackApiBoundary:
         assert resp.headers.get("cache-control") == "no-cache"
 
     @pytest.mark.asyncio
-    async def test_index_html_revalidates_to_304(self, async_client) -> None:
+    async def test_index_html_revalidates_to_304(self, async_client, built_spa) -> None:
         # no-cache means "revalidate every load": a matching If-None-Match
         # must yield 304 (the fallback uses a FileResponse, which — unlike
         # StaticFiles — doesn't emit 304 itself, so main.py handles it).

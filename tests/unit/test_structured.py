@@ -194,3 +194,45 @@ class TestChatStructured:
         assert result == {"ok": True}
         injected.chat_json.assert_awaited_once()
         default.chat_json.assert_not_awaited()
+
+
+class TestFencedJsonTolerance:
+    """Fenced JSON must not burn a retry: strip-and-parse is deterministic."""
+
+    @pytest.mark.asyncio
+    async def test_fenced_json_parses_without_retry(self, mock_llm) -> None:
+        """The 2026-09-06 CI failure shape: the model wraps valid JSON in
+        ``` fences (common after a provider-timeout retry) — the strict
+        json.loads used to reject it and burn a second structured attempt.
+        The fence fallback parses it on the first call."""
+        fenced = '```json\n{"ok": true}\n```'
+        mock_llm.chat_json.return_value = fenced
+        result = await chat_structured(_messages(), json_schema=SCHEMA, scenario="test")
+        assert result == {"ok": True}
+        mock_llm.chat_json.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unfenced_garbage_still_retries(self, mock_llm) -> None:
+        """Non-JSON garbage without fences is unchanged by the fallback and
+        still goes through the normal retry/feedback path."""
+        mock_llm.chat_json.side_effect = ["not json at all", json.dumps({"ok": True})]
+        result = await chat_structured(
+            _messages(), json_schema=SCHEMA, scenario="test", max_attempts=3, backoff=0
+        )
+        assert result == {"ok": True}
+        assert mock_llm.chat_json.await_count == 2
+
+    def test_strip_markdown_fence_variants(self) -> None:
+        from backend.service.json_extraction import strip_markdown_fence
+
+        assert strip_markdown_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+        assert strip_markdown_fence('```\n[1, 2]\n```') == "[1, 2]"
+        # Multiple fences: only the first block is taken (same behaviour the
+        # inline version in extract_json_object had).
+        assert strip_markdown_fence('```json\n{"a": 1}\n```\ntext\n```py\ncode\n```') == '{"a": 1}'
+        # Unfenced text passes through untouched.
+        assert strip_markdown_fence('{"a": 1}') == '{"a": 1}'
+        assert strip_markdown_fence("plain text") == "plain text"
+        # Lone opening fence (no closing) still strips — an unclosed fence is
+        # common truncation, and the content lines are what we want.
+        assert strip_markdown_fence('```json\n{"a": 1}') == '{"a": 1}'
