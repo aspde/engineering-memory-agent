@@ -200,7 +200,10 @@ def should_notify(analysis: dict) -> bool:
     if not config.event_analysis.notify_enabled:
         return False
     threshold = _SEVERITY_RANK[config.event_analysis.notify_severity]
-    return _SEVERITY_RANK.get(analysis.get("severity"), -1) >= threshold
+    severity = analysis.get("severity")
+    # validate_analysis already guaranteed a valid severity on the completed
+    # path; an unexpected shape reads as below-threshold rather than crashing.
+    return _SEVERITY_RANK.get(severity, -1) >= threshold if isinstance(severity, str) else False
 
 
 def format_feishu_card(
@@ -283,6 +286,10 @@ class EventContext:
     content: str
     metadata: dict
     connector: Any  # backend.connectors.base.Connector (avoided at runtime)
+    # Memory id the ingestion wrote for this event, when it landed as a new
+    # memory — lets the postmortem auto-trigger anchor its draft on the
+    # concrete incident record.  Empty on conflict/failed deliveries.
+    memory_id: str = ""
 
 
 # ── Runner ─────────────────────────────────────────────────────────────
@@ -403,6 +410,8 @@ async def run_event_analysis(event: EventContext) -> None:
             notified,
         )
 
+        maybe_trigger_postmortem(analysis, event)
+
     except asyncio.CancelledError:
         raise
     except TimeoutError:
@@ -421,6 +430,165 @@ async def run_event_analysis(event: EventContext) -> None:
         logger.exception("Event analysis %s (%s) failed unexpectedly", delivery_id, source)
         await persist_analysis(
             delivery_id, {"status": "failed", "error": str(exc)}
+        )
+
+
+# ── Postmortem auto-trigger (Phase 4) ──────────────────────────────────
+
+# Repeated known-issue events of the same cooldown key within this window
+# spawn one postmortem draft, not one per recurrence — the scenario costs a
+# full agent run (up to SCENARIO_TIMEOUT_SECONDS), and the draft for an
+# event analysed an hour ago adds nothing.  Independent of the analysis
+# cooldown above: analysis re-runs on every non-cooldown event, the
+# postmortem fires far less often.
+_POSTMORTEM_TRIGGER_COOLDOWN_SECONDS = 6 * 3600
+
+_postmortem_triggers: dict[str, float] = {}
+
+
+def _postmortem_gate(key: str | None) -> bool:
+    """True when this cooldown key may spawn a postmortem run now."""
+    if key is None:
+        return True
+    now = time.monotonic()
+    last = _postmortem_triggers.get(key)
+    if last is not None and (now - last) < _POSTMORTEM_TRIGGER_COOLDOWN_SECONDS:
+        return False
+    _postmortem_triggers[key] = now
+    return True
+
+
+def reset_postmortem_triggers_for_tests() -> None:
+    """Clear the postmortem trigger table (pytest isolation)."""
+    _postmortem_triggers.clear()
+
+
+def maybe_trigger_postmortem(analysis: dict, event: EventContext) -> None:
+    """Spawn a postmortem scenario run for a qualifying analysis verdict.
+
+    Gate order: scenarios module (ADR-011) → switch → known-issue recurrence
+    → severity threshold → per-key trigger cooldown.  The scenarios-module
+    gate mirrors the route mounting in ``backend/api/router.py``: with
+    ``SCENARIOS_ENABLED=false`` the event path must not burn scenario runs
+    either (deployment.md documents the same contract for the manual route).
+    Fire-and-forget — the analysis task must never block on (or fail with)
+    the scenario; execute_scenario records its own outcome in
+    ``scenario_runs``.
+    """
+    if not config.scenarios_active:
+        return
+    if not config.event_analysis.postmortem_enabled:
+        return
+    if not analysis.get("is_known_issue"):
+        return
+    threshold = _SEVERITY_RANK[config.event_analysis.postmortem_min_severity]
+    if _SEVERITY_RANK.get(str(analysis.get("severity")), -1) < threshold:
+        return
+
+    connector = event.connector
+    key = _cooldown_key(
+        event.source, event.metadata, connector.event_analysis_cooldown_key
+    )
+    if not _postmortem_gate(key):
+        logger.info(
+            "Postmortem trigger suppressed for delivery %s (%s) — recent "
+            "trigger active",
+            event.delivery_id,
+            event.source,
+        )
+        return
+
+    params = {
+        "trigger_event": {
+            "source": event.source,
+            "content": event.content,
+            "memory_id": event.memory_id,
+        }
+    }
+
+    async def _run() -> None:
+        # Module-attribute access (not from-import) so tests can patch
+        # ``execute_scenario`` at its source module.
+        from backend.runner import scenarios as scenarios_mod
+
+        token = current_thread_id.set(f"event-postmortem-{event.delivery_id}")
+        trace_token = current_trace_id.set(f"webhook:{event.delivery_id}")
+        try:
+            outcome = await scenarios_mod.execute_scenario(
+                "postmortem", params=params, trigger="event"
+            )
+            logger.info(
+                "Event-triggered postmortem %s for delivery %s (%s)",
+                outcome["run_id"], event.delivery_id, event.source,
+            )
+            await _notify_postmortem(event, outcome)
+        except Exception:
+            logger.exception(
+                "Event-triggered postmortem failed for delivery %s (%s)",
+                event.delivery_id, event.source,
+            )
+        finally:
+            current_thread_id.reset(token)
+            current_trace_id.reset(trace_token)
+
+    task = asyncio.create_task(_run())
+    # Hold a strong reference — a fire-and-forget task dropped by the GC at
+    # its first await would silently lose the postmortem (same pattern as
+    # auto-memory capture in nodes.py).
+    _postmortem_tasks.add(task)
+    task.add_done_callback(_postmortem_tasks.discard)
+
+
+_postmortem_tasks: set[asyncio.Task] = set()
+
+
+async def _notify_postmortem(event: EventContext, outcome: dict) -> None:
+    """Push the finished draft to Feishu as the unattended-run surface.
+
+    Manual runs are visible in their conversation; event-triggered ones
+    would otherwise complete invisibly.  A missing webhook URL is a no-op,
+    not an error.
+    """
+    from backend.service.notification import send_feishu_message
+
+    if not config.feishu_webhook_url:
+        return
+    source = event.source
+    title_entity = event.connector.event_analysis_display.get("title_entity")
+    entity = ""
+    if title_entity:
+        value = event.metadata.get(title_entity)
+        if isinstance(value, str) and value.strip():
+            entity = f": {value.strip()}"
+    title = f"EMA 自动复盘 · {source}{entity}".rstrip(": ")
+    status = outcome.get("status")
+    lines: list[str] = []
+    findings = outcome.get("findings") or {}
+    overview = str(findings.get("overview", "")).strip()
+    if status != "completed":
+        error = outcome.get("error") or "未知原因"
+        lines.append(f"复盘草稿生成失败: {error[:200]}")
+    elif overview:
+        lines.append(f"**概述**: {overview[:300]}")
+        root_cause = str(findings.get("root_cause", "")).strip()
+        if root_cause:
+            lines.append(f"**根因假设**: {root_cause[:300]}")
+        lines.append(f"运行记录: {outcome['run_id']}")
+        if not outcome.get("contract_ok"):
+            lines.append("(结构化契约未通过，草稿以 Markdown 为准)")
+    else:
+        # Completed but no structured findings — a contract miss, not a
+        # failure: the markdown draft exists (spec: 契约未过不判死) and the
+        # user should go read it, not read "生成失败".
+        lines.append("复盘草稿已生成，但结构化契约未通过——草稿以 Markdown 为准。")
+        lines.append(f"运行记录: {outcome['run_id']}")
+    ok, detail = await send_feishu_message(
+        "\n".join(lines), msg_type="interactive", title=title
+    )
+    if not ok:
+        logger.warning(
+            "Postmortem Feishu push failed for delivery %s: %s",
+            event.delivery_id, detail,
         )
 
 

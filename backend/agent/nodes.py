@@ -31,6 +31,7 @@ from backend.service.ingestion.extraction import extract_memory
 from backend.service.llm_service import get_llm_provider
 from backend.service.memory import resolve_conflict, write_memory
 from backend.service.prompts import get_prompt
+from backend.shared.config import current_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,27 @@ def _has_tool_results_this_turn(messages: list[BaseMessage]) -> bool:
     return False
 
 
+def _latest_tool_message_is_approval_notice(messages: list[BaseMessage]) -> bool:
+    """True when THIS turn contains a check_approval verdict notice.
+
+    [REJECTED]/[APPROVED]/[CANCELLED] ToolMessages are injected by
+    check_approval after a human verdict.  The model's following text is
+    an acknowledgement of the verdict — possibly with normal tool results
+    interleaved (approved calls still execute) — so the notice can sit
+    anywhere in the turn, not only at its end.  The final answer must be
+    synthesized so the verdict's information (what was declined, why)
+    reaches the user.  Normal tool results never carry these prefixes.
+    """
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            break
+        if isinstance(m, ToolMessage):
+            text = str(m.content or "")
+            if text.startswith(("[REJECTED]", "[APPROVED]", "[CANCELLED]")):
+                return True
+    return False
+
+
 def _is_new_user_turn(messages: list[BaseMessage]) -> bool:
     """True when the most recent message is a fresh HumanMessage.
 
@@ -333,8 +355,20 @@ def _context_budget() -> int:
     return max(config.context_token_budget, 1)
 
 
+def _scenario_thread_prefixes() -> tuple[str, ...]:
+    """thread_id prefixes that identify scenario/patrol report threads.
+
+    Shared by the token-ceiling lookup and the synthesis report-mode check —
+    one list so a new trigger prefix lands in both without drift.  Patrol
+    threads predate scenarios (``run_patrol`` sets ``patrol-``); scenario
+    prefixes come from ``execute_scenario`` (manual ``scenario-run-`` /
+    generated ``scenario-``) and the event trigger (``event-postmortem-``).
+    """
+    return ("patrol-", "scenario-", "scenario-run-", "event-postmortem-")
+
+
 def _patrol_synthesis_max_tokens() -> int | None:
-    """Larger output ceiling for a patrol's final synthesis, else None.
+    """Larger output ceiling for a patrol/scenario final synthesis, else None.
 
     A patrol report is generated in one LLM call and must arrive as complete
     JSON.  Once the model spends part of its interactive ``LLM_MAX_TOKENS``
@@ -343,11 +377,21 @@ def _patrol_synthesis_max_tokens() -> int | None:
     daily/weekly failures.  Patrol threads are recognised by their thread_id
     prefix (set by ``run_patrol``); the ``PATROL_MAX_TOKENS`` ceiling gives the
     report headroom while the patrol prompts cap per-category counts.
+
+    Scenario runs get the same treatment (``SCENARIO_MAX_TOKENS``): the
+    postmortem report plus its JSON contract exceeds the interactive budget
+    the same way (verified live 2026-09-05, run 291807b5 — the synthesis
+    burned all 4096 output tokens and the truncated response degraded to
+    the raw tool envelope).  Scenario threads carry one of the prefixes set
+    by ``execute_scenario`` / the event trigger.
     """
     from backend.shared.config import config, current_thread_id
 
-    if current_thread_id.get("").startswith("patrol-"):
-        return config.patrol_max_tokens
+    thread = current_thread_id.get("")
+    if thread.startswith(_scenario_thread_prefixes()):
+        if thread.startswith("patrol-"):
+            return config.patrol_max_tokens
+        return config.scenario_max_tokens
     return None
 
 
@@ -1102,30 +1146,47 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     rather than from discrete state fields, so every tool's output is
     automatically included regardless of which tool was called.
 
-    Plain-chat shortcut: when the last message is an AIMessage with text,
-    no ``tool_calls``, and no ToolMessage appeared since the latest
-    HumanMessage, that output is already a complete answer and is returned
-    directly — no second LLM call.  Only tool turns hit the LLM here
-    (once), so the response is persisted in the checkpointer state and
-    streamed to the client live through the graph's ``custom`` stream
-    (``get_stream_writer``).
+    Answer-reuse shortcut: when call_llm's latest output is already a
+    complete answer — an AIMessage with text, no ``tool_calls``, and
+    nothing after it — that message IS the answer and is returned directly.
+    Without this every answered turn paid two LLM calls (chat_raw for tool
+    detection + a synthesis rewrite), discarding the first.
+
+    Scope: no tool results **since that message**.  A plain chat turn has
+    none, and a ReAct turn whose model stopped calling tools and wrote the
+    full answer as its last message qualifies too — re-synthesizing there
+    loses content (verified 2026-09-05, tech_debt run 09bfba39: the model
+    emitted report + JSON contract as its final loop AIMessage, then the
+    synthesis rewrote it as a shorter summary and the contract vanished).
+    Only tool results AFTER the last text message (which cannot happen —
+    a ToolMessage always follows its AIMessage tool_call) or between it and
+    the turn start would force synthesis; by construction the last message
+    with text is the newest, so a length check suffices.
     """
-    # ── Plain-chat shortcut ─────────────────────────────────────────
-    # When call_llm_node's output is already a complete answer — the last
-    # message is an AIMessage with text and no tool_calls, and no tool
-    # results appeared this turn — reuse it instead of synthesizing again.
-    # Without this every plain chat turn paid two LLM calls (chat_raw for
-    # tool detection + chat for the final answer), discarding the first.
+    # ── Answer-reuse shortcut ───────────────────────────────────────
+    # When call_llm's last output is already a complete answer — a text
+    # AIMessage with no tool_calls — reuse it instead of re-synthesizing.
+    # Two cases qualify: plain chat (no tool results this turn), and the
+    # end of a ReAct turn where the model stopped calling tools and wrote
+    # the deliverable as its final message (verified 2026-09-05, tech_debt
+    # run 09bfba39: re-synthesis rewrote the report and dropped its JSON
+    # contract).
+    # NOT the post-approval case: [REJECTED]/[APPROVED] notices (injected
+    # by check_approval) precede the model's short acknowledgement there —
+    # the notices carry information the final answer must fold in, so
+    # synthesis runs.  Rejection/approval notices are detectable by their
+    # [REJECTED]/[APPROVED] prefix on the turn's last ToolMessage.
     messages = state["messages"]
     last = messages[-1] if messages else None
+    post_approval_notice = _latest_tool_message_is_approval_notice(messages)
     if (
         isinstance(last, AIMessage)
         and not getattr(last, "tool_calls", None)
         and last.content
-        and not _has_tool_results_this_turn(messages)
+        and not post_approval_notice
     ):
         logger.info(
-            "Reusing call_llm output as final answer (no tool results this turn)"
+            "Reusing call_llm output as final answer (last message is a complete AIMessage)"
         )
         _schedule_auto_memory(state)
         return {
@@ -1180,6 +1241,24 @@ async def generate_final_node(state: AgentState) -> dict[str, Any]:
     logger.info("generate_final_node: using agent.system prompt v%s", version)
     context_block = f"\n\nContext:\n{context_str}" if context_str else ""
     system_content = system_text.format(context=context_block)
+
+    # Report-mode instruction for scenario threads: the conversation carries
+    # the scenario system prompt (compose message), but THIS synthesis call
+    # replaces it with the generic chat persona — without an explicit
+    # reminder the model has been observed to echo the raw tool envelope
+    # instead of writing the report (2026-09-05 run 291807b5).  Patrol
+    # threads get the same guard (they predate scenarios via
+    # _patrol_synthesis_max_tokens, which recognised them first).
+    thread = current_thread_id.get("")
+    if thread.startswith(_scenario_thread_prefixes()):
+        system_content += (
+            "\n\nReport mode: you are composing a final deliverable, not "
+            "chatting. Write the report the scenario prompt asked for, in "
+            "your own words — NEVER reproduce tool results verbatim (search "
+            "envelopes, JSON payloads, memory listings are raw input, not "
+            "output). Synthesize the context above into the requested "
+            "structure and nothing else."
+        )
 
     final_messages: list[dict[str, str]] = [
         {"role": "system", "content": system_content},

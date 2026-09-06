@@ -300,6 +300,17 @@ class EventAnalysisConfig:
     notify_enabled: bool = field(
         default_factory=lambda: os.getenv("EVENT_ANALYSIS_NOTIFY_ENABLED", "true").lower() == "true"
     )
+    # Postmortem auto-trigger (Phase 4): when an analysis concludes the event
+    # is a recurrence (is_known_issue) at or above this severity, run the
+    # postmortem scenario automatically.  Inner-gated like enabled — off by
+    # default so enabling EVENT_ANALYSIS alone doesn't start burning scenario
+    # runs on every known-issue verdict.
+    postmortem_enabled: bool = field(
+        default_factory=lambda: os.getenv("EVENT_POSTMORTEM_ENABLED", "false").lower() == "true"
+    )
+    postmortem_min_severity: str = field(
+        default_factory=lambda: os.getenv("EVENT_POSTMORTEM_SEVERITY", "critical")
+    )
 
 
 @dataclass
@@ -315,6 +326,16 @@ class AppConfig:
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "development"))
     max_agent_steps: int = field(
         default_factory=lambda: int(os.getenv("MAX_AGENT_STEPS", "5"))
+    )
+    # Scenario runs (postmortem etc.) need a wider ReAct budget than the
+    # interactive 5: the compose prompt asks for multi-source retrieval
+    # (incident + entities + similar incidents + fix commit) before
+    # composing the report.  With the interactive budget the loop
+    # force-terminates mid-search and the final answer degenerates to the
+    # last tool envelope (verified 2026-09-05, scenario_runs 291807b5:
+    # contract_ok=false, result_md was a raw search envelope).
+    scenario_max_steps: int = field(
+        default_factory=lambda: int(os.getenv("SCENARIO_MAX_STEPS", "12"))
     )
     # Per-turn total deadline (seconds) for the whole ReAct run — one request
     # through to the final answer.  Guards against a slow provider / many
@@ -343,7 +364,7 @@ class AppConfig:
     # endpoint answers 504 (see scenario_routes) instead of leaving the
     # request open forever.
     scenario_timeout: int = field(
-        default_factory=lambda: int(os.getenv("SCENARIO_TIMEOUT_SECONDS", "300"))
+        default_factory=lambda: int(os.getenv("SCENARIO_TIMEOUT_SECONDS", "600"))
     )
     # Max simultaneous scenario runs.  Each run holds agent/LLM slots for its
     # whole compose chain (up to SCENARIO_TIMEOUT_SECONDS), so an unbounded
@@ -505,6 +526,13 @@ class AppConfig:
     # so the report stays small enough to fit.
     patrol_max_tokens: int = field(
         default_factory=lambda: int(os.getenv("PATROL_MAX_TOKENS", "8000"))
+    )
+    # Scenario runs share the same truncation risk as patrols (see
+    # scenario_max_steps): the postmortem report + JSON contract exceeds the
+    # interactive LLM_MAX_TOKENS once the model reasons, so the synthesis
+    # call gets a dedicated ceiling.  Default matches PATROL_MAX_TOKENS.
+    scenario_max_tokens: int = field(
+        default_factory=lambda: int(os.getenv("SCENARIO_MAX_TOKENS", "8000"))
     )
     feishu_webhook_url: str = field(
         default_factory=lambda: os.getenv("FEISHU_WEBHOOK_URL", "")
@@ -672,6 +700,11 @@ def validate_config() -> list[str]:
     if config.event_analysis.notify_severity not in SEVERITY_LEVELS:
         problems.append(
             f"EVENT_ANALYSIS_NOTIFY_SEVERITY={config.event_analysis.notify_severity} "
+            "must be one of: " + ", ".join(SEVERITY_LEVELS)
+        )
+    if config.event_analysis.postmortem_min_severity not in SEVERITY_LEVELS:
+        problems.append(
+            f"EVENT_POSTMORTEM_SEVERITY={config.event_analysis.postmortem_min_severity} "
             "must be one of: " + ", ".join(SEVERITY_LEVELS)
         )
 

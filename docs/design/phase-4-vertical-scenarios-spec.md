@@ -1,5 +1,11 @@
 # Phase 4: 垂直场景孵化 — 功能规格
 
+> **实现状态（2026-08）**：本 spec 是 Phase 4 的原始设计蓝图，正文保留设计时的意图。
+> 与当前代码的差异：
+> - 四个场景（复盘/审查/Onboarding/技术债）已按"prompt + compose 函数 + dict 注册"落地，但均为薄壳（一次 `invoke_scenario_agent()` 调用）；
+> - **故障复盘已完成第一轮做厚**（2026-08）：运行落库（`scenario_runs` 表，migration 0005）、JSON 输出契约（`scenario.postmortem` v4 + `extract_json_object` 解析，契约未过不判死）、保存入库端点（`POST /api/scenarios/runs/{id}/save-as-memory`，用户点击即确认、冲突走非交互队列、幂等）、事件自动触发（`EVENT_POSTMORTEM_ENABLED` 门控：已知问题重演且 severity 达标时自动运行并推飞书卡片）、前端「保存为记忆」按钮；手动与事件路径共用执行器 `execute_scenario()`（并发槽位/超时/落库收拢一处）；
+> - code_review 投递 PR 评论（story 9）、tech_debt 自动解决检测与推送（story 16/17）尚未实现——待复盘模式验证后按同一模式复制。
+
 ## Problem Statement
 
 Phase 1-3 建好了三样东西：实体关系图谱（理解知识的关联）、多源连接器（持续接入外部数据）、主动 Agent（定时巡检+事件响应）。这些是通用基础设施。但团队的实际使用场景不是"查询通用基础设施"——而是"帮我写复盘"、"审查这个 PR"、"带新人了解项目"、"找出哪些临时方案该清理了"。

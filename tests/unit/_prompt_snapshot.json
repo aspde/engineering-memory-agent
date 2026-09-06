@@ -1,66 +1,82 @@
 {
-  "agent.auto_memory_gate": {
-    "version": "3",
-    "sha256": "506ccc172e6d5e2725b71ff6f2d06076c9ff79c04b46c82b5d81c30e1e7abbaa"
+  "agent.system": {
+    "version": "6",
+    "sha256": "7ef8ab2e73b50045a185f706fe4c119917f8ad0662c5e3c5178f0a194454d64c",
+    "lines": 70
   },
   "agent.compaction": {
     "version": "1",
-    "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b"
-  },
-  "agent.system": {
-    "version": "6",
-    "sha256": "7ef8ab2e73b50045a185f706fe4c119917f8ad0662c5e3c5178f0a194454d64c"
-  },
-  "event.ci_failure": {
-    "version": "1",
-    "sha256": "5d47776968545003f6937436ec53a82e7243c5e7600b5d83d2eed0546f02971e"
-  },
-  "extraction.entities": {
-    "version": "4",
-    "sha256": "c7babcd2a564d6fac3fd295b5911205d56be868f4e538056c087ea1278a29c6e"
-  },
-  "extraction.relations": {
-    "version": "4",
-    "sha256": "d7dafe263afc15f8d636c8a9bde781f6a9ae2538debba86206b8ee97158c20b0"
+    "sha256": "ccf1cf2aaa3b13dc2382131636af96014f089aec9d538a65a5f99072f50e182b",
+    "lines": 9
   },
   "extraction.summary": {
     "version": "2",
-    "sha256": "97c17c4c00c964ace2ad9c636280daabbf5cc6f47358faad302debd5cc5c7320"
+    "sha256": "97c17c4c00c964ace2ad9c636280daabbf5cc6f47358faad302debd5cc5c7320",
+    "lines": 16
+  },
+  "extraction.entities": {
+    "version": "4",
+    "sha256": "c7babcd2a564d6fac3fd295b5911205d56be868f4e538056c087ea1278a29c6e",
+    "lines": 24
+  },
+  "extraction.relations": {
+    "version": "4",
+    "sha256": "d7dafe263afc15f8d636c8a9bde781f6a9ae2538debba86206b8ee97158c20b0",
+    "lines": 27
+  },
+  "agent.auto_memory_gate": {
+    "version": "3",
+    "sha256": "506ccc172e6d5e2725b71ff6f2d06076c9ff79c04b46c82b5d81c30e1e7abbaa",
+    "lines": 13
   },
   "memory.conflict": {
     "version": "2",
-    "sha256": "3999eb33c5915e9fb7b8def5efbe74810918eb4176941699dabc8a0f134ca0dd"
+    "sha256": "3999eb33c5915e9fb7b8def5efbe74810918eb4176941699dabc8a0f134ca0dd",
+    "lines": 14
   },
   "memory.merge": {
     "version": "2",
-    "sha256": "f2a8dffec9bf1344c70e7a32c6c3a2cd8db464565bb679436f11a921f253aef0"
-  },
-  "patrol.daily": {
-    "version": "5",
-    "sha256": "90c6f30d1f711278bf64bbc80f17cc360a89a8779c8867354fe8095c0169b768"
-  },
-  "patrol.weekly": {
-    "version": "8",
-    "sha256": "4a6c80f4cd44144c35de46a6afd7bc5c4a4cb1f07bf34f8b6c5aabc9bdddc39c"
+    "sha256": "f2a8dffec9bf1344c70e7a32c6c3a2cd8db464565bb679436f11a921f253aef0",
+    "lines": 14
   },
   "query_rewrite": {
     "version": "3",
-    "sha256": "cc361810b60230714450077dfb3b81f34109870a70d43e5941fc71aa1f6041ea"
+    "sha256": "cc361810b60230714450077dfb3b81f34109870a70d43e5941fc71aa1f6041ea",
+    "lines": 13
+  },
+  "patrol.daily": {
+    "version": "5",
+    "sha256": "90c6f30d1f711278bf64bbc80f17cc360a89a8779c8867354fe8095c0169b768",
+    "lines": 62
+  },
+  "patrol.weekly": {
+    "version": "8",
+    "sha256": "4a6c80f4cd44144c35de46a6afd7bc5c4a4cb1f07bf34f8b6c5aabc9bdddc39c",
+    "lines": 71
+  },
+  "event.ci_failure": {
+    "version": "1",
+    "sha256": "5d47776968545003f6937436ec53a82e7243c5e7600b5d83d2eed0546f02971e",
+    "lines": 49
   },
   "scenario.code_review": {
-    "version": "2",
-    "sha256": "8586ceb622faebfbac5f8274b6b04523ce0ace12a5afd8311f038332fb423107"
+    "version": "3",
+    "sha256": "2bce410d3118fa954e1855a34c42965b9b645fa66087fb709af615a045ad929d",
+    "lines": 60
   },
   "scenario.onboarding": {
-    "version": "2",
-    "sha256": "5a90e5d2b72e2e9a698aac910ba7d3a2775f3471cd7507e08267690937c93963"
+    "version": "3",
+    "sha256": "88f7f4c603a0cc4c16088fc23935afd8c978f9152c2064f80dc45f4065b19a4e",
+    "lines": 73
   },
   "scenario.postmortem": {
-    "version": "3",
-    "sha256": "f6eb42a2d162a19af20eee1d79a4ee485edd9767ed4f6bb78bca18dc7e28b5f7"
+    "version": "4",
+    "sha256": "60790256c2e71c6e23ebfac772ee0bfad1d7f71059de537b4610cf806b04a6cf",
+    "lines": 72
   },
   "scenario.tech_debt": {
-    "version": "2",
-    "sha256": "5ef685175da8dc104f8201b264b0d6ab7cacfd29c823a06454e47f395e5cc55c"
+    "version": "5",
+    "sha256": "56f5de185a5e7cde46bd020c492d4d6be5070e192a1d333d5fc584c3719b5242",
+    "lines": 70
   }
 }

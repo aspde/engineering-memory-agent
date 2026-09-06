@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAppDispatch, useAppState } from '../context/AppContext';
 import { getThreadMessages } from '../api/agent';
-import { runScenario } from '../api/scenarios';
+import { runScenario, saveRunAsMemory } from '../api/scenarios';
 import { useChat } from '../hooks/useChat';
 import ChatArea from '../components/ChatArea';
 import ChatInput from '../components/ChatInput';
@@ -29,6 +29,12 @@ export default function ChatPage() {
   const scenarioForThreadRef = useRef<Record<string, { key: string; label: string }>>({});
   const [retryingScenario, setRetryingScenario] = useState(false);
   const [retryMessage, setRetryMessage] = useState<string | null>(null);
+
+  // Completed postmortem run awaiting the user's save-as-memory decision.
+  // Only offered while its thread is open; a reload drops the affordance
+  // (the draft stays readable in history) rather than persisting UI state.
+  const [postmortemRunId, setPostmortemRunId] = useState<string | null>(null);
+  const [savingRun, setSavingRun] = useState(false);
 
   const SCENARIO_LABELS: Record<string, string> = {
     postmortem: '故障复盘',
@@ -82,6 +88,9 @@ export default function ChatPage() {
         });
         // Sync sidebar in case the title was updated on the backend
         dispatch({ type: 'INVALIDATE_THREADS' });
+        if (scenarioKey === 'postmortem' && res.run_id) {
+          setPostmortemRunId(res.run_id);
+        }
       })
       .catch((err) => {
         if (triggeredRef.current !== triggeredForThreadId) return;
@@ -212,6 +221,9 @@ export default function ChatPage() {
         message: { role: 'assistant', content: res.result || '(场景返回为空)' },
       });
       dispatch({ type: 'INVALIDATE_THREADS' });
+      if (scenarioInfo.key === 'postmortem' && res.run_id) {
+        setPostmortemRunId(res.run_id);
+      }
     } catch (err) {
       dispatch({
         type: 'UPDATE_LAST_MESSAGE',
@@ -223,6 +235,30 @@ export default function ChatPage() {
     }
   }, [scenarioInfo, retryingScenario, dispatch, threadId]);
 
+  const handleSavePostmortem = useCallback(async () => {
+    if (!postmortemRunId || savingRun) return;
+    setSavingRun(true);
+    try {
+      const res = await saveRunAsMemory(postmortemRunId);
+      if (res.action === 'inserted') {
+        setWriteToast(res.summary ? `复盘已写入：${res.summary.slice(0, 60)}` : '复盘已写入记忆库');
+      } else if (res.action === 'merged') {
+        setWriteToast('复盘已合并到相似记忆');
+      } else if (res.action === 'conflict') {
+        setWriteToast('检测到相似记忆冲突，请在记忆库页面仲裁');
+      } else {
+        setWriteToast('该复盘此前已保存过');
+      }
+    } catch (err) {
+      setWriteToast(`保存失败: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSavingRun(false);
+      // One deliberate save closes the affordance — a second click would
+      // only ever return the duplicate probe.
+      setPostmortemRunId(null);
+    }
+  }, [postmortemRunId, savingRun]);
+
   return (
     <div className="flex h-full flex-col">
       <ChatArea
@@ -233,6 +269,22 @@ export default function ChatPage() {
         waitingForApproval={waitingForApproval}
         onResume={resume}
       />
+      {/* Save-as-memory affordance for a completed postmortem draft */}
+      {postmortemRunId && (
+        <div className="mx-auto mb-2 max-w-3xl px-4">
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3">
+            <p className="text-sm text-blue-800">复盘草稿已生成，可保存为长期记忆供日后检索。</p>
+            <button
+              type="button"
+              onClick={handleSavePostmortem}
+              disabled={savingRun}
+              className="shrink-0 rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            >
+              {savingRun ? '保存中…' : '💾 保存为记忆'}
+            </button>
+          </div>
+        </div>
+      )}
       {/* Retry prompt for incomplete / failed scenario threads */}
       {showRetry && (
         <div className="mx-auto mb-2 max-w-3xl px-4">

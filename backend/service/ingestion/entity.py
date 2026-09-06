@@ -159,6 +159,63 @@ async def normalize_entities(
     return entity_ids
 
 
+async def link_memory_to_entities(
+    memory_id: str,
+    entity_names: list[str],
+) -> list[str]:
+    """Deterministically link a memory to entities by exact canonical name.
+
+    Unlike :func:`normalize_entities` (embed + LLM confirmation), this
+    looks up entities whose canonical name matches exactly and only links
+    those — it creates nothing.  For postmortem save-as-memory, where the
+    contract's ``related_entities`` are names the scenario agent already
+    resolved against the entity table during retrieval: an exact-match link
+    is free and safe, while a fuzzy LLM match here would risk creating wrong
+    associations on the user's explicit save.
+
+    Returns the linked entity UUIDs; names with no existing entity are
+    skipped (the name still lives in the memory content).
+    """
+    if not entity_names:
+        return []
+
+    session_factory = get_session_factory()
+    linked: list[str] = []
+    for name in dict.fromkeys(n for n in (x.strip() for x in entity_names) if n):
+        try:
+            async with session_factory() as session:
+                result = await session.execute(
+                    text(
+                        """\
+                        SELECT id FROM entities
+                        WHERE canonical_name ILIKE :name OR name ILIKE :name
+                        LIMIT 1
+                        """
+                    ),
+                    {"name": name},
+                )
+                row = result.fetchone()
+                if row is None:
+                    continue
+                entity_id = str(row[0])
+                await session.execute(
+                    text(
+                        """\
+                        INSERT INTO memory_entities (memory_id, entity_id)
+                        VALUES (:memory_id, :entity_id)
+                        ON CONFLICT DO NOTHING
+                        """
+                    ),
+                    {"memory_id": memory_id, "entity_id": entity_id},
+                )
+                await session.commit()
+            linked.append(entity_id)
+        except Exception:
+            logger.exception("Failed to link entity '%s' — skipping", name)
+            continue
+    return linked
+
+
 async def _llm_confirm_match(
     new_name: str,
     existing_name: str,

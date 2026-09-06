@@ -1,4 +1,4 @@
-import type { ScenarioInfo, ScenarioRunResponse } from '../types';
+import type { SaveRunMemoryResponse, ScenarioInfo, ScenarioRunResponse } from '../types';
 import { apiGet, apiPost } from './client';
 
 /** Fetch the list of visible (active + beta) scenarios. */
@@ -13,4 +13,9 @@ export async function runScenario(
   threadId?: string,
 ): Promise<ScenarioRunResponse> {
   return apiPost<ScenarioRunResponse>(`/api/scenarios/${name}/run`, { params, thread_id: threadId });
+}
+
+/** Save a completed postmortem run into the memory store. */
+export async function saveRunAsMemory(runId: string): Promise<SaveRunMemoryResponse> {
+  return apiPost<SaveRunMemoryResponse>(`/api/scenarios/runs/${runId}/save-as-memory`, {});
 }

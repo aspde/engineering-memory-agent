@@ -263,7 +263,7 @@ async def _resolve_patrol_ids(session, a_id: str, b_id: str) -> tuple[str, str]:
                 raise ValueError(
                     f"memory id {raw!r} does not uniquely resolve to a stored "
                     "memory (stale patrol finding or ambiguous 8-char prefix)"
-                )
+                ) from None
             resolved.append(str(hits[0][0]))
     return resolved[0], resolved[1]
 

@@ -19,6 +19,7 @@ from sqlalchemy import text
 
 from backend.agent.nodes import CHAT_APPROVAL_TOOLS
 from backend.agent.tool_envelope import parse_tool_envelope
+from backend.api import conversations
 from backend.db import get_session_factory
 from backend.runner.agent_service import (
     CHAT_LLM_TOOLS,
@@ -34,25 +35,9 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 
 
 # ── Conversation persistence ──────────────────────────────────────────
-
-
-async def _upsert_conversation(thread_id: str, title: str = "") -> None:
-    """Insert or update a conversation row with *title*."""
-    try:
-        async with get_session_factory()() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO conversations (thread_id, title, updated_at) "
-                    "VALUES (:tid, :title, now()) "
-                    "ON CONFLICT (thread_id) DO UPDATE SET "
-                    "title = COALESCE(NULLIF(:title, ''), conversations.title), "
-                    "updated_at = now()"
-                ),
-                {"tid": thread_id, "title": title},
-            )
-            await session.commit()
-    except Exception:
-        logger.warning("Failed to upsert conversation", exc_info=True)
+# upsert_conversation lives in backend.api.conversations so the scenario
+# route and the chat route share one helper (and tests patch one point).
+# Module-attribute access keeps the patch effective at every call site.
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -462,7 +447,7 @@ async def agent_chat(req: ChatRequest) -> ChatResponse:
     # Record this conversation as active
     title = req.message[:80] if req.message else ""
     if req.resume_data is None and title:
-        await _upsert_conversation(req.thread_id, title)
+        await conversations.upsert_conversation(req.thread_id, title)
 
     t0 = time.perf_counter()
     try:
@@ -632,7 +617,7 @@ async def agent_chat_stream(req: ChatRequest, request: Request):
     # Record this conversation as active
     title = req.message[:80] if req.message else ""
     if req.resume_data is None and title:
-        await _upsert_conversation(req.thread_id, title)
+        await conversations.upsert_conversation(req.thread_id, title)
 
     async def _stream():
         try:

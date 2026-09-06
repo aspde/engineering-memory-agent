@@ -432,7 +432,7 @@ class TestMergePatrolFinding:
         ) as mock_load, patch(
             "backend.api.routes.patrol_routes.build_patrol_deferred",
             return_value=deferred,
-        ) as mock_build, patch(
+        ), patch(
             "backend.api.routes.patrol_routes.resolve_conflict",
             new_callable=AsyncMock,
             return_value={

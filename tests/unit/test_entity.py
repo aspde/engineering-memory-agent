@@ -286,3 +286,82 @@ class TestLLMConfirmMatch:
 
         with pytest.raises(LLMStructuredError):
             await _llm_confirm_match("pg16", "PostgreSQL", "technology")
+
+
+class TestLinkMemoryToEntities:
+    """Tests for link_memory_to_entities() — the deterministic save-path linker."""
+
+    @pytest.mark.asyncio
+    async def test_empty_names_returns_empty(self):
+        from backend.service.ingestion.entity import link_memory_to_entities
+
+        assert await link_memory_to_entities("some-id", []) == []
+
+    @pytest.mark.asyncio
+    async def test_links_existing_entities_and_skips_unknown(self):
+        """Exact-name hits insert into memory_entities; unknown names are
+        skipped without creating rows (no embeddings, no LLM)."""
+        from backend.service.ingestion.entity import link_memory_to_entities
+
+        with patch(
+            "backend.service.ingestion.entity.get_session_factory"
+        ) as mock_sess_factory:
+            # SELECT per name: PostgreSQL found, GhostEntity not.
+            mock_found = MagicMock()
+            mock_found.fetchone.return_value = ["22222222-2222-2222-2222-222222222222"]
+            mock_missing = MagicMock()
+            mock_missing.fetchone.return_value = None
+
+            factory = MagicMock()
+            # Two sessions — one per name lookup+link round trip.
+            sessions = []
+            for select_result in (mock_found, mock_missing):
+                sess = AsyncMock()
+                sess.__aenter__ = AsyncMock(return_value=sess)
+                sess.__aexit__ = AsyncMock(return_value=None)
+                sess.execute.side_effect = [select_result, MagicMock()]
+                sessions.append(sess)
+            factory.side_effect = sessions
+            mock_sess_factory.return_value = factory
+
+            linked = await link_memory_to_entities(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ["PostgreSQL", "GhostEntity"],
+            )
+
+        assert linked == ["22222222-2222-2222-2222-222222222222"]
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_repeated_names(self):
+        """The same name twice links once (single SELECT)."""
+        from backend.service.ingestion.entity import link_memory_to_entities
+
+        with patch(
+            "backend.service.ingestion.entity.get_session_factory"
+        ) as mock_sess_factory:
+            mock_found = MagicMock()
+            mock_found.fetchone.return_value = ["22222222-2222-2222-2222-222222222222"]
+
+            sess = AsyncMock()
+            sess.__aenter__ = AsyncMock(return_value=sess)
+            sess.__aexit__ = AsyncMock(return_value=None)
+            sess.execute.side_effect = [mock_found, MagicMock()]
+            factory = MagicMock()
+            factory.return_value = sess
+            mock_sess_factory.return_value = factory
+
+            linked = await link_memory_to_entities(
+                "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ["PostgreSQL", "PostgreSQL"],
+            )
+
+        assert linked == ["22222222-2222-2222-2222-222222222222"]
+        # One lookup + one insert = two execute calls, not four.
+        assert sess.execute.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_strips_and_skips_blank_names(self):
+        """Whitespace names are dropped before the lookup."""
+        from backend.service.ingestion.entity import link_memory_to_entities
+
+        assert await link_memory_to_entities("some-id", ["", "  "]) == []

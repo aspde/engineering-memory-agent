@@ -7,6 +7,7 @@ the agent mocked.  No real LLM, no real Feishu.
 
 from __future__ import annotations
 
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -406,7 +407,9 @@ class _OptedInConnector:
     triggers_event_analysis = True
     event_analysis_cooldown_key = "job_name"
     event_analysis_prompt_key = "event.ci_failure"
-    event_analysis_display = {
+    # Class-level shared stub — never mutated by tests, hence safe as a
+    # ClassVar rather than a per-instance default.
+    event_analysis_display: ClassVar[dict] = {
         "title_entity": "job_name",
         "context_fields": ["branch", "source_url"],
     }

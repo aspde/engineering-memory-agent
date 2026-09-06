@@ -29,7 +29,7 @@ from backend.shared.config import config
 
 EXPECTED_TABLES = {"chunks", "memories", "entities", "memory_entities",
                    "conversations", "webhook_logs", "patrol_logs",
-                   "pending_conflicts", "llm_usage"}
+                   "pending_conflicts", "llm_usage", "scenario_runs"}
 
 
 def _migration_config() -> AlembicConfig:
@@ -198,8 +198,10 @@ class TestBaselineMigration:
         finally:
             conn.close()
 
-        # One step down from head removes the column again.
-        command.downgrade(_migration_config(), "-1")
+        # Downgrade to 0003 removes the column again.  (Not "-1": new
+        # migrations may land above 0004, and this test pins the
+        # 0003↔0004 pair, not whatever happens to be head.)
+        command.downgrade(_migration_config(), "0003_add_patrol_error")
 
         conn = psycopg.connect(_psycopg_url(config.database_url))
         try:

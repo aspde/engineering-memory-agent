@@ -420,7 +420,7 @@ class TestAgentConcurrencyCap:
         monkeypatch.setattr(config_mod.config, "max_agent_concurrency", 0)
         mock_upsert = AsyncMock()
         monkeypatch.setattr(
-            "backend.api.routes.agent_routes._upsert_conversation", mock_upsert
+            "backend.api.conversations.upsert_conversation", mock_upsert
         )
 
         response = await self._request(async_client)

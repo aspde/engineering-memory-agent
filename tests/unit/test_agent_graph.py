@@ -397,8 +397,10 @@ class TestGraphHITLRouting:
         assert [t["function"]["name"] for t in sent_tools] == ["search_memories_tool"]
 
         # The hidden tool still executed (ToolNode ran it) and the run
-        # completed with a final answer.
-        assert result.get("final_response") == "Final."
+        # completed with the model's own closing text — the answer-reuse
+        # shortcut returns the model's acknowledgement instead of paying
+        # for a synthesis rewrite (same semantics as generate_final_node).
+        assert result.get("final_response") == "已记录，无需更多工具"
 
 
 class TestStepCountResetAcrossTurns:

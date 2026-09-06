@@ -68,16 +68,18 @@ def _noop_conversation_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
     """Prevent tests from writing to the ``conversations`` table.
 
     The API tests use ``ASGITransport`` which exercises real route
-    handlers.  Without this fixture every ``POST /api/agent/chat``
-    would call ``_upsert_conversation()`` and pollute the production
-    database with test ``thread_id`` values.
+    handlers.  Without this fixture every ``POST /api/agent/chat`` and
+    scenario run would call ``upsert_conversation()`` and pollute the
+    production database with test ``thread_id`` values.  Both callers go
+    through ``backend.api.conversations`` via module-attribute access, so
+    patching that one attribute silences both paths.
     """
 
     async def _noop(*args: object, **kwargs: object) -> None:
         pass
 
     monkeypatch.setattr(
-        "backend.api.routes.agent_routes._upsert_conversation",
+        "backend.api.conversations.upsert_conversation",
         _noop,
     )
 

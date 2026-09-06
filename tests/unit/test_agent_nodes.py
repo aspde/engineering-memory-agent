@@ -1049,14 +1049,19 @@ class TestGenerateFinalNode:
         mock_provider.chat.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_tool_results_this_turn_still_synthesizes(self, monkeypatch) -> None:
-        """A ToolMessage in the current turn forces the synthesis path, so the
-        tool output can be folded into the final-answer context."""
-        import backend.agent.nodes as mod
-        from tests._fake_llm import text_stream
+    async def test_react_final_text_is_reused_not_resynthesized(self, monkeypatch) -> None:
+        """The ReAct loop's closing text answer IS the final answer — no
+        synthesis rewrite on top.
 
-        mock_provider = AsyncMock()
-        mock_provider.chat_stream = text_stream("Synthesized from tool output.")
+        Regression guard (live 2026-09-05, tech_debt run 09bfba39): the old
+        "tool results this turn → always synthesize" behavior re-wrote the
+        model's completed report and dropped its trailing JSON contract.
+        The model already saw the tool output inside the loop; re-synthesis
+        adds a LLM call and loses fidelity.
+        """
+        import backend.agent.nodes as mod
+
+        mock_provider = AsyncMock()  # no chat_stream set — must not be awaited
         monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
 
         state = _make_state(
@@ -1073,7 +1078,37 @@ class TestGenerateFinalNode:
         )
 
         result = await mod.generate_final_node(state)
-        assert result["final_response"] == "Synthesized from tool output."
+        assert result["final_response"] == "I found one result."
+        assert result["final_prompt"] is None
+        mock_provider.chat_stream.assert_not_awaited()
+
+    async def test_approval_notice_this_turn_still_synthesizes(self, monkeypatch) -> None:
+        """A [REJECTED] verdict notice in the turn forces synthesis even when
+        the model's last message is complete text — the verdict's feedback
+        (what was declined, why) must reach the user in the final answer."""
+        import backend.agent.nodes as mod
+        from tests._fake_llm import text_stream
+
+        mock_provider = AsyncMock()
+        mock_provider.chat_stream = text_stream("Synthesized with rejection notice.")
+        monkeypatch.setattr(mod, "get_llm_provider", lambda: mock_provider)
+
+        state = _make_state(
+            messages=[
+                HumanMessage(content="remember this"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "c1", "name": "write_memory_tool",
+                                 "args": {"content": "x"}, "type": "tool_call"}],
+                ),
+                ToolMessage(content="[REJECTED] 用户不想记录", tool_call_id="c1",
+                            name="write_memory_tool"),
+                AIMessage(content="done — no more tools"),
+            ],
+        )
+
+        result = await mod.generate_final_node(state)
+        assert result["final_response"] == "Synthesized with rejection notice."
         assert result["final_prompt"] is not None
 
     @pytest.mark.asyncio

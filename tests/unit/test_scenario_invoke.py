@@ -21,6 +21,7 @@ class TestInvokeScenarioAgent:
         attached to a scheduled / manual-trigger run, so write tools must not
         pause on approval."""
         from backend.runner.scenarios import invoke_scenario_agent
+        from backend.shared.config import config
 
         mock_agent = AsyncMock()
         mock_agent.ainvoke.return_value = {"final_response": "ok", "messages": []}
@@ -31,7 +32,10 @@ class TestInvokeScenarioAgent:
             result = await invoke_scenario_agent("system prompt", "user message")
 
         assert result == "ok"
-        mock_get_agent.assert_called_once_with(approval_required_tools=frozenset())
+        mock_get_agent.assert_called_once_with(
+            approval_required_tools=frozenset(),
+            max_steps=config.scenario_max_steps,
+        )
 
     @pytest.mark.asyncio
     async def test_returns_interrupt_message_not_fabricated_result(self) -> None:

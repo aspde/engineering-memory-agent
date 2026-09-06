@@ -409,6 +409,15 @@ export interface ScenarioRunResponse {
   scenario: string;
   status: string;
   result: string;
+  run_id: string;
+}
+
+/** Result of POST /api/scenarios/runs/{id}/save-as-memory. */
+export interface SaveRunMemoryResponse {
+  action: 'inserted' | 'merged' | 'duplicate' | 'conflict';
+  memory_id: string | null;
+  summary?: string;
+  conflict_id?: string;
 }
 
 // ── App state ────────────────────────────────────────────────────

@@ -312,6 +312,7 @@ async def _process_delivery(
                         content=content,
                         metadata=metadata,
                         connector=connector,
+                        memory_id=memory_id or "",
                     )
                 )
             except Exception:
