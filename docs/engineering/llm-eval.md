@@ -141,10 +141,10 @@ chunk 模式 → `retrieve_hybrid`），把检索结果按 `generate_final_node`
 
 报告：`evals/reports/write-eval-baseline.md` / `.json`（conflict 20 条 + merge 8 条
 judge 全量 0 降级 + gate 12 条）。通道来源已回填进基线 JSON 的 `run_provenance`
-字段（2026-09-06）；早先文档误记为 DeepSeek 通道。**门禁可比性提醒**：CI 的
-llm-eval job 走 DeepSeek 通道，与该基线不同源——`eval.yml` 的三 floors 是
-provisional，按 CI 通道首跑校准后才可信（换模型流程见下文「换模型
-Runbook」）。
+字段（2026-09-06）；早先文档误记为 DeepSeek 通道。**门禁可比性提醒**：该基线
+与 CI 门禁通道（2026-09-06 实测为 openai/omen-alpha，见下）不同源——三 floors
+已按 CI 首跑实测校准确认（全部通过、floors 维持），基线迁移到门禁通道按
+「换模型 Runbook」步骤 2 执行。
 
 | 套件 | 关键指标 | 数值 | 解读 |
 |------|---------|------|------|
@@ -162,10 +162,13 @@ Runbook」）。
 - 冲突检测扩集后（20 条，时间演化类已补）仍然全对——当前模型 + prompt 对这类
   边界是真实的强，短板假设被数据否定。后续扩集方向转向**语义等价但数值巧合**
   的负例（如"每分钟 60 次"出现在不同语义下）与跨记忆间接矛盾。
-- 写入门禁已启用（临时阈值）——`eval.yml` 的 multi-run gate 对写入链路设了
-  `--min-conflict-f1 0.90` / `--min-merge-coverage 0.90` / `--min-gate-f1 0.85`
-  （YAML 内标注 provisional：基线与 CI 的 DeepSeek 通道不同源）。通道稳定后
-  按首次真实 CI 运行重校准并去掉 provisional 标注（流程见「换模型 Runbook」）。
+- 写入门禁首次真实 CI 校准完成（2026-09-06，run 34024657208，openai/omen-alpha
+  通道 ×3 轮、0 执行错误）：conflict_f1 [1.000, 0.952, 0.952]（ci95_lo 0.900）、
+  merge_fact_coverage 1.000、worthy_f1 0.923——三条门禁（0.90/0.90/0.85）全部
+  通过，floors 维持原值不重推（能力底线，runbook 步骤 3）。conflict_f1 余量偏
+  薄（2/3 轮各有 1 条假阴性），跌破 ≤0.87 ci95_lo 仍会触发门禁。provisional
+  标注已移除；提交的写入基线仍为 ox-alpha-free 通道，门禁通道定型后按 runbook
+  步骤 2 迁移。
 
 ## 运行
 
@@ -243,9 +246,10 @@ evals/
   - `llm-eval` job：每周定时 + 手动触发，需要 `LLM_API_KEY` secret，跑
     `--suite tool_selection,extraction,answer,write_conflict,write_merge,auto_gate`
     （六个无 DB 套件）经 `multi_run_gate` 三次取均值、按 95% CI 下界判门禁，
-    并上传报告。写入链路三套件（2026-08-24 加入）的门禁阈值是**临时值**——
-    基线（write-eval-baseline，ox-alpha-free 通道）与该 job 的 DeepSeek 通道
-    不同源，预期首次跑有漂移；按首次真实 CI 运行重校准后才可信。
+    并上传报告。写入链路三套件（2026-08-24 加入）的门禁已于 2026-09-06 按首次
+    真实 CI 运行校准确认（run 34024657208，openai/omen-alpha 通道，三条门禁
+    全部通过、floors 维持 0.90/0.90/0.85）。CI 通道由 secrets 决定
+    （`LLM_MODEL` 已透传）——换通道时按「换模型 Runbook」走。
   - `e2e-eval` job：同样每周定时 + 手动触发，带 postgres service + BGE-M3 模型，
     `e2e_seed --clear` 后跑 `--suite e2e`。
   - `task-eval` job：同样每周定时 + 手动触发，前置与 e2e-eval 相同（postgres +
@@ -289,6 +293,10 @@ evals/
    跨模型不保证迁移——停手纪律这类"教模型听话"的 prompt，不同模型服从性不同。
    换模型后跑一轮 task-eval 确认 unexpected_rate 仍为 0、零调用收口未复发；
    首个新模型轮次同时给 task-eval 门禁（暂未设置）提供校准数据。
+   **2026-09-06 首次跨模型验证（openai/omen-alpha，run 34024657208）**：
+   unexpected_rate 0.0（纪律迁移成功）、completed 0.875（8/8 干净轮、0 执行
+   错误）、groundedness 1.000——v7 纪律在新模型上保持，该基线数字可直接作
+   task-eval 门禁校准参考。
 1. **本地实验通道（不产基线）**：换模型试效果，用
    `compare_baseline --baseline <当前基线>` 看相对当前基线的 delta，或改动前后
    同通道各跑一次做 A/B。实验通道的数字不提交为基线、不进 eval.yml。

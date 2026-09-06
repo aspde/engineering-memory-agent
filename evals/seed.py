@@ -165,6 +165,15 @@ async def _run(args: argparse.Namespace) -> int:
             print(f"  [{s.category}] {s.id}: {s.summary[:80]}...")
         return 0
 
+    # Fresh-environment safety: CI's postgres service is an EMPTY database —
+    # local dev has the schema already, so this no-op was invisible until the
+    # first CI run died on "relation \"chunks\" does not exist" (run
+    # 34023270065).  init_db is CREATE TABLE IF NOT EXISTS: cheap on a
+    # populated database, load-bearing on an empty one.
+    from backend.db.schema import init_db
+
+    await init_db()
+
     if args.clear:
         n_chunks = await _clear_chunks()
         print(f"✓ Cleared {n_chunks} seed chunks", file=sys.stderr)
