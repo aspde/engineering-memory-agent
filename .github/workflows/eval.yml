@@ -168,6 +168,11 @@ jobs:
       LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://api.deepseek.com' }}
+      # Pin the eval channel's model explicitly — without this the process
+      # falls back to the config default (deepseek-v4-pro) while the secrets
+      # provider moved on, and the run silently measures a different model
+      # than the baseline/gate calibration assumes.
+      LLM_MODEL: ${{ secrets.LLM_MODEL || '' }}
       # Dedicated judge provider for manual --judge llm runs — the judged
       # model must NOT score its own output (self-preference bias inflates
       # every metric).  run_llm_eval hard-fails when --judge llm runs
@@ -267,6 +272,11 @@ jobs:
       LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://api.deepseek.com' }}
+      # Pin the eval channel's model explicitly — without this the process
+      # falls back to the config default (deepseek-v4-pro) while the secrets
+      # provider moved on, and the run silently measures a different model
+      # than the baseline/gate calibration assumes.
+      LLM_MODEL: ${{ secrets.LLM_MODEL || '' }}
       # Dedicated judge provider for manual --judge llm runs — same
       # requirement as the llm-eval job: semantic e2e groundedness is only
       # meaningful when the judge is a model other than the one answering.
@@ -356,6 +366,11 @@ jobs:
       LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'deepseek' }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_BASE_URL: ${{ secrets.LLM_BASE_URL || 'https://api.deepseek.com' }}
+      # Pin the eval channel's model explicitly — without this the process
+      # falls back to the config default (deepseek-v4-pro) while the secrets
+      # provider moved on, and the run silently measures a different model
+      # than the baseline/gate calibration assumes.
+      LLM_MODEL: ${{ secrets.LLM_MODEL || '' }}
     steps:
       - uses: actions/checkout@v4
 
