@@ -22,7 +22,7 @@ START → call_llm ──(无 tool_calls)──→ generate_final → END
 | `check_approval` | `backend/agent/nodes.py` | Human-in-the-Loop：写工具执行前暂停等待用户审批。审批集合由 `approval_required_tools` 参数化：默认集写/摄入供自动化流程（巡检/场景）自主执行；交互式 chat 路径用 `CHAT_APPROVAL_TOOLS`，额外把 `notify_feishu_tool`（外发到团队飞书群）纳入审批 |
 | `tools` | `ToolNode(tools, handle_tool_errors=True)` | LangGraph 内置，自动执行 tool_calls 并产生 `ToolMessage` |
 | `check_conflict` | `backend/agent/nodes.py` | Human-in-the-Loop：检测记忆冲突，暂停等待用户选择解决方案 |
-| `generate_final` | `backend/agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；本轮无工具结果（纯聊天）时直接复用 `call_llm` 输出，不重复调用 LLM |
+| `generate_final` | `backend/agent/nodes.py` | 从 `ToolMessage` 中提取检索上下文，调用 LLM（无 tools）生成最终回答；`call_llm` 的最新输出已是完整回答（纯聊天，或 ReAct 收尾轮模型停止调工具、把完整答案写成最后一条消息）时直接复用该输出，不重复调用 LLM——复用合成会丢内容（2026-09-05，tech_debt 运行 09bfba39：重合成把报告改写为短摘要、JSON 契约丢失） |
 
 路由：`tools_condition`（LangGraph 内置）—— AIMessage 有 `tool_calls` 则进入 `check_approval`（HITL 审批），无则去 `generate_final`（终止）。
 
@@ -47,7 +47,7 @@ LLM 通过 tools 自主决定调用哪个 tool。添加分类器只会增加一�
 
 每个用户轮次的 ReAct 循环有硬性上限：`step_count` 达到 `MAX_AGENT_STEPS`（默认 5，`config.max_agent_steps`）时，`_make_route_after_call_llm`（`backend/agent/graph.py`）强制把路由导向 `generate_final`，而不是继续循环。`step_count` 在每一轮新用户消息到达时重置（`call_llm_node` 通过 `_is_new_user_turn` 归零），所以上限约束的是**单轮内的工具循环**，不跨轮次累积。
 
-选择「到顶即收束」而不是「到顶报错」：LLM 偶尔会在复杂任务上多转几圈，强行报错会中断本来可以完成的回答；导向 `generate_final` 则把已拿到的工具结果收束成最终回答。默认 5 是交互场景的折中——大多数轮次 1-2 步即完成，5 步足以覆盖多工具链路（搜索 → 实体查询 → 写入），同时把单轮 LLM 调用成本控制在有界范围。自动化巡检（patrol）按类型放宽到 15/20 步（`backend/runner/patrol.py` 的 `_PATROL_MAX_STEPS`），因为全量扫描需要的搜索步数远超交互轮次。
+选择「到顶即收束」而不是「到顶报错」：LLM 偶尔会在复杂任务上多转几圈，强行报错会中断本来可以完成的回答；导向 `generate_final` 则把已拿到的工具结果收束成最终回答。默认 5 是交互场景的折中——大多数轮次 1-2 步即完成，5 步足以覆盖多工具链路（搜索 → 实体查询 → 写入），同时把单轮 LLM 调用成本控制在有界范围。自动化流程按类型放宽：巡检（patrol）15/20 步（`backend/runner/patrol.py` 的 `_PATROL_MAX_STEPS`），垂直场景 12 步（`SCENARIO_MAX_STEPS`，`config.scenario_max_steps`）——场景 compose 链需要事件 + 实体 + 相似故障多轮检索，交互预算会在搜索中途强制收束、报告退化为原始工具信封（2026-09-05，运行 291807b5 实测）。
 
 ### 为什么 Tool 返回 string
 
