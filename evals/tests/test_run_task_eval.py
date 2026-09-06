@@ -19,11 +19,11 @@ def _fake_result(overall: dict, **kw) -> TaskEvalResult:
     return TaskEvalResult(
         suite="task",
         judge=kw.get("judge", "deterministic"),
-        per_query=[],
+        per_query=kw.get("per_query", []),
         overall=overall,
         by_category={},
         metric_keys=keys,
-        n_items=1,
+        n_items=kw.get("n_items", 1),
         errors=[],
         judge_errors=[],
     )
@@ -125,6 +125,46 @@ class TestRun:
         patch_runner["result"].errors = [{"id": "task-001", "error": "provider down"}]
         args = _build_parser().parse_args([])
         assert await _run(args) == 1
+
+    @pytest.mark.asyncio
+    async def test_all_provider_errors_exit_1(self, patch_runner) -> None:
+        """CI false-green regression: a run where every row's agent call
+        failed (outcome_class=provider_error, e.g. missing LLM_API_KEY) used
+        to exit 0 because the row-level failures never reach result.errors.
+        A channel-broken run is not a quality sample — it must fail."""
+        from evals.core import EvalResult
+
+        rows = [
+            {"id": f"task-{i:03d}", "outcome_class": "provider_error"}
+            for i in range(1, 9)
+        ]
+        result = EvalResult(
+            suite="task", judge="deterministic", per_query=rows,
+            overall={"completed": 0.0}, by_category={}, metric_keys=(),
+            n_items=8, errors=[], judge_errors=[],
+        )
+        patch_runner["result"] = result
+        args = _build_parser().parse_args([])
+        assert await _run(args) == 1
+
+    @pytest.mark.asyncio
+    async def test_minority_provider_errors_stay_green(self, patch_runner) -> None:
+        """Below the 50% threshold the run is still a sample: 1/8 polluted
+        rows read as environment noise (the completed_clean denominator
+        handles them) — do not fail the run."""
+        from evals.core import EvalResult
+
+        rows = [{"id": "task-001", "outcome_class": "provider_error"}] + [
+            {"id": f"task-{i:03d}", "outcome_class": "ok"} for i in range(2, 9)
+        ]
+        result = EvalResult(
+            suite="task", judge="deterministic", per_query=rows,
+            overall={"completed": 0.875}, by_category={}, metric_keys=(),
+            n_items=8, errors=[], judge_errors=[],
+        )
+        patch_runner["result"] = result
+        args = _build_parser().parse_args([])
+        assert await _run(args) == 0
 
 
 class TestJudgeProviderGuard:

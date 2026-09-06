@@ -205,7 +205,24 @@ async def _run(args: argparse.Namespace) -> int:
         path = write_json([result], args.report_json)
         print(f"✓ JSON report → {path}", file=sys.stderr)
 
-    rc = 1 if result.errors else 0
+    # A run where EVERY task landed provider_error (agent invocation failed
+    # on all rows) is a broken environment, not a quality sample — CI saw
+    # this as green because the exceptions are row-level outcomes, not
+    # result.errors.  Any provider-error share >= 50% means the channel is
+    # broken: fail loudly the same way a judge-channel failure does.
+    provider_error_rows = [
+        r for r in result.per_query if r.get("outcome_class") == "provider_error"
+    ]
+    if len(provider_error_rows) >= max(result.n_items * 0.5, 1):
+        print(
+            f"✗ task: {len(provider_error_rows)}/{result.n_items} rows are "
+            "provider errors — the LLM channel is broken (missing/expired "
+            "LLM_API_KEY, provider outage).  Not a quality signal.",
+            file=sys.stderr,
+        )
+        rc = 1
+    else:
+        rc = 1 if result.errors else 0
     if _judge_channel_degraded(result):
         print(
             f"✗ task: judge channel failed on {len(result.judge_errors)}/"
