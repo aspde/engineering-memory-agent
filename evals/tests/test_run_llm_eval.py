@@ -50,6 +50,9 @@ def patch_runners(monkeypatch):
         "extraction": [],
         "answer": [],
         "e2e": [],
+        "write_conflict": [],
+        "write_merge": [],
+        "auto_gate": [],
     }
     results: dict[str, LlmEvalResult] = {}
 
@@ -72,6 +75,15 @@ def patch_runners(monkeypatch):
     monkeypatch.setattr(
         "evals.llm_runner.run_e2e", _make("e2e")
     )
+    monkeypatch.setattr(
+        "evals.write_eval_runner.run_write_conflict", _make("write_conflict")
+    )
+    monkeypatch.setattr(
+        "evals.write_eval_runner.run_write_merge", _make("write_merge")
+    )
+    monkeypatch.setattr(
+        "evals.write_eval_runner.run_auto_gate", _make("auto_gate")
+    )
     results["tool_selection"] = _fake_result(
         "tool_selection", {"tool_accuracy": 1.0}
     )
@@ -90,6 +102,9 @@ def patch_runners(monkeypatch):
             "citation_rate": 1.0,
         },
     )
+    results["write_conflict"] = _fake_result("write_conflict", {"conflict_f1": 1.0})
+    results["write_merge"] = _fake_result("write_merge", {"merge_fact_coverage": 1.0})
+    results["auto_gate"] = _fake_result("auto_gate", {"worthy_f1": 1.0})
     return calls, results
 
 
@@ -112,7 +127,11 @@ class TestRun:
         assert len(calls["tool_selection"]) == 1
         assert len(calls["extraction"]) == 1
         assert len(calls["answer"]) == 1
-        assert len(calls["e2e"]) == 1
+        assert len(calls["write_conflict"]) == 1
+        assert len(calls["write_merge"]) == 1
+        assert len(calls["auto_gate"]) == 1
+        # e2e needs a seeded corpus + DB — excluded from --suite all.
+        assert len(calls["e2e"]) == 0
 
     @pytest.mark.asyncio
     async def test_single_suite_selection(self, patch_runners) -> None:

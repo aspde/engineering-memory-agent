@@ -460,9 +460,9 @@ EMA_API_KEY=<key> python -m locust -f tests/perf/locustfile.py \
 
 > 评估体系、成本监控、容器化、locust 压测、对话 P95/token 成本均已交付。剩余高优先级动作:
 
-1. **记忆写入链路的正确性测量**(最大未测风险):merge 操作可能捏造内容、冲突检测 precision/recall 未测、auto-memory gate 准确率未测——记忆污染会永久恶化检索,应优先补评估。
+1. ~~**记忆写入链路的正确性测量**(最大未测风险)~~ **✅ 已补齐(2026-08-24)**:写入链路三套件落地(`evals/write_eval_*` + `run_llm_eval --suite write_conflict,write_merge,auto_gate`)——冲突检测 P/R(12 对标注)、merge 捏造/丢失双通道 judge(8 对标注,确定性 fact_coverage 恒测)、auto-memory 门控分类指标(12 条标注)。首基线:conflict F1=1.000 / merge coverage=1.000 + judge 忠实/完整均 1.000 / gate F1=0.923(fp 0.083),详见 [llm-eval.md](llm-eval.md) 写入链路基线。merge/门控的 prompt 迭代从此有 A/B 依据。
 2. **检索判别力继续提升**:bounded cross-encoder 已提至 81.5%(默认关),仍需在上线前用真实语料校准阈值。
-3. 标注集扩充:抽取评估当前用 8 条替代,扩充到 50 条级别。
+3. 标注集扩充:抽取评估当前用 8 条替代,扩充到 50 条级别;写入链路冲突集同样偏小(12 对全对说明区分度不足)。
 
 ---
 

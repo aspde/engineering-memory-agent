@@ -339,26 +339,41 @@ def _merge_relations(existing_relations, new_relations) -> list[dict]:
     return merged
 
 
+async def merge_summaries(existing_summary: str, new_summary: str) -> str:
+    """LLM-merge two memory summaries into one (the ``memory.merge`` prompt).
+
+    Single call site for the merge prompt — ``_merge_memory``, the
+    ``resolve_conflict("merge")`` branch, and the write-eval executor all go
+    through this so a prompt edit changes every consumer at once.  Raises on
+    provider failure; callers decide the fallback
+    (:func:`_merge_memory` keeps the existing summary, ``resolve_conflict``
+    keeps the new one).
+    """
+    from backend.service.llm_service import get_llm_provider
+
+    llm = get_llm_provider()
+    version, prompt = get_prompt("memory.merge")
+    logger.debug("merge_summaries: using prompt memory.merge v%s", version)
+    prompt = prompt.format(
+        existing_summary=existing_summary,
+        new_summary=new_summary,
+    )
+    merged = await llm.chat(
+        [{"role": "user", "content": prompt}], scenario="memory_merge", temperature=0.3
+    )
+    return merged.strip()
+
+
 async def _merge_memory(existing, extracted, embedding, source_type, metadata, content_hash):
     """Merge new memory into existing one — update summary and entities.
 
     Fails safe: if the LLM merge call fails, returns the existing memory
     unchanged rather than losing data.
     """
-    from backend.service.llm_service import get_llm_provider
-
     try:
-        llm = get_llm_provider()
-        version, prompt = get_prompt("memory.merge")
-        logger.debug("_merge_memory: using prompt memory.merge v%s", version)
-        prompt = prompt.format(
-            existing_summary=existing["summary"],
-            new_summary=extracted["summary"],
+        merged_summary = await merge_summaries(
+            existing["summary"], extracted["summary"]
         )
-        merged_summary = await llm.chat(
-            [{"role": "user", "content": prompt}], scenario="memory_merge", temperature=0.3
-        )
-        merged_summary = merged_summary.strip()
     except Exception:
         logger.warning("LLM merge failed, keeping existing summary for %s", existing["id"])
         merged_summary = existing["summary"]
@@ -677,6 +692,10 @@ async def _write_resolved_memory(
                 )
             await session.commit()
     except IntegrityError:
+        # Without a content_hash the write does not touch the hash column, so
+        # an IntegrityError here cannot be a hash race — re-raise it.
+        if not content_hash:
+            raise
         winner = await _find_by_content_hash(content_hash, session_factory)
         if winner is None:
             raise
@@ -803,8 +822,6 @@ async def resolve_conflict(
         return {"id": existing_id, "action": "conflict_resolved", "resolution": "overwrite"}
 
     elif resolution == "merge":
-        from backend.service.llm_service import get_llm_provider
-
         async with session_factory() as session:
             result = await session.execute(
                 text(
@@ -838,18 +855,7 @@ async def resolve_conflict(
         merged_meta = _record_prior_hash(merged_meta, old_content_hash)
 
         try:
-            llm = get_llm_provider()
-            version, prompt = get_prompt("memory.merge")
-            logger.debug("resolve_conflict(merge): using prompt memory.merge v%s", version)
-            prompt = prompt.format(
-                existing_summary=existing_summary,
-                new_summary=extracted["summary"],
-            )
-            merged_summary = (await llm.chat(
-                [{"role": "user", "content": prompt}],
-                scenario="memory_merge",
-                temperature=0.3,
-            )).strip()
+            merged_summary = await merge_summaries(existing_summary, extracted["summary"])
         except Exception:
             merged_summary = extracted["summary"]
 

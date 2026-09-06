@@ -1,0 +1,12 @@
+{"id": "ag-001", "content": "我们把部署脚本里的健康检查超时从 30 秒改到了 90 秒，因为数据库迁移在冷启动时可能超过 30 秒导致容器被反复重启。", "expected_worthy": true, "category": "technical_decision", "notes": "参数决策+原因"}
+{"id": "ag-002", "content": "线上 502 的根因是 nginx upstream 指向了已下线的旧实例，切换 upstream 配置后恢复。教训：下线实例前必须先摘除 upstream 引用。", "expected_worthy": true, "category": "incident_lesson", "notes": "故障复盘+教训"}
+{"id": "ag-003", "content": "修复 Windows 下 asyncpg 连接池跨事件循环报错的方法：SQLAlchemy 建池时传 NullPool，绕过连接复用。", "expected_worthy": true, "category": "how_to", "notes": "解决方案"}
+{"id": "ag-004", "content": "今天中午吃了新开的那家川菜馆，味道还行，就是有点辣。", "expected_worthy": false, "category": "chitchat", "notes": "纯闲聊"}
+{"id": "ag-005", "content": "pgvector 的 HNSW 索引在数据量小的时候相比 IVFFlat 有什么优势？我们现在的场景需要重建索引吗？", "expected_worthy": false, "category": "question", "notes": "提问不是知识——即使话题很技术"}
+{"id": "ag-006", "content": "麻烦下午帮我跑一下回归测试，跑完把报告发到群里，谢谢！", "expected_worthy": false, "category": "action_request", "notes": "行动请求"}
+{"id": "ag-007", "content": "这个 bug 我看了一下午了还是没头绪，感觉是竞态条件但抓不到复现路径。", "expected_worthy": false, "category": "chitchat", "notes": "情绪表达/状态更新——技术话题但非沉淀知识"}
+{"id": "ag-008", "content": "决定：搜索接口的 top_k 上限从 50 收紧到 20，因为压测显示大 top_k 会显著推高 P95，而业务上从没用到超过 15 条结果。", "expected_worthy": true, "category": "technical_decision", "notes": "带量化依据的决策"}
+{"id": "ag-009", "content": "刚才那个 CI 失败重试了两次就好了，应该是环境抖动不是代码问题。", "expected_worthy": false, "category": "chitchat", "notes": "边界样本：像观察结论但无沉淀价值——门控应保守拒绝"}
+{"id": "ag-010", "content": "Postgres 16 的逻辑复制槽在主从切换后不会自动重建，必须在新的主库上手工创建，否则订阅端会一直等待。我们已经在 runbook 里加了这步。", "expected_worthy": true, "category": "how_to", "notes": "运维知识+流程沉淀"}
+{"id": "ag-011", "content": "好的，明白了，我这就去改。", "expected_worthy": false, "category": "chitchat", "notes": "确认应答——长度恰好过快路径的典型噪声"}
+{"id": "ag-012", "content": "复盘：上周的内存泄漏根因是定时任务持有了请求级 DB session 的引用，修复方式是把 session 生命周期绑定到任务作用域并加了泄漏检测告警。", "expected_worthy": true, "category": "incident_lesson", "notes": "结构化复盘"}

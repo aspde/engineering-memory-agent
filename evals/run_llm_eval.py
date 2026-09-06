@@ -46,9 +46,12 @@ from typing import Any
 from backend.shared.config import config
 from evals.llm_ground_truth import (
     load_answer_items,
+    load_auto_gate_items,
     load_e2e_items,
     load_extraction_items,
     load_tool_selection_items,
+    load_write_conflict_items,
+    load_write_merge_items,
     validate_llm_dataset,
 )
 from evals.llm_report import (
@@ -59,12 +62,26 @@ from evals.llm_report import (
 from evals.llm_runner import LlmEvalResult
 from evals.thresholds import check_thresholds, print_threshold_failures
 
-SUITES: tuple[str, ...] = ("tool_selection", "extraction", "answer", "e2e")
+SUITES: tuple[str, ...] = (
+    "tool_selection", "extraction", "answer", "e2e",
+    "write_conflict", "write_merge", "auto_gate",
+)
 
 # Suites whose ``--judge llm`` path actually consults the LLM judge.  A run
 # that only exercises tool_selection never touches the judge, so the
 # "self-judging" guard below does not apply to it.
-JUDGE_USING_SUITES: tuple[str, ...] = ("extraction", "answer", "e2e")
+JUDGE_USING_SUITES: tuple[str, ...] = (
+    "extraction", "answer", "e2e", "write_merge",
+)
+
+# Suites that need a seeded corpus + database (excluded from --suite all).
+# The write-path suites call the LLM directly with labeled inputs — no DB.
+DB_USING_SUITES: tuple[str, ...] = ("e2e",)
+
+
+def _default_suites() -> list[str]:
+    """Suites behind ``--suite all`` — everything except the DB-bound ones."""
+    return [s for s in SUITES if s not in DB_USING_SUITES]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -80,7 +97,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "Suite(s) to run: comma-separated names or 'all'. "
             f"Valid suites: {', '.join(SUITES)}. "
             "Note: 'e2e' needs a seeded corpus (run `python -m "
-            "evals.e2e_seed --clear`) and a database. Default: all."
+            "evals.e2e_seed --clear`) and a database; 'all' runs everything "
+            "except e2e. Default: all."
         ),
     )
     p.add_argument(
@@ -134,6 +152,9 @@ def _build_parser() -> argparse.ArgumentParser:
         ("--min-groundedness", "groundedness"),
         ("--min-citation-rate", "citation_rate"),
         ("--min-context-recall", "context_recall"),
+        ("--min-conflict-f1", "conflict_f1"),
+        ("--min-merge-coverage", "merge_fact_coverage"),
+        ("--min-gate-f1", "worthy_f1"),
     ):
         p.add_argument(
             flag,
@@ -158,6 +179,9 @@ def _build_thresholds(args: argparse.Namespace) -> dict[str, float]:
         "groundedness",
         "citation_rate",
         "context_recall",
+        "conflict_f1",
+        "merge_fact_coverage",
+        "worthy_f1",
     ):
         value = getattr(args, f"min_{metric}", None)
         if value is not None:
@@ -189,7 +213,7 @@ def _select_suites(args: argparse.Namespace) -> list[str]:
     """
     raw = args.suite
     if raw == "all":
-        return list(SUITES)
+        return _default_suites()
     names = [s.strip() for s in raw.split(",") if s.strip()]
     unknown = [s for s in names if s not in SUITES]
     if unknown:
@@ -270,6 +294,9 @@ def _suite_items(suite: str) -> Sequence[Any]:
         "extraction": load_extraction_items(),
         "answer": load_answer_items(),
         "e2e": load_e2e_items(),
+        "write_conflict": load_write_conflict_items(),
+        "write_merge": load_write_merge_items(),
+        "auto_gate": load_auto_gate_items(),
     }[suite]
     return list(items)
 
@@ -280,6 +307,11 @@ async def _run_one(suite: str, args: argparse.Namespace) -> Any:
         run_e2e,
         run_extraction,
         run_tool_selection,
+    )
+    from evals.write_eval_runner import (
+        run_auto_gate,
+        run_write_conflict,
+        run_write_merge,
     )
 
     items = _suite_items(suite)
@@ -297,6 +329,12 @@ async def _run_one(suite: str, args: argparse.Namespace) -> Any:
             top_k=args.e2e_top_k,
             retrieval_mode=args.e2e_mode,
         )
+    if suite == "write_conflict":
+        return await run_write_conflict(items=items)
+    if suite == "write_merge":
+        return await run_write_merge(items=items, judge=args.judge)
+    if suite == "auto_gate":
+        return await run_auto_gate(items=items)
     return await run_answer(items=items, judge=args.judge)
 
 

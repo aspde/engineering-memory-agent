@@ -33,6 +33,9 @@ SUITE_TITLES: dict[str, str] = {
     "extraction": "知识抽取",
     "answer": "最终答案",
     "e2e": "端到端问答",
+    "write_conflict": "写入冲突检测",
+    "write_merge": "写入合并质量",
+    "auto_gate": "自动记忆门控",
 }
 
 
@@ -108,6 +111,34 @@ def _per_query_detail(result: EvalResult) -> str:
                 )
             if q.get("ungrounded_claims"):
                 lines.append(f"- ⚠ ungrounded: {q['ungrounded_claims']}")
+        if "predicted_conflict" in q:
+            lines.append(
+                f"- conflict: predicted={q.get('predicted_conflict', '?')} "
+                f"(tp={_fmt(q.get('conflict_tp', 0.0))} "
+                f"fp={_fmt(q.get('conflict_fp', 0.0))} "
+                f"fn={_fmt(q.get('conflict_fn', 0.0))} "
+                f"tn={_fmt(q.get('conflict_tn', 0.0))})"
+            )
+        if "merge_fact_coverage" in q:
+            lines.append(
+                f"- merge: coverage={_fmt(q.get('merge_fact_coverage', 0.0))} "
+                f"(len={q.get('merged_len', '?')})"
+            )
+            if "merge_faithfulness" in q:
+                lines.append(
+                    f"- judge: faithfulness={_fmt(q.get('merge_faithfulness', 0.0))} "
+                    f"completeness={_fmt(q.get('merge_completeness', 0.0))}"
+                )
+            if q.get("merged_preview"):
+                lines.append(f"- merged: `{q['merged_preview']}…`")
+        if "predicted_worthy" in q:
+            lines.append(
+                f"- gate: predicted_worthy={q.get('predicted_worthy', '?')} "
+                f"(tp={_fmt(q.get('worthy_tp', 0.0))} "
+                f"fp={_fmt(q.get('worthy_fp', 0.0))} "
+                f"fn={_fmt(q.get('worthy_fn', 0.0))} "
+                f"tn={_fmt(q.get('worthy_tn', 0.0))})"
+            )
         if q.get("judge_error"):
             lines.append(f"- ⚠ judge degraded: {q['judge_error']}")
         lines.append("")
@@ -197,6 +228,32 @@ def summarize(result: EvalResult) -> str:
             f"groundedness={_fmt(result.metric('groundedness'))} "
             f"hallucination={_fmt(result.metric('hallucination_rate'))} "
             f"citation={_fmt(result.metric('citation_rate'))} "
+            f"items={result.n_items} errors={len(result.errors)}"
+        )
+    if result.suite == "write_conflict":
+        return (
+            f"[write_conflict] precision={_fmt(result.metric('conflict_precision'))} "
+            f"recall={_fmt(result.metric('conflict_recall'))} "
+            f"f1={_fmt(result.metric('conflict_f1'))} "
+            f"fp_rate={_fmt(result.metric('conflict_false_positive_rate'))} "
+            f"fn_rate={_fmt(result.metric('conflict_false_negative_rate'))} "
+            f"items={result.n_items} errors={len(result.errors)}"
+        )
+    if result.suite == "write_merge":
+        return (
+            f"[write_merge] coverage={_fmt(result.metric('merge_fact_coverage'))} "
+            f"faithfulness={_fmt(result.metric('merge_faithfulness') or None)} "
+            f"completeness={_fmt(result.metric('merge_completeness') or None)} "
+            f"items={result.n_items} "
+            f"errors={len(result.errors)} judge_errors={len(result.judge_errors)}"
+        )
+    if result.suite == "auto_gate":
+        return (
+            f"[auto_gate] precision={_fmt(result.metric('worthy_precision'))} "
+            f"recall={_fmt(result.metric('worthy_recall'))} "
+            f"f1={_fmt(result.metric('worthy_f1'))} "
+            f"accuracy={_fmt(result.metric('worthy_accuracy'))} "
+            f"fp_rate={_fmt(result.metric('worthy_false_positive_rate'))} "
             f"items={result.n_items} errors={len(result.errors)}"
         )
     return (

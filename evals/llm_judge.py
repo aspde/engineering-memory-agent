@@ -169,3 +169,56 @@ async def judge_summary(
         "faithfulness": float(verdict.get("faithfulness", 0.0)),
         "completeness": float(verdict.get("completeness", 0.0)),
     }
+
+
+# ── Merge judge (write_merge suite) ─────────────────────────────────
+
+MERGE_JUDGE_PROMPT = """\
+你是一个记忆合并质量评测助手。判断给定的合并摘要是否正确地融合了两条原始摘要。
+
+原始摘要 A:
+{existing_summary}
+
+原始摘要 B:
+{new_summary}
+
+合并结果:
+{merged}
+
+请输出 JSON：
+- faithfulness: 0 到 1 的数字，合并结果是否只包含两条原始摘要支持的信息、没有捏造或歪曲任何一方的含义（0=大量捏造，1=完全忠实）
+- completeness: 0 到 1 的数字，合并结果是否保留了两条原始摘要各自的关键事实（0=丢失大量关键事实，1=双方关键事实都完整保留）
+"""
+
+
+async def judge_merge(
+    existing_summary: str,
+    new_summary: str,
+    merged: str,
+    *,
+    provider: LLMProvider | None = None,
+) -> dict[str, Any]:
+    """Grade one merged summary against its two source summaries.
+
+    The write-path merge is correctness-critical in both directions: a
+    hallucinated merge pollutes the store with facts nobody said; a lossy
+    one silently drops a side's knowledge.  Judge selection mirrors
+    ``judge_answer`` — the dedicated judge provider when configured.
+    """
+    prompt = MERGE_JUDGE_PROMPT.format(
+        existing_summary=existing_summary,
+        new_summary=new_summary,
+        merged=merged or "(空合并结果)",
+    )
+    verdict = await chat_structured(
+        [{"role": "user", "content": prompt}],
+        json_schema=SUMMARY_JUDGE_SCHEMA,
+        scenario="eval_merge_judge",
+        provider=provider or get_judge_provider(),
+    )
+    if not isinstance(verdict, dict):
+        raise ValueError(f"merge judge returned non-object: {verdict!r}")
+    return {
+        "faithfulness": float(verdict.get("faithfulness", 0.0)),
+        "completeness": float(verdict.get("completeness", 0.0)),
+    }

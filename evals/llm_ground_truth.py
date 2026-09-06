@@ -190,6 +190,97 @@ class E2EItem:
 E2E_ITEMS: list[E2EItem] = load_jsonl_items("e2e.jsonl", E2EItem)
 
 
+# ── Memory write path ───────────────────────────────────────────────
+# The retrieval eval measures *which memories a search returns*; the write
+# path decides *what enters the store in the first place*.  Three suites
+# cover its correctness-critical LLM decisions (gap-remediation §8 item 1):
+#
+# - **write_conflict** — a stored summary + an incoming one, labeled with
+#   whether they contradict.  Measures the 0.72–0.85 band's conflict gate
+#   (`memory.conflict` prompt): precision/recall on the contradiction call.
+#   The hard negatives are refinements and supplements — same topic, no
+#   contradiction — because "same topic" is exactly what tempts a model into
+#   a false positive.
+#
+# - **write_merge** — the same pair shape, but the label side carries the
+#   facts a correct merged summary must retain.  Measures the `memory.merge`
+#   prompt: does the merged summary keep both sides' key facts without
+#   inventing any?  Deterministic keyword coverage is always computed; the
+#   LLM judge grades faithfulness/completeness when --judge llm.
+#
+# - **auto_gate** — a user message + whether it is durable knowledge.
+#   Measures the auto-memory quality gate (`agent.auto_memory_gate` prompt)
+#   as a binary classifier: worthy-precision / worthy-recall.  Hard
+#   negatives are plausible-looking messages that are still not knowledge
+#   (questions, action requests, status pings).
+
+WRITE_CONFLICT_CATEGORIES: tuple[str, ...] = (
+    "direct_contradiction",
+    "parameter_change",
+    "status_reversal",
+    "refinement",     # hard negative — new detail, no contradiction
+    "supplement",     # hard negative — adjacent fact, no contradiction
+)
+
+WRITE_MERGE_CATEGORIES: tuple[str, ...] = (
+    "paraphrase",     # same knowledge, different wording
+    "partial_overlap",  # each side carries unique facts
+)
+
+AUTO_GATE_CATEGORIES: tuple[str, ...] = (
+    "technical_decision",
+    "incident_lesson",
+    "how_to",
+    "chitchat",
+    "question",
+    "action_request",
+)
+
+
+@dataclass(frozen=True)
+class WriteConflictItem:
+    id: str
+    existing_summary: str
+    new_summary: str
+    #: True ⇒ the pair contradicts; False ⇒ same-topic non-contradiction.
+    expected_conflict: bool
+    category: str
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class WriteMergeItem:
+    id: str
+    existing_summary: str
+    new_summary: str
+    #: Substrings a correct merged summary must contain (both sides' key
+    #: facts).  Drives ``merge_fact_coverage``.
+    required_facts: list[str]
+    category: str
+    notes: str = ""
+
+
+@dataclass(frozen=True)
+class AutoGateItem:
+    id: str
+    content: str
+    #: True ⇒ durable knowledge the gate should let through.
+    expected_worthy: bool
+    category: str
+    notes: str = ""
+
+
+WRITE_CONFLICT_ITEMS: list[WriteConflictItem] = load_jsonl_items(
+    "write_conflict.jsonl", WriteConflictItem
+)
+WRITE_MERGE_ITEMS: list[WriteMergeItem] = load_jsonl_items(
+    "write_merge.jsonl", WriteMergeItem
+)
+AUTO_GATE_ITEMS: list[AutoGateItem] = load_jsonl_items(
+    "auto_gate.jsonl", AutoGateItem
+)
+
+
 # ── Loading & validation ───────────────────────────────────────────
 
 
@@ -207,6 +298,18 @@ def load_answer_items() -> list[AnswerItem]:
 
 def load_e2e_items() -> list[E2EItem]:
     return list(E2E_ITEMS)
+
+
+def load_write_conflict_items() -> list[WriteConflictItem]:
+    return list(WRITE_CONFLICT_ITEMS)
+
+
+def load_write_merge_items() -> list[WriteMergeItem]:
+    return list(WRITE_MERGE_ITEMS)
+
+
+def load_auto_gate_items() -> list[AutoGateItem]:
+    return list(AUTO_GATE_ITEMS)
 
 
 def _normalize_name(name: str) -> str:
@@ -374,5 +477,69 @@ def validate_llm_dataset() -> list[str]:
                     f"{it.id}: required fact {fact!r} is not a substring of "
                     "source_content — context_recall can never reach 1.0"
                 )
+
+    # ── write_conflict ──
+    seen.clear()
+    for it in WRITE_CONFLICT_ITEMS:
+        if it.id in seen:
+            raise ValueError(f"duplicate write_conflict item id: {it.id}")
+        seen.add(it.id)
+        if not it.existing_summary.strip() or not it.new_summary.strip():
+            raise ValueError(f"{it.id}: empty summary side")
+        if it.category not in WRITE_CONFLICT_CATEGORIES:
+            raise ValueError(
+                f"{it.id}: unknown category {it.category!r} "
+                f"(expected one of {WRITE_CONFLICT_CATEGORIES})"
+            )
+        # Label sanity per category family — contradiction categories must be
+        # labeled True, hard-negative categories False.  A mismatch means the
+        # item was mis-authored, and the metric would silently count it
+        # against whichever class the label picked.
+        contradicting = it.category in (
+            "direct_contradiction", "parameter_change", "status_reversal",
+        )
+        if it.expected_conflict != contradicting:
+            raise ValueError(
+                f"{it.id}: expected_conflict={it.expected_conflict} contradicts "
+                f"category {it.category!r}"
+            )
+
+    # ── write_merge ──
+    seen.clear()
+    for it in WRITE_MERGE_ITEMS:
+        if it.id in seen:
+            raise ValueError(f"duplicate write_merge item id: {it.id}")
+        seen.add(it.id)
+        if not it.existing_summary.strip() or not it.new_summary.strip():
+            raise ValueError(f"{it.id}: empty summary side")
+        if it.category not in WRITE_MERGE_CATEGORIES:
+            raise ValueError(
+                f"{it.id}: unknown category {it.category!r} "
+                f"(expected one of {WRITE_MERGE_CATEGORIES})"
+            )
+        if not it.required_facts:
+            raise ValueError(f"{it.id}: required_facts is empty")
+        for fact in it.required_facts:
+            if not str(fact).strip():
+                raise ValueError(f"{it.id}: empty required fact")
+            if str(fact) not in it.existing_summary and str(fact) not in it.new_summary:
+                raise ValueError(
+                    f"{it.id}: required fact {fact!r} appears on neither side — "
+                    "a correct merge cannot retain it"
+                )
+
+    # ── auto_gate ──
+    seen.clear()
+    for it in AUTO_GATE_ITEMS:
+        if it.id in seen:
+            raise ValueError(f"duplicate auto_gate item id: {it.id}")
+        seen.add(it.id)
+        if not it.content.strip():
+            raise ValueError(f"{it.id}: empty content")
+        if it.category not in AUTO_GATE_CATEGORIES:
+            raise ValueError(
+                f"{it.id}: unknown category {it.category!r} "
+                f"(expected one of {AUTO_GATE_CATEGORIES})"
+            )
 
     return warnings

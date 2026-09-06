@@ -1,0 +1,672 @@
+{
+  "generated_at": "2026-09-05T12:54:27.686297+00:00",
+  "results": [
+    {
+      "suite": "write_conflict",
+      "judge": "deterministic",
+      "metric_keys": [
+        "conflict_tp",
+        "conflict_fp",
+        "conflict_fn",
+        "conflict_tn",
+        "conflict_precision",
+        "conflict_recall",
+        "conflict_f1",
+        "conflict_accuracy",
+        "conflict_false_positive_rate",
+        "conflict_false_negative_rate"
+      ],
+      "n_items": 20,
+      "overall": {
+        "conflict_tp": 0.55,
+        "conflict_fp": 0.0,
+        "conflict_fn": 0.0,
+        "conflict_tn": 0.45,
+        "conflict_precision": 1.0,
+        "conflict_recall": 1.0,
+        "conflict_f1": 1.0,
+        "conflict_accuracy": 1.0,
+        "conflict_false_positive_rate": 0.0,
+        "conflict_false_negative_rate": 0.0
+      },
+      "by_category": {
+        "direct_contradiction": {
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0,
+          "conflict_precision": 1.0,
+          "conflict_recall": 1.0,
+          "conflict_f1": 1.0,
+          "conflict_accuracy": 1.0,
+          "conflict_false_positive_rate": 0.0,
+          "conflict_false_negative_rate": 0.0
+        },
+        "parameter_change": {
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0,
+          "conflict_precision": 1.0,
+          "conflict_recall": 1.0,
+          "conflict_f1": 1.0,
+          "conflict_accuracy": 1.0,
+          "conflict_false_positive_rate": 0.0,
+          "conflict_false_negative_rate": 0.0
+        },
+        "status_reversal": {
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0,
+          "conflict_precision": 1.0,
+          "conflict_recall": 1.0,
+          "conflict_f1": 1.0,
+          "conflict_accuracy": 1.0,
+          "conflict_false_positive_rate": 0.0,
+          "conflict_false_negative_rate": 0.0
+        },
+        "refinement": {
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0,
+          "conflict_precision": 0.0,
+          "conflict_recall": 0.0,
+          "conflict_f1": 0.0,
+          "conflict_accuracy": 1.0,
+          "conflict_false_positive_rate": 0.0,
+          "conflict_false_negative_rate": 0.0
+        },
+        "supplement": {
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0,
+          "conflict_precision": 0.0,
+          "conflict_recall": 0.0,
+          "conflict_f1": 0.0,
+          "conflict_accuracy": 1.0,
+          "conflict_false_positive_rate": 0.0,
+          "conflict_false_negative_rate": 0.0
+        }
+      },
+      "n_errors": 0,
+      "n_judge_errors": 0,
+      "errors": [],
+      "judge_errors": [],
+      "per_query": [
+        {
+          "id": "wc-001",
+          "category": "direct_contradiction",
+          "existing_preview": "团队决定用 PostgreSQL + pgvector 作为唯一数据存储方案，向量检索和业务数据同库，避免引入独立向量数据库的运维成本。",
+          "new_preview": "团队决定放弃 PostgreSQL + pgvector 方案，改用专用向量数据库 Milvus 承载向量检索，理由是 pgvector 在千万级向量下性能不足",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-002",
+          "category": "direct_contradiction",
+          "existing_preview": "EMA 的 Agent 采用 LangGraph 单 Agent 架构，ReAct 循环手动构建 StateGraph，禁止 Multi-Agent。",
+          "new_preview": "EMA 的 Agent 架构已重构为 Multi-Agent 编排，由一个 planner 分发给多个专业子 Agent 执行。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-003",
+          "category": "parameter_change",
+          "existing_preview": "生产环境数据库连接池配置为 max_size=10，超时 30 秒。",
+          "new_preview": "生产环境数据库连接池已调整为 max_size=25，超时降到 15 秒。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-004",
+          "category": "status_reversal",
+          "existing_preview": "部署在 Windows 开发机上时 checkpointer 降级为 InMemorySaver，因为 psycopg3 异步驱动与 ProactorEvent",
+          "new_preview": "Windows 开发机的 checkpointer 问题已解决：切换到 psycopg3 的 async 兼容模式后 PostgresSaver 可以正常使用。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-005",
+          "category": "supplement",
+          "existing_preview": "检索服务默认关闭 LLM rerank，因为小语料下 cross-encoder 打分噪声反而降低排序质量（A/B 实测 recall@5 掉 0.033）。",
+          "new_preview": "LLM rerank 在生产对话路径被禁用的另一个原因是延迟：每次候选重排要花约 14 秒，无法接受。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-006",
+          "category": "refinement",
+          "existing_preview": "记忆去重的合并阈值设为 0.85：高于该值的近似重复走 LLM 合并，0.72 到 0.85 之间进入冲突检测。",
+          "new_preview": "阈值标定基于三类摘要对的相似度分布：同义改写对落在 0.84 到 0.97，同类不同知识最高 0.79，所以 0.85 是自然分离点。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-007",
+          "category": "refinement",
+          "existing_preview": "CI 流水线在测试阶段失败率最高的环节是集成测试，平均每月失败 4 次。",
+          "new_preview": "集成测试容器启动偶发超时是 CI 失败的主因之一，重试机制上线后失败率降了一半。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-008",
+          "category": "supplement",
+          "existing_preview": "飞书通知通过 bot webhook 发送到团队群，消息支持 text 和 interactive 卡片两种格式。",
+          "new_preview": "巡检结果除了推送到飞书群，还会写入 patrol_logs 表供 Web UI 查询历史。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-009",
+          "category": "direct_contradiction",
+          "existing_preview": "前端状态管理用 React Context + useReducer，没有引入 Redux 等外部状态库。",
+          "new_preview": "前端状态管理迁移到了 Zustand，Context 方案在多页面共享状态下重渲染严重。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-010",
+          "category": "supplement",
+          "existing_preview": "API 鉴权采用单一共享 API key，所有 /api 请求需携带 Authorization Bearer 头。",
+          "new_preview": "API 限流按 key 分桶，chat 路由和一般路由各有独立的令牌桶配额，超限返回 429 和 Retry-After 头。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-011",
+          "category": "status_reversal",
+          "existing_preview": "实体归一化采用两层判断：先用向量相似度粗筛候选，再用 LLM 精判是否同名实体，精判失败时保守假定不匹配。",
+          "new_preview": "实体归一化的 LLM 精判步骤已被移除，现在完全依赖向量相似度阈值直接判定。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-012",
+          "category": "refinement",
+          "existing_preview": "文档摄入的分块策略对 Python 代码用 AST 感知切分，保证函数不会被切断；普通文本用递归分隔符切分。",
+          "new_preview": "Python 文档分块升级为 AST 感知切分后，长函数体不再被拦腰截断，检索命中率明显提升。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-013",
+          "category": "parameter_change",
+          "existing_preview": "生产 Redis 实例的最大内存限制设置为 4GB，达到上限后使用 allkeys-lru 策略淘汰旧键。",
+          "new_preview": "生产 Redis 的内存上限已从 4GB 调到 8GB，淘汰策略维持 allkeys-lru 不变。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-014",
+          "category": "parameter_change",
+          "existing_preview": "API 网关对每个客户端的限流阈值是每分钟 60 次请求。",
+          "new_preview": "API 网关限流阈值已上调到每客户端每分钟 300 次，原因是批量任务频繁触发限流。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-015",
+          "category": "parameter_change",
+          "existing_preview": "业务数据的缓存 TTL 统一配置为 5 分钟。",
+          "new_preview": "热点数据的缓存 TTL 已延长到 1 小时，回源请求量实测下降 80%。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-016",
+          "category": "status_reversal",
+          "existing_preview": "数据库慢查询阈值设为 500 毫秒，超过阈值实时告警到值班群。",
+          "new_preview": "慢查询实时告警已关闭，改为每天早上汇总一封慢查询日报——实时告警噪声太大导致值班疲劳。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        },
+        {
+          "id": "wc-017",
+          "category": "supplement",
+          "existing_preview": "生产数据库连接池配置为 max_size=10。",
+          "new_preview": "预发环境连接池刻意保持 max_size=5，与生产差异化以便对照排查连接问题。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-018",
+          "category": "refinement",
+          "existing_preview": "部署脚本的健康检查超时是 30 秒。",
+          "new_preview": "健康检查超时维持 30 秒不变，另外新增了就绪探针（/healthz，间隔 10 秒）供滚动发布使用。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-019",
+          "category": "refinement",
+          "existing_preview": "CI 流水线的整体超时时间设置为 30 分钟。",
+          "new_preview": "讨论过把 CI 超时缩短到 20 分钟以加快失败反馈，但最终决定暂不实施，维持 30 分钟观察。",
+          "predicted_conflict": false,
+          "conflict_tp": 0.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 1.0
+        },
+        {
+          "id": "wc-020",
+          "category": "parameter_change",
+          "existing_preview": "对象存储的生命周期规则：临时文件 7 天后自动删除。",
+          "new_preview": "对象存储生命周期规则已调整：临时文件改为 24 小时后删除，新增归档文件保留 1 年的规则。",
+          "predicted_conflict": true,
+          "conflict_tp": 1.0,
+          "conflict_fp": 0.0,
+          "conflict_fn": 0.0,
+          "conflict_tn": 0.0
+        }
+      ]
+    },
+    {
+      "suite": "write_merge",
+      "judge": "llm",
+      "metric_keys": [
+        "merge_fact_coverage",
+        "merge_faithfulness",
+        "merge_completeness"
+      ],
+      "n_items": 8,
+      "overall": {
+        "merge_fact_coverage": 1.0,
+        "merge_faithfulness": 1.0,
+        "merge_completeness": 1.0
+      },
+      "by_category": {
+        "paraphrase": {
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        "partial_overlap": {
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        }
+      },
+      "n_errors": 0,
+      "n_judge_errors": 0,
+      "errors": [],
+      "judge_errors": [],
+      "per_query": [
+        {
+          "id": "wm-001",
+          "category": "partial_overlap",
+          "existing_preview": "检索服务默认跳过 cross-encoder rerank，因为 A/B 实测在小语料下 rerank 打分噪声会误伤低分相关结果。",
+          "new_preview": "生产对话路径已锁死 LLM rerank：实测它占单轮延迟的 58%，且不改变召回集合只微调排序。",
+          "merged_len": 105,
+          "merged_preview": "检索服务默认跳过 cross-encoder rerank（A/B 实测小语料下打分噪声会误伤低分相关结果）；生产对话路径则已锁死 LLM rerank——实测占单轮延迟 58%，且不改变召回集合、仅微调排序。",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-002",
+          "category": "paraphrase",
+          "existing_preview": "团队决定用 PostgreSQL + pgvector 做向量检索，业务数据与向量同库。",
+          "new_preview": "选 pgvector 而不是 Elasticsearch 的原因是省去独立 ES 集群的运维成本，且和业务库同库事务一致。",
+          "merged_len": 99,
+          "merged_preview": "团队决定用 PostgreSQL + pgvector 做向量检索（而非 Elasticsearch），业务数据与向量同库；选择原因是省去独立 ES 集群的运维成本，且与业务库同库可保证事务一致性。",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-003",
+          "category": "partial_overlap",
+          "existing_preview": "Windows 下 psycopg3 异步驱动与 ProactorEventLoop 不兼容，checkpointer 降级为 InMemorySaver。",
+          "new_preview": "测试环境用 NullPool 规避 asyncpg 连接池跨事件循环复用的问题。",
+          "merged_len": 119,
+          "merged_preview": "Windows 下 psycopg3 异步驱动与 ProactorEventLoop 不兼容，checkpointer 降级为 InMemorySaver；测试环境则用 NullPool 规避 asyncpg 连接池跨事件循环复用的问题。",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-004",
+          "category": "partial_overlap",
+          "existing_preview": "Agent 单轮 ReAct 循环上限 5 步，到达上限强制收束到 generate_final 而不是报错中断。",
+          "new_preview": "巡检任务按类型放宽步数预算：daily 15 步、weekly 20 步，因为全量扫描需要的搜索步数远超交互轮次。",
+          "merged_len": 114,
+          "merged_preview": "Agent 单轮 ReAct 循环默认上限 5 步，到达上限强制收束到 generate_final 而非报错中断；巡检任务按类型放宽步数预算（daily 15 步、weekly 20 步），因全量扫描所需搜索步数远超交互轮次。",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-005",
+          "category": "paraphrase",
+          "existing_preview": "自动记忆捕获在最终回答交付后排入后台任务执行，不阻塞 SSE 流；并发由信号量限制为 4。",
+          "new_preview": "每次自动记忆捕获最多花 7 次 LLM 调用（门控 1 次、提取 3 次、嵌入加相似度扫描等）。",
+          "merged_len": 90,
+          "merged_preview": "自动记忆捕获在最终回答交付后排入后台任务执行，不阻塞 SSE 流；并发由信号量限制为 4；每次捕获最多消耗 7 次 LLM 调用（门控 1 次、提取 3 次、嵌入加相似度扫描等）。",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-006",
+          "category": "paraphrase",
+          "existing_preview": "冲突仲裁提供四个选项：keep_existing 保留旧记忆、overwrite 用新内容覆盖、merge LLM 合并、keep_both 两条并存。",
+          "new_preview": "无人值守的巡检流程遇到写冲突时自动选择 keep_both，让新内容与旧记忆并存而不是卡死等待人工裁决。",
+          "merged_len": 124,
+          "merged_preview": "冲突仲裁提供四个选项：keep_existing 保留旧记忆、overwrite 用新内容覆盖、merge LLM 合并、keep_both 两条并存；无人值守的巡检流程遇到写冲突时自动选择 keep_both，让新旧记忆并存而不卡死等待人",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-007",
+          "category": "paraphrase",
+          "existing_preview": "jieba 分词结果落到 chunks.tokens 列并建 GIN 索引，把中文 sparse 检索从 O(N) 全表扫描降到 O(log N)。",
+          "new_preview": "1000 条语料下 sparse 检索稳态延迟从 641ms 降到 198ms，改善 69%。",
+          "merged_len": 134,
+          "merged_preview": "**Merged summary:**\n\njieba 分词结果落到 chunks.tokens 列并建 GIN 索引，中文 sparse 检索复杂度从 O(N) 全表扫描降到 O(log N)；1000 条语料下稳态延迟从 641ms 降到",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        },
+        {
+          "id": "wm-008",
+          "category": "partial_overlap",
+          "existing_preview": "实体抽取的 prompt 加了 few-shot 示例后 entity_recall 从 0.781 升到 0.927。",
+          "new_preview": "函数调用通道在生成期约束 entity type 枚举，非法 type 从机制上产生不出来，DeepSeek thinking 模式下降级为 chat_stru",
+          "merged_len": 150,
+          "merged_preview": "实体抽取改进：prompt 加入 few-shot 示例后 entity_recall 从 0.781 升至 0.927；同时函数调用通道在生成期约束 entity type 枚举，从机制上杜绝非法 type 的产生，DeepSeek th",
+          "merge_fact_coverage": 1.0,
+          "merge_faithfulness": 1.0,
+          "merge_completeness": 1.0
+        }
+      ]
+    },
+    {
+      "suite": "auto_gate",
+      "judge": "deterministic",
+      "metric_keys": [
+        "worthy_tp",
+        "worthy_fp",
+        "worthy_fn",
+        "worthy_tn",
+        "worthy_precision",
+        "worthy_recall",
+        "worthy_f1",
+        "worthy_accuracy",
+        "worthy_false_positive_rate",
+        "worthy_false_negative_rate"
+      ],
+      "n_items": 12,
+      "overall": {
+        "worthy_tp": 0.5,
+        "worthy_fp": 0.08333333333333333,
+        "worthy_fn": 0.0,
+        "worthy_tn": 0.4166666666666667,
+        "worthy_precision": 0.8571428571428571,
+        "worthy_recall": 1.0,
+        "worthy_f1": 0.923076923076923,
+        "worthy_accuracy": 0.9166666666666667,
+        "worthy_false_positive_rate": 0.08333333333333333,
+        "worthy_false_negative_rate": 0.0
+      },
+      "by_category": {
+        "technical_decision": {
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0,
+          "worthy_precision": 1.0,
+          "worthy_recall": 1.0,
+          "worthy_f1": 1.0,
+          "worthy_accuracy": 1.0,
+          "worthy_false_positive_rate": 0.0,
+          "worthy_false_negative_rate": 0.0
+        },
+        "incident_lesson": {
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0,
+          "worthy_precision": 1.0,
+          "worthy_recall": 1.0,
+          "worthy_f1": 1.0,
+          "worthy_accuracy": 1.0,
+          "worthy_false_positive_rate": 0.0,
+          "worthy_false_negative_rate": 0.0
+        },
+        "how_to": {
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0,
+          "worthy_precision": 1.0,
+          "worthy_recall": 1.0,
+          "worthy_f1": 1.0,
+          "worthy_accuracy": 1.0,
+          "worthy_false_positive_rate": 0.0,
+          "worthy_false_negative_rate": 0.0
+        },
+        "chitchat": {
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.25,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.75,
+          "worthy_precision": 0.0,
+          "worthy_recall": 0.0,
+          "worthy_f1": 0.0,
+          "worthy_accuracy": 0.75,
+          "worthy_false_positive_rate": 0.25,
+          "worthy_false_negative_rate": 0.0
+        },
+        "question": {
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0,
+          "worthy_precision": 0.0,
+          "worthy_recall": 0.0,
+          "worthy_f1": 0.0,
+          "worthy_accuracy": 1.0,
+          "worthy_false_positive_rate": 0.0,
+          "worthy_false_negative_rate": 0.0
+        },
+        "action_request": {
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0,
+          "worthy_precision": 0.0,
+          "worthy_recall": 0.0,
+          "worthy_f1": 0.0,
+          "worthy_accuracy": 1.0,
+          "worthy_false_positive_rate": 0.0,
+          "worthy_false_negative_rate": 0.0
+        }
+      },
+      "n_errors": 0,
+      "n_judge_errors": 0,
+      "errors": [],
+      "judge_errors": [],
+      "per_query": [
+        {
+          "id": "ag-001",
+          "category": "technical_decision",
+          "content_preview": "我们把部署脚本里的健康检查超时从 30 秒改到了 90 秒，因为数据库迁移在冷启动时可能超过 30 秒导致容器被反复重启。",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-002",
+          "category": "incident_lesson",
+          "content_preview": "线上 502 的根因是 nginx upstream 指向了已下线的旧实例，切换 upstream 配置后恢复。教训：下线实例前必须先摘除 upstream 引",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-003",
+          "category": "how_to",
+          "content_preview": "修复 Windows 下 asyncpg 连接池跨事件循环报错的方法：SQLAlchemy 建池时传 NullPool，绕过连接复用。",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-004",
+          "category": "chitchat",
+          "content_preview": "今天中午吃了新开的那家川菜馆，味道还行，就是有点辣。",
+          "predicted_worthy": false,
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0
+        },
+        {
+          "id": "ag-005",
+          "category": "question",
+          "content_preview": "pgvector 的 HNSW 索引在数据量小的时候相比 IVFFlat 有什么优势？我们现在的场景需要重建索引吗？",
+          "predicted_worthy": false,
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0
+        },
+        {
+          "id": "ag-006",
+          "category": "action_request",
+          "content_preview": "麻烦下午帮我跑一下回归测试，跑完把报告发到群里，谢谢！",
+          "predicted_worthy": false,
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0
+        },
+        {
+          "id": "ag-007",
+          "category": "chitchat",
+          "content_preview": "这个 bug 我看了一下午了还是没头绪，感觉是竞态条件但抓不到复现路径。",
+          "predicted_worthy": false,
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0
+        },
+        {
+          "id": "ag-008",
+          "category": "technical_decision",
+          "content_preview": "决定：搜索接口的 top_k 上限从 50 收紧到 20，因为压测显示大 top_k 会显著推高 P95，而业务上从没用到超过 15 条结果。",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-009",
+          "category": "chitchat",
+          "content_preview": "刚才那个 CI 失败重试了两次就好了，应该是环境抖动不是代码问题。",
+          "predicted_worthy": true,
+          "worthy_tp": 0.0,
+          "worthy_fp": 1.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-010",
+          "category": "how_to",
+          "content_preview": "Postgres 16 的逻辑复制槽在主从切换后不会自动重建，必须在新的主库上手工创建，否则订阅端会一直等待。我们已经在 runbook 里加了这步。",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        },
+        {
+          "id": "ag-011",
+          "category": "chitchat",
+          "content_preview": "好的，明白了，我这就去改。",
+          "predicted_worthy": false,
+          "worthy_tp": 0.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 1.0
+        },
+        {
+          "id": "ag-012",
+          "category": "incident_lesson",
+          "content_preview": "复盘：上周的内存泄漏根因是定时任务持有了请求级 DB session 的引用，修复方式是把 session 生命周期绑定到任务作用域并加了泄漏检测告警。",
+          "predicted_worthy": true,
+          "worthy_tp": 1.0,
+          "worthy_fp": 0.0,
+          "worthy_fn": 0.0,
+          "worthy_tn": 0.0
+        }
+      ]
+    }
+  ]
+}

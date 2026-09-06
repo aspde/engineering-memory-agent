@@ -702,34 +702,42 @@ _AUTO_MEMORY_GATE_SCHEMA: dict[str, Any] = {
 }
 
 
+async def _llm_gate_verdict(content: str) -> bool:
+    """Ask the LLM whether *content* is durable knowledge — raises on failure.
+
+    The raw gate decision.  Propagates provider/structured-output errors so a
+    caller can distinguish "the model said no" from "the model was
+    unreachable" — :func:`_llm_gate_worthy` degrades the latter to allow, and
+    the write-eval suite records the latter as an execution error instead of
+    silently scoring every item as worthy.
+    """
+    from backend.service.prompts import get_prompt
+    from backend.service.structured import chat_structured
+
+    version, prompt = get_prompt("agent.auto_memory_gate")
+    logger.debug("Auto-memory gate: prompt agent.auto_memory_gate v%s", version)
+    # Escape the content's braces so ``.format`` interpolates them as
+    # literal text (the template's own ``{{``/``}}`` escapes still render
+    # as the JSON example braces).
+    content_snippet = content[:500].replace("{", "{{").replace("}", "}}")
+    data = await chat_structured(
+        [{"role": "user", "content": prompt.format(content=content_snippet)}],
+        json_schema=_AUTO_MEMORY_GATE_SCHEMA,
+        scenario="auto_memory_gate",
+        temperature=0.0,
+    )
+    return bool(data.get("worthy", False)) if isinstance(data, dict) else False
+
+
 async def _llm_gate_worthy(content: str) -> bool:
     """Ask the LLM whether *content* is durable knowledge (best-effort).
 
     Returns True when the gate is unavailable (LLM failure, schema-valid but
     missing verdict) so a gate outage never drops a length-passing turn — the
-    later ``_has_substance`` check still guards the write.  *content* is
-    truncated so a long message doesn't inflate the gate call's prompt, and
-    braces in it are escaped so a code snippet can't break the template's
-    ``.format()`` interpolation (which would otherwise raise KeyError and
-    fail the gate open on the exact messages it exists to judge).
+    later ``_has_substance`` check still guards the write.
     """
     try:
-        from backend.service.prompts import get_prompt
-        from backend.service.structured import chat_structured
-
-        version, prompt = get_prompt("agent.auto_memory_gate")
-        logger.debug("Auto-memory gate: prompt agent.auto_memory_gate v%s", version)
-        # Escape the content's braces so ``.format`` interpolates them as
-        # literal text (the template's own ``{{``/``}}`` escapes still render
-        # as the JSON example braces).
-        content_snippet = content[:500].replace("{", "{{").replace("}", "}}")
-        data = await chat_structured(
-            [{"role": "user", "content": prompt.format(content=content_snippet)}],
-            json_schema=_AUTO_MEMORY_GATE_SCHEMA,
-            scenario="auto_memory_gate",
-            temperature=0.0,
-        )
-        return bool(data.get("worthy", False)) if isinstance(data, dict) else False
+        return await _llm_gate_verdict(content)
     except Exception:
         logger.warning(
             "Auto-memory LLM gate failed — defaulting to allow", exc_info=True

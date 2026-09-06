@@ -1,6 +1,6 @@
-# LLM 行为评测（工具选择 / 知识抽取 / 最终答案 / 端到端）
+# LLM 行为评测（工具选择 / 知识抽取 / 最终答案 / 端到端 / 写入链路）
 
-> 评测代码在 `evals/` 下的 `llm_*` 模块，CLI 入口是 `python -m evals.run_llm_eval`。
+> 评测代码在 `evals/` 下的 `llm_*` 与 `write_eval_*` 模块，CLI 入口是 `python -m evals.run_llm_eval`。
 
 ## 为什么需要它
 
@@ -92,6 +92,77 @@ chunk 模式 → `retrieve_hybrid`），把检索结果按 `generate_final_node`
 没用对。8 条题目复用 EMA 自身工程史（pgvector 选型、502 复盘、InMemorySaver
 降级等），其中 1 条 chunk 模式覆盖文档检索路径。
 
+### 写入链路（write_conflict / write_merge / auto_gate）
+
+检索评测回答"搜回来的对不对"；写入链路评测回答"**存进去的对不对**"。记忆污染是
+永久性的——一条捏造的合并、一次漏检的矛盾会持续恶化之后的每次检索。三个套件覆盖
+写入路径上三个 correctness-critical 的 LLM 决策（gap-remediation §8 第一条）：
+
+#### 冲突检测（write_conflict）
+
+标注集：`已有摘要 + 新摘要 → 是否矛盾`。执行器 `make_conflict_detector` 跑真实的
+`_detect_conflict`（`memory.conflict` prompt + 结构化输出），即生产写路径
+0.72-0.85 相似度带里决定"进 HITL 仲裁还是当 supplement 放行"的那次调用。
+
+指标：二分类的 confusion-cell 推导指标——`conflict_precision` / `recall` / `f1` /
+`accuracy` + `false_positive_rate`（误把补充送仲裁）+ `false_negative_rate`
+（漏掉真矛盾放进库）。硬负例刻意选同主题不矛盾对（细化/补充），因为"话题相同"
+正是诱导模型误报矛盾的东西。确定性套件，无 LLM judge。
+
+#### 合并质量（write_merge）
+
+标注集：`已有摘要 + 新摘要 → 必须保留的关键事实`。执行器 `make_merge_summarizer`
+跑 `merge_summaries()`——生产 merge 路径（`_merge_memory` 与冲突 resolve 的 merge
+分支）共用的单一入口。
+
+指标：`merge_fact_coverage`（双侧关键事实在合并摘要中的保留率，确定性子串）；
+`--judge=llm` 时由 LLM 裁判打 `merge_faithfulness`（是否捏造）与
+`merge_completeness`（是否丢事实）——正是"merge 可能捏造内容"这个风险的两个失败
+方向。judge 失败沿用 extraction 策略：行标 `judge_error`、键留空，不写假 0 分。
+
+#### 自动记忆门控（auto_gate）
+
+标注集：`用户消息 → 是否持久知识`。执行器 `make_gate_checker` 跑
+`_llm_gate_verdict`（`agent.auto_memory_gate` prompt）——**故意绕过 fail-open
+包装**：生产包装层在 provider 故障时默认放行（对话路径正确行为），但评测里故障
+必须记为执行错误而不是"全部 worthy"的完美分数。拆分出的 raising 核让两种语义各得其所。
+
+指标：worthy 二分类的 precision / recall / f1 / accuracy + 双向错误率。
+门控设计上偏保守（漏捕获可恢复，垃圾记忆永久污染），所以 `false_positive_rate`
+（垃圾放行率）是最受关注的列。确定性套件。
+
+#### 为什么二分类指标从混淆单元推导
+
+真负例条目的逐条 precision 是 0/0 → 按约定记 0.0，直接平均会把含负例的完美分类
+拖到 0.5。runner 记录逐条 tp/fp/fn/tn 指示器（均值 = count/N），聚合后由
+`derive_binary_prf` 在每个桶（overall / category）推导出精确的 micro-P/R/F1。
+
+### 写入链路基线（2026-08-24，DeepSeek 通道 + mimo-v2.5-free judge）
+
+报告：`evals/reports/write-eval-baseline.md` / `.json`（conflict 20 条 + merge 8 条
+judge 全量 0 降级 + gate 12 条）。
+
+| 套件 | 关键指标 | 数值 | 解读 |
+|------|---------|------|------|
+| write_conflict（20 条） | precision / recall / F1 | **1.000 / 1.000 / 1.000** | 扩集后仍全对：11 条真矛盾（含 5 条时间演化参数变更：Redis 上限、限流阈值、缓存 TTL、告警切换、生命周期规则）全抓住；9 条硬负例零误报，含"被否决的提案不算矛盾"（wc-019）和"不同环境不同参数"（wc-017） |
+| write_merge | fact_coverage | **1.000** | 8/8 合并摘要保留了双侧全部关键事实 |
+| write_merge (judge) | faithfulness / completeness | **1.000 / 1.000** | 8/8 judge 成功（0 降级）：合并既不捏造也不丢事实。早期读数 0.600/0.613 是免费 judge 额度 429 限流的降级伪影（降级行按分母政策记 0），不是质量回归 |
+| auto_gate | precision / recall / F1 | 0.857 / 1.000 / 0.923 | 12 条 worthy 全放行（recall 1.000）；1 条误放行（ag-009"CI 重试两次就好了"——像观察结论的闲聊），fp_rate 0.083 |
+
+已知问题与后续动作：
+
+- **merge 的 LLM judge 通道受免费 judge 模型额度约束**（约 5-7 分钟窗口恢复，
+  一次 merge 全量 8 次调用贴着额度跑）。judge 不稳时该列读数偏低是**分母政策**
+  而非质量回归，看 `n_judge_errors` 区分；`judge_errors ≥ 50%` 时 CLI 已显式
+  判 run 失败。
+- 冲突检测扩集后（20 条，时间演化类已补）仍然全对——当前模型 + prompt 对这类
+  边界是真实的强，短板假设被数据否定。后续扩集方向转向**语义等价但数值巧合**
+  的负例（如"每分钟 60 次"出现在不同语义下）与跨记忆间接矛盾。
+- 写入门禁已启用（临时阈值）——`eval.yml` 的 multi-run gate 对写入链路设了
+  `--min-conflict-f1 0.90` / `--min-merge-coverage 0.90` / `--min-gate-f1 0.85`
+  （YAML 内标注 provisional：基线与 CI 的 DeepSeek 通道不同源）。通道稳定后
+  按首次真实 CI 运行重校准并去掉 provisional 标注。
+
 ## 运行
 
 ```bash
@@ -101,8 +172,11 @@ python -m evals.run_llm_eval --validate-only
 # 冒烟：每套件 3 条，确定性评判（最省 token）
 python -m evals.run_llm_eval --sample 3 --judge deterministic
 
-# 三个无 DB 套件（CI llm-eval job 跑这个）
-python -m evals.run_llm_eval --suite tool_selection,extraction,answer
+# 六个无 DB 套件（CI llm-eval job 跑这个，经 multi_run_gate 三次取均值）
+python -m evals.run_llm_eval --suite tool_selection,extraction,answer,write_conflict,write_merge,auto_gate
+
+# 写入链路三套件（同样无 DB，冲突/门控确定性、merge 可带 judge）
+python -m evals.run_llm_eval --suite write_conflict,write_merge,auto_gate --judge llm
 
 # 端到端套件（需要先 seeding + 本地 DB + embedding 模型）
 python -m evals.e2e_seed --clear
@@ -120,18 +194,22 @@ python -m evals.run_llm_eval --suite all \
   --min-fact-coverage 0.60 --min-groundedness 0.80
 ```
 
-成本：全套 15（工具选择）+ 8（抽取）+ 8（答案）+ 8（端到端）≈ 39 条，每条 1-5 次
-LLM 调用，全量 + LLM 裁判约 80-120 次调用，适合每周定时任务。`--suite` 支持
-逗号分隔（如 `tool_selection,answer`），`all` 含全部四个套件。
+成本：全套 15（工具选择）+ 8（抽取）+ 8（答案）+ 8（端到端）+ 12+8+12（写入链路）
+≈ 71 条，每条 1-5 次 LLM 调用，全量 + LLM 裁判约 100-150 次调用，适合每周定时任务。
+`--suite` 支持逗号分隔（如 `tool_selection,answer`），`all` 含除 e2e 外的全部套件
+（e2e 需要 seeding + DB，显式点名才跑）。
 
 ## 架构
 
 ```
 evals/
-  llm_ground_truth.py   # 四套标注集的 item 类型 + validate_llm_dataset()（数据在 data/*.jsonl）
+  llm_ground_truth.py   # 七套标注集的 item 类型 + validate_llm_dataset()（数据在 data/*.jsonl）
   llm_metrics.py        # 纯函数指标（无 I/O，单测覆盖）
   llm_executors.py      # 默认执行器：包装 call_llm_node / extract_memory / 答案 prompt / e2e 检索
-  llm_judge.py          # LLM-as-judge：答案覆盖/忠实 + 摘要忠实/完整
+  llm_judge.py          # LLM-as-judge：答案覆盖/忠实 + 摘要忠实/完整 + 合并忠实/完整
+  write_eval_metrics.py    # 写入链路纯函数指标（混淆单元推导二分类 P/R/F1 + merge 覆盖）
+  write_eval_executors.py  # 写入链路执行器：包装 _detect_conflict / merge_summaries / _llm_gate_verdict
+  write_eval_runner.py     # 写入链路三套件的 run_*（结果类/聚合复用 core）
   core.py               # 共用骨架（与检索/task 评测共享）：EvalResult / 聚合 / judge 失败零值 / JSON 序列化
   llm_runner.py         # 每套件一个 run_*：执行 + 聚合 + 错误行归零（结果类/聚合复用 core）
   llm_report.py         # Markdown + JSON 报告 + summarize 一行（序列化复用 core）
@@ -159,7 +237,11 @@ evals/
 - `ci.yml`：每次 push 跑 `--validate-only`（零成本门禁，与检索/LLM 数据集校验并列）。
 - `eval.yml`：
   - `llm-eval` job：每周定时 + 手动触发，需要 `LLM_API_KEY` secret，跑
-    `--suite tool_selection,extraction,answer`（三个无 DB 套件）并上传报告。
+    `--suite tool_selection,extraction,answer,write_conflict,write_merge,auto_gate`
+    （六个无 DB 套件）经 `multi_run_gate` 三次取均值、按 95% CI 下界判门禁，
+    并上传报告。写入链路三套件（2026-08-24 加入）的门禁阈值是**临时值**——
+    基线（write-eval-baseline，ox-alpha-free 通道）与该 job 的 DeepSeek 通道
+    不同源，预期首次跑有漂移；按首次真实 CI 运行重校准后才可信。
   - `e2e-eval` job：同样每周定时 + 手动触发，带 postgres service + BGE-M3 模型，
     `e2e_seed --clear` 后跑 `--suite e2e`。
   - `task-eval` job：同样每周定时 + 手动触发，前置与 e2e-eval 相同（postgres +
@@ -242,6 +324,7 @@ Auto-memory 在评测进程中关闭，避免后台抽取/写入污染语料、�
 | `unexpected_rate` | 调了 expected ∪ allowed 之外的工具 |
 | `within_budget` | 未撞 `max_steps` 强制终止（循环纪律） |
 | `fact_coverage` / `groundedness` / `citation_rate` | 复用 answer 套件指标（judge 通道对 Agent 实际看到的工具上下文判定） |
+
 
 ### 运行
 

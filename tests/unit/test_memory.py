@@ -332,6 +332,39 @@ class TestResolveConflictHashCollision:
         assert result["id"] == winner["id"]
         assert result["resolution"] == "overwrite"
 
+    @pytest.mark.asyncio
+    async def test_hashless_integrity_error_reraises(self) -> None:
+        """A NULL content_hash write never touches the hash column, so an
+        IntegrityError there is NOT a hash race — it must re-raise, not be
+        misread as 'someone else stored this content' (mypy 2.3 flagged the
+        unguarded None use; the guard is the corrected behaviour)."""
+        from backend.service.memory import resolve_conflict
+
+        existing_id = "11111111-1111-1111-1111-111111111111"
+        meta_select_result = MagicMock()
+        meta_select_result.fetchone.return_value = ("{}", None)  # NULL hash
+
+        mock_session = AsyncMock()
+        mock_session.execute.side_effect = [
+            meta_select_result,
+            IntegrityError("UPDATE ...", {}, Exception("some_other_violation")),
+        ]
+
+        deferred = {
+            "extracted": {"summary": "New summary.", "entities": [], "relations": []},
+            "embedding": str([0.1] * 1024),
+            "source_type": "conversation",
+            "metadata": {"conflicts_with": existing_id},
+            "content_hash": None,
+        }
+
+        with patch(
+            "backend.service.memory.get_session_factory",
+            return_value=_make_session_factory(mock_session),
+        ):
+            with pytest.raises(IntegrityError):
+                await resolve_conflict("overwrite", existing_id, deferred)
+
 
 class TestWriteMemoryIdempotency:
     """The content-hash gate in write_memory skips exact-duplicate ingestion."""
