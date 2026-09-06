@@ -1,10 +1,11 @@
 # Phase 4: 垂直场景孵化 — 功能规格
 
-> **实现状态（2026-08）**：本 spec 是 Phase 4 的原始设计蓝图，正文保留设计时的意图。
+> **实现状态（2026-08，2026-09-05 修订）**：本 spec 是 Phase 4 的原始设计蓝图，正文保留设计时的意图。
 > 与当前代码的差异：
-> - 四个场景（复盘/审查/Onboarding/技术债）已按"prompt + compose 函数 + dict 注册"落地，但均为薄壳（一次 `invoke_scenario_agent()` 调用）；
-> - **故障复盘已完成第一轮做厚**（2026-08）：运行落库（`scenario_runs` 表，migration 0005）、JSON 输出契约（`scenario.postmortem` v4 + `extract_json_object` 解析，契约未过不判死）、保存入库端点（`POST /api/scenarios/runs/{id}/save-as-memory`，用户点击即确认、冲突走非交互队列、幂等）、事件自动触发（`EVENT_POSTMORTEM_ENABLED` 门控：已知问题重演且 severity 达标时自动运行并推飞书卡片）、前端「保存为记忆」按钮；手动与事件路径共用执行器 `execute_scenario()`（并发槽位/超时/落库收拢一处）；
-> - code_review 投递 PR 评论（story 9）、tech_debt 自动解决检测与推送（story 16/17）尚未实现——待复盘模式验证后按同一模式复制。
+> - 四个场景（复盘/审查/Onboarding/技术债）已按"prompt + compose 函数 + dict 注册"落地；
+> - **第一轮做厚覆盖全部四个场景的公共层**（2026-08）：手动与事件路径共用执行器 `execute_scenario()`（并发槽位 / 超时 / `scenario_runs` 落库 / 类型化 `error_kind` 收拢一处，migration 0005）；四个场景的 prompt 均带 JSON 输出契约块（`_CONTRACT_PARSERS` 按场景注册必需键 + `extract_json_object` 解析，契约未过不判死——Markdown 照常返回）；ReAct 预算放宽（`SCENARIO_MAX_STEPS=12`）与合成输出上限（`SCENARIO_MAX_TOKENS=8000`）；
+> - **故障复盘额外完成场景专属层**（2026-08）：保存入库端点（`POST /api/scenarios/runs/{id}/save-as-memory`，用户点击即确认、冲突走非交互队列、幂等、成功后按契约 `related_entities` 确定性关联实体）、事件自动触发（`EVENT_POSTMORTEM_ENABLED` 门控：已知问题重演且 severity 达标时自动运行并推飞书卡片，外层受 `SCENARIOS_ENABLED` 总闸）、前端「保存为记忆」按钮；
+> - code_review 投递 PR 评论（story 9）、tech_debt 自动解决检测与推送（story 16/17）尚未实现——待复盘模式验证后按同一模式复制（code_review/onboarding/tech_debt 的 save-as-memory 与事件触发也属此后的复制项）。
 
 ## Problem Statement
 
