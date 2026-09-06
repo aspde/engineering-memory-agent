@@ -668,5 +668,14 @@
         }
       ]
     }
-  ]
+  ],
+  "run_provenance": {
+    "provider": "openai",
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "model": "ox-alpha-free",
+    "judge": "mimo-v2.5-free (LLM_JUDGE channel)",
+    "embedding_provider": "local",
+    "embedding_model": "BAAI/bge-m3",
+    "note": "Backfilled 2026-09-06 — the file originally carried no provenance. Model per the eval.yml llm-eval job comment; judge per docs/engineering/llm-eval.md (mimo-v2.5-free in the LLM_JUDGE channel since 2026-08-09). Gate floors in eval.yml derive from these numbers (provisional until recalibrated on the CI channel)."
+  }
 }

@@ -137,10 +137,14 @@ chunk 模式 → `retrieve_hybrid`），把检索结果按 `generate_final_node`
 拖到 0.5。runner 记录逐条 tp/fp/fn/tn 指示器（均值 = count/N），聚合后由
 `derive_binary_prf` 在每个桶（overall / category）推导出精确的 micro-P/R/F1。
 
-### 写入链路基线（2026-08-24，DeepSeek 通道 + mimo-v2.5-free judge）
+### 写入链路基线（2026-09-05，ox-alpha-free 通道 + mimo-v2.5-free judge）
 
 报告：`evals/reports/write-eval-baseline.md` / `.json`（conflict 20 条 + merge 8 条
-judge 全量 0 降级 + gate 12 条）。
+judge 全量 0 降级 + gate 12 条）。通道来源已回填进基线 JSON 的 `run_provenance`
+字段（2026-09-06）；早先文档误记为 DeepSeek 通道。**门禁可比性提醒**：CI 的
+llm-eval job 走 DeepSeek 通道，与该基线不同源——`eval.yml` 的三 floors 是
+provisional，按 CI 通道首跑校准后才可信（换模型流程见下文「换模型
+Runbook」）。
 
 | 套件 | 关键指标 | 数值 | 解读 |
 |------|---------|------|------|
@@ -161,7 +165,7 @@ judge 全量 0 降级 + gate 12 条）。
 - 写入门禁已启用（临时阈值）——`eval.yml` 的 multi-run gate 对写入链路设了
   `--min-conflict-f1 0.90` / `--min-merge-coverage 0.90` / `--min-gate-f1 0.85`
   （YAML 内标注 provisional：基线与 CI 的 DeepSeek 通道不同源）。通道稳定后
-  按首次真实 CI 运行重校准并去掉 provisional 标注。
+  按首次真实 CI 运行重校准并去掉 provisional 标注（流程见「换模型 Runbook」）。
 
 ## 运行
 
@@ -268,6 +272,28 @@ evals/
   语义对比用 `--baseline evals/reports/llm-eval-semantic-baseline.json`。
 - **重标定**：有意的行为变更（prompt 版本号 bump、模型切换、工具表调整）落地后，
   重新生成基线并同步 eval.yml 阈值。
+
+### 换模型 Runbook
+
+每份报告/基线的 `run_provenance` 字段（provider / model / judge，2026-09-06 起
+自动写入）说明它测于哪个通道。跨通道数字**不可比**——基线只在同通道上可比，
+换模型后的动作按此收敛：
+
+1. **本地实验通道（不产基线）**：换模型试效果，用
+   `compare_baseline --baseline <当前基线>` 看相对当前基线的 delta，或改动前后
+   同通道各跑一次做 A/B。实验通道的数字不提交为基线、不进 eval.yml。
+2. **成为门禁通道（CI 所用通道）**：重测基线并提交——
+   `LLM_PROVIDER=<CI 通道> LLM_API_KEY=<key> python -m evals.run_llm_eval
+   --suite <该 job 的套件> --judge llm --report-json evals/reports/<基线名>.json`，
+   确认 0 执行错误 / 0 judge 降级后提交；基线 JSON 自带
+   `run_provenance`，无需再文档考古。
+3. **门禁阈值何时动**：默认**不动**——写入门禁 floors（0.90/0.85 级别）是能力
+   底线，换同量级模型通常仍贴近满分，门禁照常工作。只有 CI 连续误红（新模型
+   压线）时，按新基线重推 floors 并去掉 YAML 里的 provisional 标注。
+4. **judge 模型单独换**：等于换了测量仪器——语义指标（groundedness /
+   faithfulness 等）跨 judge 不可比，语义基线需要重跑；确定性门禁不受影响。
+5. **embedding 模型换**：另一个量级——全库重嵌入 + 检索基线全部作废重测，
+   本 runbook 不覆盖。
 
 ### 为什么门禁不用 LLM judge
 

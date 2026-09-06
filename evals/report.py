@@ -31,8 +31,11 @@ def _delta(a: float, b: float) -> str:
 
 def to_json(results: Sequence[EvalResult]) -> str:
     """Serialize a list of EvalResults to a pretty JSON string."""
+    from evals.core import run_provenance
+
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "run_provenance": run_provenance(),
         "results": [result_to_dict(r) for r in results],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -155,7 +158,10 @@ def _per_query_detail(results: Sequence[EvalResult]) -> str:
 
 def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for one or more EvalResults."""
+    from evals.core import run_provenance
+
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    prov = run_provenance()
     total_errors = sum(len(r.errors) for r in results)
     # compare_eval runs every config over the same labeled set, so every result
     # shares n_queries. Take the first; fall back to 0 for an empty result list.
@@ -177,6 +183,7 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
         "# EMA Retrieval Evaluation Report",
         "",
         f"- Generated: {now}",
+        f"- Embedding channel: {prov['embedding_provider']} / {prov['embedding_model']}",
         f"- Queries: {total_queries}",
         f"- Configs: {len(results)}",
         f"- Errors: {total_errors}",

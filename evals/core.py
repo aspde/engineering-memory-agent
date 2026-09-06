@@ -139,6 +139,33 @@ def zero_judge_keys(row: dict[str, Any]) -> None:
     row.update({k: 0.0 for k in ANSWER_JUDGE_METRIC_KEYS})
 
 
+def run_provenance() -> dict[str, str]:
+    """Which channel measured this run — so reports carry their own origin.
+
+    Baselines are only comparable within the same LLM channel; the write
+    baseline's provenance was undocumented and the repo grew three
+    conflicting accounts of it (DeepSeek / ox-alpha-free / nothing).  Every
+    report now records provider + model + judge at generation time.  The
+    judge channel falls back to the primary when ``LLM_JUDGE_*`` is unset —
+    marked ``primary-fallback`` so a reader can see the run self-judged.
+    """
+    from backend.shared.config import config
+
+    judge = (
+        f"{config.llm.judge_provider}:{config.llm.judge_model}"
+        if config.llm.judge_provider
+        else f"{config.llm.provider}:{config.llm.model} (primary-fallback)"
+    )
+    return {
+        "provider": config.llm.provider,
+        "base_url": config.llm.base_url,
+        "model": config.llm.model,
+        "judge": judge,
+        "embedding_provider": config.embedding.provider,
+        "embedding_model": config.embedding.model,
+    }
+
+
 # ── JSON serialization (judge-based reports) ─────────────────────────
 # The LLM behaviour and task reports serialize identically; the retrieval
 # report keeps its own layout because its result carries config/by_difficulty.
@@ -165,6 +192,7 @@ def to_json(results: Sequence[EvalResult]) -> str:
     """Serialize a list of results to the judge-based report JSON string."""
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "run_provenance": run_provenance(),
         "results": [result_to_json_dict(r) for r in results],
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)

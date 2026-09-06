@@ -106,15 +106,20 @@ def _per_task_detail(result: EvalResult) -> str:
 
 def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for the task suite."""
+    from evals.core import run_provenance
+
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_errors = sum(len(r.errors) for r in results)
     total_judge_errors = sum(len(r.judge_errors) for r in results)
     total_items = sum(r.n_items for r in results)
+    prov = run_provenance()
 
     sections: list[str] = [
         "# EMA Task-Level E2E Evaluation Report",
         "",
         f"- Generated: {now}",
+        f"- LLM channel: {prov['provider']} / {prov['model']}",
+        f"- Judge: {prov['judge']}",
         f"- Suites: {len(results)}",
         f"- Tasks: {total_items}",
         f"- Execution errors: {total_errors}",

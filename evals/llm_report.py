@@ -148,15 +148,20 @@ def _per_query_detail(result: EvalResult) -> str:
 
 def to_markdown(results: Sequence[EvalResult]) -> str:
     """Render a full Markdown report for one or more suites."""
+    from evals.core import run_provenance
+
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     total_errors = sum(len(r.errors) for r in results)
     total_judge_errors = sum(len(r.judge_errors) for r in results)
     total_items = sum(r.n_items for r in results)
+    prov = run_provenance()
 
     sections: list[str] = [
         "# EMA LLM Behavior Evaluation Report",
         "",
         f"- Generated: {now}",
+        f"- LLM channel: {prov['provider']} / {prov['model']}",
+        f"- Judge: {prov['judge']}",
         f"- Suites: {len(results)}",
         f"- Items: {total_items}",
         f"- Execution errors: {total_errors}",

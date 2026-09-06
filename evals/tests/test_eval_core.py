@@ -21,6 +21,7 @@ from evals.core import (
     fmt,
     overall_table,
     result_to_json_dict,
+    run_provenance,
     to_json,
     zero_judge_keys,
 )
@@ -111,6 +112,41 @@ class TestJsonLayout:
         payload = json.loads(to_json([_result()]))
         assert "generated_at" in payload
         assert payload["results"][0]["overall"]["fact_coverage"] == 1.0
+
+
+class TestRunProvenance:
+    """Reports record which LLM channel measured them (baseline-comparability)."""
+
+    def test_provenance_reflects_config(self) -> None:
+        from backend.shared.config import config
+
+        prov = run_provenance()
+        assert prov["provider"] == config.llm.provider
+        assert prov["model"] == config.llm.model
+        assert prov["embedding_model"] == config.embedding.model
+
+    def test_provenance_judge_primary_fallback(self, monkeypatch) -> None:
+        """LLM_JUDGE_* unset → judge marked as the primary channel fallback
+        (the run self-judged — a reader must be able to see that)."""
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config.llm, "judge_provider", "")
+        monkeypatch.setattr(config.llm, "judge_model", "")
+        prov = run_provenance()
+        assert prov["judge"] == f"{config.llm.provider}:{config.llm.model} (primary-fallback)"
+
+    def test_provenance_judge_dedicated(self, monkeypatch) -> None:
+        from backend.shared.config import config
+
+        monkeypatch.setattr(config.llm, "judge_provider", "openai")
+        monkeypatch.setattr(config.llm, "judge_model", "mimo-v2.5-free")
+        prov = run_provenance()
+        assert prov["judge"] == "openai:mimo-v2.5-free"
+
+    def test_to_json_carries_provenance(self) -> None:
+        payload = json.loads(to_json([_result()]))
+        assert payload["run_provenance"]["provider"]
+        assert payload["run_provenance"]["model"]
 
 
 class TestMarkdownHelpers:

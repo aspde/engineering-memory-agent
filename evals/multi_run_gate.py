@@ -254,6 +254,11 @@ def build_aggregate_report(
     return {
         "generated_at": datetime.now(UTC).isoformat(),
         "tool": "evals.multi_run_gate",
+        # Source reports already carry run_provenance; surface the primary
+        # channel here so the gate artifact identifies what it measured.
+        "run_provenance": (
+            reports[0].get("run_provenance") if reports else None
+        ),
         "n_runs": len(reports),
         "judge_mode": judge_mode,
         "tolerance": tolerance,
