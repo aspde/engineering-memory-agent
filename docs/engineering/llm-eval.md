@@ -311,15 +311,38 @@ evals/
    `run_provenance`，无需再文档考古。**基线匿名不可提交**——
    `evals/tests/test_baseline_provenance.py` 会拦下没有 model/judge 字段的
    基线（write 基线曾匿名入库、事后考古回填的事故不再重演）。
+   **计划内换模型推荐时序**：先在新通道本地跑基线 + 重推 floors 并提交
+   （步骤 3），然后才改 `LLM_MODEL` secret——新模型第一次 CI run 直接绿，
+   不经历"通道错配红一次再修"。临时起意的切换才走"红一次 → 按指引修"
+   （成本同为跑一轮基线，只是时序在后）。
 3. **门禁阈值何时动**：默认**不动**——floors（`evals/floors.json`，提交进仓库，
    自带 `calibrated_channel`）是能力底线。换模型后**第一次 CI run 会因通道
    不匹配被 gate 拒绝**（`multi_run_gate` 比对报告 provenance 与 floors 的
    `calibrated_channel`，不一致即 exit 2 并给出重校准指引）——这是设计行为，
-   不是质量回归。重校准流程：新通道跑全量基线（步骤 2）→
+   不是质量回归。重校准流程：新通道跑基线（见下）→
    `python -m evals.multi_run_gate --derive-floors --reports <3 份新报告>` →
    人工确认数字 → 更新 `floors.json`（thresholds + calibrated_channel +
    calibrated_from）→ 一次提交。工具只建议，人拍板——能自己给自己降阈值的
    门禁不是门禁。
+   **重校准不必全量——按通道敏感度分层**（2026-09-06 omen-alpha 首次
+   重校准的实证结论）：真正随模型漂移、余量薄的是 **extraction（entity_f1 /
+   relation_f1）+ answer（fact_coverage）**，重校准只需三套件 ×3 轮
+   （约 15 分钟 + 约半价）：
+
+   ```bash
+   # 最小重校准：只重测通道敏感套件
+   python -m evals.multi_run_gate --n-runs 3 --judge deterministic \
+     --suite tool_selection,extraction,answer --derive-floors
+   ```
+
+   其余指标**跳过重测的前提**是它们是能力底线语义且近两轮实测稳定：
+   写入三套件（conflict_f1 / merge_coverage / worthy_f1——omen-alpha 两轮
+   CI 实测全满分）、groundedness / citation_rate（两通道均 1.000）、
+   tool_accuracy（omen-alpha 0.933 远高于 floor 0.68）。若新模型在这些
+   指标上掉下来（写入数字不再满分、groundedness < 1.0），底线前提失效，
+   补跑对应套件再定 floors。**每次换模型都要跑基线是合理的**——floors 和
+   基线只对同通道数字有意义（写入基线匿名事故的教训）；重的从来不是
+   "每次"，是"全量"，分层之后全量只在通道首次定型时发生一次。
 4. **judge 模型单独换**：等于换了测量仪器——语义指标（groundedness /
    faithfulness 等）跨 judge 不可比，语义基线需要重跑；确定性门禁不受影响。
 5. **embedding 模型换**：另一个量级——全库重嵌入 + 检索基线全部作废重测，
