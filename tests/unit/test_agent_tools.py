@@ -484,6 +484,14 @@ class TestRetrievalToolDescriptionBoundaries:
         assert "use this first" in desc
         assert "do not chain other search tools after it" in desc
 
+    def test_search_memories_covers_self_operation_questions(self) -> None:
+        """The task-005/008 gap: questions about operating EMA itself
+        (ingesting a repo, workflow how-tos) must steer to the memory
+        search even when the model could answer from general knowledge."""
+        desc = self._flat(search_memories_tool)
+        assert "questions about how to operate ema itself" in desc
+        assert "check the knowledge base for recorded usage first" in desc
+
     def test_query_rewrite_narrowed_to_vague_first_search(self) -> None:
         desc = self._flat(query_rewrite_and_search_tool)
         # The old broad self-invitation is gone...

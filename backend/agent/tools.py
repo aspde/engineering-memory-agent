@@ -50,6 +50,11 @@ async def search_memories_tool(
     Use this FIRST for project history, technical decisions,
     architecture, incidents, past discussions, or anything the team
     might have recorded — regardless of which source it came from.
+    This includes questions about how to operate EMA itself (ingesting
+    a repo, importing documents, workflow how-tos): check the knowledge
+    base for recorded usage first, even if you could answer from your
+    own general knowledge — the recorded answer reflects how this team
+    actually uses EMA.
     When its results already answer the question, stop: do not chain
     other search tools after it.
 

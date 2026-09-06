@@ -127,6 +127,15 @@ class TestAgentSystemToolDiscipline:
             " ".join(text.split())
         )
 
+    def test_self_operation_questions_search_memories_first(self) -> None:
+        """v7 closes the task-005/008 gap: questions about operating EMA
+        itself are team knowledge and go through the memory search first
+        (task_eval_post_discipline: zero-call direct answers)."""
+        flat = " ".join(get_prompt("agent.system")[1].split())
+        assert "how to operate this system" in flat
+        assert "search the long-term memories first" in flat
+        assert "even if you could answer from your own general knowledge" in flat
+
     def test_prose_still_never_names_tools(self) -> None:
         _, text = get_prompt("agent.system")
         assert "search_memories_tool" not in text
