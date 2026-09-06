@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
-from backend.runner.scenarios import invoke_scenario_agent
+import logging
+
+from backend.runner.scenarios import execute_scenario, invoke_scenario_agent
 from backend.service.prompts import get_prompt
 
 # Prompt text lives in the central registry; re-exported for compatibility.
 TECH_DEBT_SYSTEM_PROMPT = get_prompt("scenario.tech_debt")[1]
+
+logger = logging.getLogger(__name__)
 
 
 async def compose_tech_debt_report() -> str:
@@ -27,3 +31,28 @@ async def compose_tech_debt_report() -> str:
     )
 
     return await invoke_scenario_agent(TECH_DEBT_SYSTEM_PROMPT, user_message)
+
+
+async def run_tech_debt_scan() -> None:
+    """Run the weekly tech-debt scan through the shared executor.
+
+    The scheduler entry point (backend.main wires its weekly slot here).
+    Same execution path as the manual route and the event trigger:
+    concurrency slot, SCENARIO_TIMEOUT_SECONDS deadline, ``scenario_runs``
+    persistence, JSON contract parsing, typed error recording.  Calling
+    ``compose_tech_debt_report()`` directly would skip all of those — the
+    cron path is the only unattended tech-debt surface, so an unrecorded
+    weekly report is invisible.  Failures are logged, never raised: the
+    scheduler treats a raising callback as a crash, and a failed scan is
+    already terminal-state on its run row.
+    """
+    try:
+        outcome = await execute_scenario("tech_debt", trigger="weekly_patrol")
+        logger.info(
+            "Tech debt scan %s (run %s, contract_ok=%s)",
+            outcome["status"],
+            outcome["run_id"],
+            outcome["contract_ok"],
+        )
+    except Exception:
+        logger.exception("Tech debt scan failed")
