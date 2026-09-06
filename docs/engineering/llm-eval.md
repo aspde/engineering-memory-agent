@@ -246,9 +246,13 @@ evals/
   - `llm-eval` job：每周定时 + 手动触发，需要 `LLM_API_KEY` secret，跑
     `--suite tool_selection,extraction,answer,write_conflict,write_merge,auto_gate`
     （六个无 DB 套件）经 `multi_run_gate` 三次取均值、按 95% CI 下界判门禁，
-    并上传报告。写入链路三套件（2026-08-24 加入）的门禁已于 2026-09-06 按首次
-    真实 CI 运行校准确认（run 34024657208，openai/omen-alpha 通道，三条门禁
-    全部通过、floors 维持 0.90/0.90/0.85）。CI 通道由 secrets 决定
+    并上传报告。门禁阈值统一从 `evals/floors.json` 读取（提交进仓库、自带
+    `calibrated_channel`）；报告 provenance 通道与校准通道不一致时 gate 直接
+    拒绝（exit 2 + 重校准指引），防止跨通道阈值产生误判（2026-09-06 引入，
+    起因是 DeepSeek 时代 floors 静默套在 omen-alpha 上导致一红一绿说不清）。
+    写入链路三套件（2026-08-24 加入）的门禁已于 2026-09-06 按首次真实 CI
+    运行校准确认（run 34024657208，openai/omen-alpha 通道，三条门禁全部
+    通过、floors 维持 0.90/0.90/0.85）。CI 通道由 secrets 决定
     （`LLM_MODEL` 已透传）——换通道时按「换模型 Runbook」走。
   - `e2e-eval` job：同样每周定时 + 手动触发，带 postgres service + BGE-M3 模型，
     `e2e_seed --clear` 后跑 `--suite e2e`。
@@ -307,9 +311,15 @@ evals/
    `run_provenance`，无需再文档考古。**基线匿名不可提交**——
    `evals/tests/test_baseline_provenance.py` 会拦下没有 model/judge 字段的
    基线（write 基线曾匿名入库、事后考古回填的事故不再重演）。
-3. **门禁阈值何时动**：默认**不动**——写入门禁 floors（0.90/0.85 级别）是能力
-   底线，换同量级模型通常仍贴近满分，门禁照常工作。只有 CI 连续误红（新模型
-   压线）时，按新基线重推 floors 并去掉 YAML 里的 provisional 标注。
+3. **门禁阈值何时动**：默认**不动**——floors（`evals/floors.json`，提交进仓库，
+   自带 `calibrated_channel`）是能力底线。换模型后**第一次 CI run 会因通道
+   不匹配被 gate 拒绝**（`multi_run_gate` 比对报告 provenance 与 floors 的
+   `calibrated_channel`，不一致即 exit 2 并给出重校准指引）——这是设计行为，
+   不是质量回归。重校准流程：新通道跑全量基线（步骤 2）→
+   `python -m evals.multi_run_gate --derive-floors --reports <3 份新报告>` →
+   人工确认数字 → 更新 `floors.json`（thresholds + calibrated_channel +
+   calibrated_from）→ 一次提交。工具只建议，人拍板——能自己给自己降阈值的
+   门禁不是门禁。
 4. **judge 模型单独换**：等于换了测量仪器——语义指标（groundedness /
    faithfulness 等）跨 judge 不可比，语义基线需要重跑；确定性门禁不受影响。
 5. **embedding 模型换**：另一个量级——全库重嵌入 + 检索基线全部作废重测，

@@ -1,0 +1,32 @@
+{
+  "comment": "LLM-eval gate floors, per metric, with the channel they were calibrated on. multi_run_gate reads this file by default and FAILS when the run's provenance channel differs from calibrated_channel — floors calibrated on channel A are meaningless on channel B (the 2026-09-06 llm-eval red run: DeepSeek-calibrated floors applied to omen-alpha). Recalibrate per the model-swap runbook (docs/engineering/llm-eval.md) steps 2+3: rerun the full suites on the new gate channel, then python -m evals.multi_run_gate --derive-floors --reports ..., confirm, and update this file.",
+  "calibrated_channel": {
+    "provider": "openai",
+    "model": "omen-alpha",
+    "calibrated_from": "CI run 34024657208 (2026-09-06, 3 runs, 0 exec errors) + run 34027523857; write-path floors first validated on run 34024657208"
+  },
+  "thresholds": {
+    "tool_accuracy": 0.68,
+    "expected_recall": 0.90,
+    "entity_f1": 0.68,
+    "relation_f1": 0.28,
+    "fact_coverage": 0.90,
+    "groundedness": 0.95,
+    "citation_rate": 0.95,
+    "conflict_f1": 0.90,
+    "merge_fact_coverage": 0.90,
+    "worthy_f1": 0.85
+  },
+  "notes": {
+    "tool_accuracy": "DeepSeek-era floor kept — omen-alpha measures 0.933 stable, 2x headroom",
+    "expected_recall": "tool_selection recall; DeepSeek-era floor kept (omen-alpha 0.933 stable)",
+    "entity_f1": "omen-alpha measures 0.65-0.75 with one low outlier run — margin is thin; recalibrate from --derive-floors when the channel settles",
+    "relation_f1": "high-variance metric (omen-alpha 0.26-0.39); floor kept from DeepSeek era — first consistent-green run will inform a bump",
+    "fact_coverage": "answer coverage; omen-alpha 0.83-1.00 — thin margin, same as entity_f1",
+    "groundedness": "both channels measure 1.000 — capability floor",
+    "citation_rate": "both channels measure 1.000 — capability floor",
+    "conflict_f1": "validated 2026-09-06 CI: [1.000, 0.952, 0.952] ci95_lo 0.900 — thin margin (1 FN per run in 2/3 runs)",
+    "merge_fact_coverage": "omen-alpha measures 1.000 across all runs",
+    "worthy_f1": "omen-alpha measures 0.923 stable"
+  }
+}

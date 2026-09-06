@@ -206,34 +206,23 @@ jobs:
           # Thresholds are the same numbers the old single-run gate used; each
           # metric fails when ci95_lower < threshold - 0.03.
           #
-          # Write-path suites (write_conflict / write_merge / auto_gate) gate
-          # on the 0.90/0.85 capability floors — kept from the 2026-08-24
-          # write baseline (ox-alpha-free) and FIRST-RUN VALIDATED 2026-09-06
-          # (run 34024657208, openai/omen-alpha channel, 3 runs, 0 exec
-          # errors): conflict_f1 3-run [1.000, 0.952, 0.952] ci95_lo 0.900 /
-          # merge_fact_coverage 1.000 / worthy_f1 0.923.  All gates pass;
-          # floors unchanged (runbook: floors are capability floors, only
-          # recalibrated on sustained CI reds).  conflict_f1 headroom is
-          # thin (1 false negative per run in 2/3 runs) — a real regression
-          # to ≤0.87 ci95_lo still trips it.  The committed write baseline
-          # remains ox-alpha-free until the gate channel is settled; the
-          # model-swap runbook step 2 covers the migration.
+          # Thresholds live in evals/floors.json (committed, with the channel
+          # they were calibrated on).  The gate READS the file and FAILS when
+          # the runs' provenance channel differs from the file's
+          # calibrated_channel — floors from another channel are not a
+          # quality verdict (the 2026-09-06 lesson: DeepSeek-era floors
+          # silently applied to omen-alpha produced one red one green with
+          # nobody able to say why).  Recalibration: model-swap runbook
+          # steps 2+3 — rerun full suites on the new channel, then
+          # multi_run_gate --derive-floors, confirm, update floors.json.
+          # --min-* flags still override the file for ad-hoc experiments.
           # merge runs --judge deterministic: the LLM-judge channel depends
           # on a rate-limited free judge model and must not gate CI (see the
           # job comment above).
           python -m evals.multi_run_gate --n-runs 3 \
             --judge deterministic \
             --suite tool_selection,extraction,answer,write_conflict,write_merge,auto_gate \
-            --report-dir llm-eval-reports \
-            --min-tool-accuracy 0.68 \
-            --min-entity-f1 0.68 \
-            --min-relation-f1 0.28 \
-            --min-fact-coverage 0.90 \
-            --min-groundedness 0.95 \
-            --min-citation-rate 0.95 \
-            --min-conflict-f1 0.90 \
-            --min-merge-coverage 0.90 \
-            --min-gate-f1 0.85
+            --report-dir llm-eval-reports
 
       - name: Upload LLM eval report
         if: ${{ !cancelled() }}

@@ -404,3 +404,82 @@ class TestWritePathGateFlags:
 
         for suite in ("write_conflict", "write_merge", "auto_gate"):
             assert suite in DEFAULT_SUITE
+
+
+class TestChannelMatch:
+    """The floors file's calibrated channel must match the runs' channel."""
+
+    def _report_with_prov(self, provider: str, model: str) -> dict:
+        return {
+            "results": [{"suite": "answer", "judge": "deterministic",
+                         "overall": {"fact_coverage": 0.95}}],
+            "run_provenance": {"provider": provider, "model": model,
+                               "judge": f"{provider}:{model}"},
+        }
+
+    def test_matching_channel_passes(self) -> None:
+        from evals.multi_run_gate import check_channel_match
+
+        floors = {"calibrated_channel": {"provider": "openai", "model": "omen-alpha"}}
+        reports = [self._report_with_prov("openai", "omen-alpha") for _ in range(3)]
+        assert check_channel_match(floors, reports) is None
+
+    def test_mismatched_channel_described(self) -> None:
+        from evals.multi_run_gate import check_channel_match
+
+        floors = {"calibrated_channel": {"provider": "openai", "model": "omen-alpha"}}
+        reports = [self._report_with_prov("openai", "deepseek-v4-pro")]
+        desc = check_channel_match(floors, reports)
+        assert desc is not None
+        assert "deepseek-v4-pro" in desc
+        assert "runbook" in desc  # points at the recalibration path
+
+    def test_legacy_reports_without_provenance_skip_check(self) -> None:
+        """Older eval CLI produced no provenance — the check must not fail
+        on a report that simply cannot answer (stamp is 2026-09-06+)."""
+        from evals.multi_run_gate import check_channel_match
+
+        floors = {"calibrated_channel": {"provider": "openai", "model": "omen-alpha"}}
+        legacy = {"results": [{"suite": "answer", "judge": "deterministic",
+                               "overall": {"fact_coverage": 0.95}}]}
+        assert check_channel_match(floors, [legacy]) is None
+
+    def test_floors_without_channel_skip_check(self) -> None:
+        from evals.multi_run_gate import check_channel_match
+
+        assert check_channel_match({}, [self._report_with_prov("x", "y")]) is None
+
+    def test_report_channel_extracts_provider_model(self) -> None:
+        from evals.multi_run_gate import report_channel
+
+        assert report_channel(self._report_with_prov("openai", "m1")) == ("openai", "m1")
+        assert report_channel({"results": []}) is None
+        assert report_channel({"run_provenance": {"provider": "p"}}) is None
+
+
+class TestDeriveFloors:
+    """--derive-floors: floor = ci95_lower - 0.05, rounded DOWN to 2dp."""
+
+    def test_derive_from_varying_metric(self) -> None:
+        from evals.multi_run_gate import derive_floors
+
+        reports = [_report([_suite("extraction", {"entity_f1": v})]) for v in (0.9, 0.9, 0.9)]
+        # stdev 0 → ci95_lower = 0.9 → floor 0.85
+        out = derive_floors(reports)
+        assert out["extraction"]["entity_f1"] == 0.85
+
+    def test_derive_clamps_at_zero(self) -> None:
+        from evals.multi_run_gate import derive_floors
+
+        reports = [_report([_suite("x", {"m": 0.01})])]
+        out = derive_floors(reports)
+        assert out["x"]["m"] == 0.0
+
+    def test_derive_varied_values_use_ci(self) -> None:
+        from evals.multi_run_gate import derive_floors
+
+        reports = [_report([_suite("extraction", {"entity_f1": v})]) for v in (1.0, 0.9, 0.9)]
+        aggs = aggregate(reports)
+        expected_floor = math.floor((aggs["extraction"]["entity_f1"].ci95_lower - 0.05) * 100) / 100
+        out = derive_floors(reports)
+        assert out["extraction"]["entity_f1"] == expected_floor

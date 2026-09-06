@@ -86,6 +86,11 @@ T_FLOOR: float = 2.228
 DEFAULT_TOLERANCE = 0.03
 DEFAULT_SUITE = "tool_selection,extraction,answer,write_conflict,write_merge,auto_gate"
 
+# Floors file — committed gate thresholds with the channel they were
+# calibrated on.  Default for --floors-file; --no-floors-file opts out
+# (local experiments against numbers passed via --min-*).
+FLOORS_FILE = Path(__file__).resolve().parent / "floors.json"
+
 # The --min-* metrics multi_run_gate can gate on (mirrors run_llm_eval).
 _MIN_FLAGS: tuple[tuple[str, str], ...] = (
     ("--min-tool-accuracy", "tool_accuracy"),
@@ -170,6 +175,93 @@ def load_report(path: str | Path) -> dict:
     """Read one report JSON from disk."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def report_channel(report: dict) -> tuple[str, str] | None:
+    """The (provider, model) channel a run was measured on, or None.
+
+    Reads the top-level ``run_provenance`` block (stamped by evals.core at
+    generation time, 2026-09-06+).  Reports older than the stamping have no
+    provenance — treated as unknown channel.
+    """
+    prov = report.get("run_provenance")
+    if not isinstance(prov, dict):
+        return None
+    provider = str(prov.get("provider", "") or "")
+    model = str(prov.get("model", "") or "")
+    if not provider or not model:
+        return None
+    return provider, model
+
+
+def check_channel_match(
+    floors: dict[str, Any], reports: Sequence[dict]
+) -> str | None:
+    """Fail the gate when the run channel differs from the floors' channel.
+
+    Thresholds calibrated on channel A are meaningless on channel B — the
+    2026-09-06 red run (34027523857) was exactly this: DeepSeek-era floors
+    applied to omen-alpha, failing on metrics the new model measures
+    fine-but-different.  The mismatch must be LOUD (gate refusal with the
+    recalibration path), not a silent wrong-verdict.  Returns a mismatch
+    description, or None when the channels agree (or the floors carry no
+    channel — legacy file).
+
+    Only the run reports are consulted; when NO run carries provenance the
+    check is skipped (older eval CLI without stamping must keep working).
+    """
+    calibrated = floors.get("calibrated_channel") or {}
+    cal_provider = str(calibrated.get("provider", "") or "")
+    cal_model = str(calibrated.get("model", "") or "")
+    if not cal_provider or not cal_model:
+        return None
+
+    run_channels = {report_channel(r) for r in reports}
+    run_channels.discard(None)
+    if not run_channels:
+        return None  # nothing to compare against — legacy reports
+
+    mismatches = sorted(
+        (p, m) for p, m in run_channels if (p, m) != (cal_provider, cal_model)
+    )
+    if not mismatches:
+        return None
+    listed = ", ".join(f"{p}/{m}" for p, m in mismatches)
+    return (
+        f"floors calibrated on {cal_provider}/{cal_model} but runs measured on "
+        f"{listed} — thresholds from another channel are not a quality verdict. "
+        "Recalibrate per the model-swap runbook (docs/engineering/llm-eval.md "
+        "steps 2+3): rerun the full suites on this channel, then "
+        "python -m evals.multi_run_gate --derive-floors --reports <3 fresh "
+        "report JSONs>, confirm, and update evals/floors.json."
+    )
+
+
+def derive_floors(
+    reports: Sequence[dict],
+    *,
+    headroom: float = 0.05,
+) -> dict[str, dict[str, float]]:
+    """Suggest floors from the aggregated N-run results.
+
+    Rule: floor = ci95_lower - headroom, clamped at 0 and rounded DOWN to 2
+    decimals — the floor sits below the measured CI lower bound, so a healthy
+    channel passes with margin while a real regression still trips the gate
+    (the same convention the 2026-08-09 DeepSeek calibration used: floors
+    ~0.05-0.10 below measured values).  Constant metrics (stdev 0, e.g.
+    merge_fact_coverage=1.000) have their CI lower bound equal to the value
+    itself, so the rule degenerates gracefully.
+
+    Returns ``{suite: {metric: suggested_floor}}``.  Confirmation is the
+    human's job — the tool prints, the human edits floors.json.
+    """
+    aggregates = aggregate(list(reports))
+    suggested: dict[str, dict[str, float]] = {}
+    for suite, metrics in aggregates.items():
+        for metric, agg in metrics.items():
+            floor = max(0.0, math.floor((agg.ci95_lower - headroom) * 100) / 100)
+            suggested.setdefault(suite, {})[metric] = floor
+    return suggested
 
 
 def _aggregate_values(values: Sequence[float]) -> MetricAggregate:
@@ -438,6 +530,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "JSON (both modes) into this directory; CI uploads it as the report "
         "artifact.",
     )
+    p.add_argument(
+        "--floors-file",
+        dest="floors_file",
+        default=str(FLOORS_FILE),
+        help="Gate-thresholds JSON (thresholds + calibrated_channel).  Default: "
+        "evals/floors.json.  The gate refuses to run when the reports' "
+        "provenance channel differs from the file's calibrated_channel — "
+        "thresholds from another channel are not a quality verdict.",
+    )
+    p.add_argument(
+        "--no-floors-file",
+        dest="floors_file",
+        action="store_const",
+        const=None,
+        help="Skip the floors file entirely — thresholds come only from "
+        "--min-* flags (local experiments against ad-hoc numbers).",
+    )
+    p.add_argument(
+        "--derive-floors",
+        action="store_true",
+        help="Don't gate: aggregate --reports and PRINT suggested floors "
+        "(ci95_lower - 0.05, the DeepSeek-calibration convention).  Human "
+        "confirms and updates evals/floors.json.",
+    )
     for flag, metric in _MIN_FLAGS:
         p.add_argument(
             flag,
@@ -468,6 +584,10 @@ def main() -> int:
         parser.error("specify exactly one of --reports or --n-runs")
     if args.n_runs is not None and args.n_runs < 1:
         parser.error("--n-runs must be >= 1")
+    if args.derive_floors and args.reports is None:
+        parser.error("--derive-floors aggregates existing reports — pass --reports")
+    if args.derive_floors and args.n_runs is not None:
+        parser.error("--derive-floors does not run the eval — pass --reports")
 
     thresholds = _build_thresholds(args)
 
@@ -485,6 +605,42 @@ def main() -> int:
         runs = _run_eval_runs(args, report_dir)
         reports = [r for _, r in runs]
         sources = [p for p, _ in runs]
+
+    # ── --derive-floors: print suggested floors and exit ────────────
+    if args.derive_floors:
+        suggested = derive_floors(reports)
+        print("Suggested floors (ci95_lower - 0.05, rounded down):")
+        for suite in sorted(suggested):
+            for metric in sorted(suggested[suite]):
+                print(f"  {suite}/{metric}: {suggested[suite][metric]:.2f}")
+        channels = sorted({c for c in (report_channel(r) for r in reports) if c})
+        channel_str = ", ".join(f"{p}/{m}" for p, m in channels) or "unknown (no provenance)"
+        print(f"\nMeasured on channel(s): {channel_str}")
+        print(
+            "Confirm these numbers, then update evals/floors.json "
+            "(calibrated_channel + thresholds).  Human judgement is part of "
+            "the flow — the tool suggests, you decide."
+        )
+        return 0
+
+    # ── Floors file: defaults + channel check ────────────────────────
+    floors: dict[str, Any] = {}
+    if args.floors_file is not None:
+        with open(args.floors_file, encoding="utf-8") as f:
+            floors = json.load(f)
+        file_thresholds = floors.get("thresholds") or {}
+        # --min-* flags override the file (the flags are the explicit-override
+        # mechanism; CI passes no flags and gets the file's numbers).
+        for metric, value in file_thresholds.items():
+            key = f"min_{metric}"
+            if getattr(args, key, None) is None:
+                setattr(args, key, float(value))
+        thresholds = _build_thresholds(args)
+
+        mismatch = check_channel_match(floors, reports)
+        if mismatch:
+            print(f"✗ channel mismatch: {mismatch}", file=sys.stderr)
+            return 2
 
     modes = [report_judge_mode(r) for r in reports]
     _warn_mixed_judge_modes(modes)
