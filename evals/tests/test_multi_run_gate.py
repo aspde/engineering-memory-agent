@@ -355,3 +355,52 @@ class TestAggregateReport:
         )
 
         assert payload["judge_mode"] == "mixed"
+
+
+class TestWritePathGateFlags:
+    """The write-path suites (2026-08-24) join the CI gate — their --min-*
+    flags must be accepted and their metrics gated like any other."""
+
+    def test_parser_accepts_write_path_flags(self) -> None:
+        from evals.multi_run_gate import _build_parser, _build_thresholds
+
+        args = _build_parser().parse_args(
+            ["--n-runs", "1",
+             "--min-conflict-f1", "0.90",
+             "--min-merge-coverage", "0.90",
+             "--min-gate-f1", "0.85"]
+        )
+        thresholds = _build_thresholds(args)
+        assert thresholds == {
+            "conflict_f1": 0.90,
+            "merge_fact_coverage": 0.90,
+            "worthy_f1": 0.85,
+        }
+
+    def test_write_path_metrics_gate_like_any_other(self) -> None:
+        aggs = {
+            "write_conflict": {"conflict_f1": _Agg.one(mean=1.0, ci95_lower=1.0, n=3)},
+            "auto_gate": {"worthy_f1": _Agg.one(mean=0.923, ci95_lower=0.90, n=3)},
+            "write_merge": {"merge_fact_coverage": _Agg.one(
+                mean=1.0, ci95_lower=1.0, n=3)},
+        }
+        failures = gate(
+            aggs,
+            {"conflict_f1": 0.90, "worthy_f1": 0.85, "merge_fact_coverage": 0.90},
+            0.03,
+        )
+        assert failures == []  # 1.0 > 0.93, 0.90 > 0.82, 1.0 > 0.87
+
+    def test_gate_f1_below_floor_fails(self) -> None:
+        aggs = {"auto_gate": {"worthy_f1": _Agg.one(
+            mean=0.80, ci95_lower=0.79, n=3)}}
+        failures = gate(aggs, {"worthy_f1": 0.85}, 0.03)
+        assert len(failures) == 1
+        assert failures[0].metric == "worthy_f1"
+        assert failures[0].suite == "auto_gate"
+
+    def test_default_suite_includes_write_path(self) -> None:
+        from evals.multi_run_gate import DEFAULT_SUITE
+
+        for suite in ("write_conflict", "write_merge", "auto_gate"):
+            assert suite in DEFAULT_SUITE

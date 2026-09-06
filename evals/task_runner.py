@@ -40,7 +40,12 @@ from evals.task_ground_truth import (
     TaskItem,
     load_task_items,
 )
-from evals.task_metrics import TASK_METRIC_KEYS, task_completion_metrics
+from evals.task_metrics import (
+    TASK_METRIC_KEYS,
+    clean_completed_mean,
+    outcome_class,
+    task_completion_metrics,
+)
 
 # query → TaskOutcome (trajectory + answer + what the model saw).
 TaskExecutor = Callable[[str], Awaitable[Any]]
@@ -60,6 +65,34 @@ def _finish(
 ) -> TaskEvalResult:
     """Roll up the task rows via the shared :func:`evals.core.finish`."""
     return finish("task", judge, rows, errors, judge_errors, keys, TASK_CATEGORIES)
+
+
+def _post_process(result: TaskEvalResult) -> TaskEvalResult:
+    """Write the masked-mean ``completed_clean`` into a finished result.
+
+    Runs after the plain aggregation: ``completed`` averages every row
+    (polluted rows already score 0.0), while ``completed_clean`` averages
+    only rows whose ``outcome_class`` is ``ok`` — polluted rows drop out of
+    the denominator.  Applied to the overall metric and every category
+    bucket; runner-level crashes (rows recorded in ``errors`` instead of
+    ``per_query``) count as polluted — no ``outcome_class`` is attached to
+    them, so they simply never enter the clean subset.
+    """
+    result.overall["completed_clean"] = clean_completed_mean(result.per_query)
+    for cat, bucket_rows in _by_category_rows(result).items():
+        result.by_category.setdefault(cat, {})["completed_clean"] = (
+            clean_completed_mean(bucket_rows)
+        )
+    return result
+
+
+def _by_category_rows(result: TaskEvalResult) -> dict[str, list[dict[str, Any]]]:
+    """Group ``per_query`` rows by the task categories (category buckets are
+    stable columns — empty categories get a masked mean of 0.0)."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in result.per_query:
+        grouped.setdefault(str(row.get("category", "")), []).append(row)
+    return grouped
 
 
 async def run_tasks(
@@ -126,6 +159,21 @@ async def run_tasks(
                 )
             )
 
+            # Environment-noise separation: classify the run's outcome so the
+            # report can aggregate ``completed_clean`` over the trustworthy
+            # subset (apology stubs / provider exceptions / wall-clock
+            # timeouts say nothing about agent behaviour).  ``completed_clean``
+            # itself is a masked mean computed in ``_finish`` — polluted rows
+            # drop out of its denominator (they already score ``completed``
+            # 0.0, so averaging them in as zeros would just re-derive
+            # ``completed``).
+            row["outcome_class"] = outcome_class(
+                outcome.answer,
+                had_error=outcome.had_error,
+                error=outcome.error,
+                within_budget=outcome.within_budget,
+            )
+
             row["answer_len"] = len(outcome.answer)
             row["answer_preview"] = outcome.answer[:120]
             # Traceability: did the answer cite a source id the agent actually
@@ -163,7 +211,7 @@ async def run_tasks(
             row.update({k: 0.0 for k in keys})
         rows.append(row)
 
-    return _finish(rows, errors, judge_errors, keys, judge_mode)
+    return _post_process(_finish(rows, errors, judge_errors, keys, judge_mode))
 
 
 # ── Default executor (lazy import keeps `--validate-only` light) ───────

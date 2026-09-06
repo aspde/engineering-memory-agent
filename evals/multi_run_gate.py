@@ -84,7 +84,7 @@ T_VALUES: dict[int, float] = {
 T_FLOOR: float = 2.228
 
 DEFAULT_TOLERANCE = 0.03
-DEFAULT_SUITE = "tool_selection,extraction,answer"
+DEFAULT_SUITE = "tool_selection,extraction,answer,write_conflict,write_merge,auto_gate"
 
 # The --min-* metrics multi_run_gate can gate on (mirrors run_llm_eval).
 _MIN_FLAGS: tuple[tuple[str, str], ...] = (
@@ -96,6 +96,9 @@ _MIN_FLAGS: tuple[tuple[str, str], ...] = (
     ("--min-groundedness", "groundedness"),
     ("--min-citation-rate", "citation_rate"),
     ("--min-context-recall", "context_recall"),
+    ("--min-conflict-f1", "conflict_f1"),
+    ("--min-merge-coverage", "merge_fact_coverage"),
+    ("--min-gate-f1", "worthy_f1"),
 )
 
 

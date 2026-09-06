@@ -21,12 +21,27 @@ citation columns mean the same thing as in the answer and e2e suites.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import Any
+
 # The two apology strings the agent's failure path streams (backend/agent/nodes.py).
 # A final answer that is exactly one of these is an error stub, not a
 # completed task — even though the graph "ended" normally.
 APOLOGY_MARKERS: tuple[str, ...] = (
     "抱歉，当前回答生成失败，请稍后重试。",
     "抱歉，生成回复时出现错误，请稍后重试。",
+)
+
+# Environment classification for one task row.  Provider outages (apology
+# stubs, provider exceptions) and wall-clock timeouts pollute the answer
+# metrics without saying anything about agent behaviour — the 2026-08-24
+# post-discipline runs lost 14/19 failure cells to them.  ``outcome_class``
+# records which rows are trustworthy behaviour evidence so the report can
+# aggregate ``completed_clean`` over the clean subset only.
+OUTCOME_CLASSES: tuple[str, ...] = (
+    "ok",              # substantive answer, no provider failure
+    "provider_error",  # apology stub / provider exception mid-run
+    "timeout",         # wall-clock timeout (AGENT_TIMEOUT) forced an abort
 )
 
 # A substantive answer is more than this many characters of non-whitespace
@@ -37,6 +52,50 @@ _MIN_ANSWER_CHARS = 8
 def is_apology_stub(answer: str) -> bool:
     """True when *answer* is one of the agent's provider-failure stubs."""
     return str(answer or "").strip() in APOLOGY_MARKERS
+
+
+def outcome_class(
+    answer: str,
+    *,
+    had_error: bool,
+    error: str = "",
+    within_budget: bool = True,
+) -> str:
+    """Classify one task run's outcome for report-level noise separation.
+
+    Precedence: a wall-clock timeout (``error == "timeout"``, set by the
+    task executor) is ``timeout`` even though the run also reports
+    ``had_error``; an apology stub or a graph/provider error is
+    ``provider_error``; everything else is ``ok``.  ``within_budget`` does
+    NOT affect the class — running out of ReAct steps is agent behaviour,
+    not environment noise.
+    """
+    if str(error or "").strip() == "timeout":
+        return "timeout"
+    if had_error or is_apology_stub(answer):
+        return "provider_error"
+    return "ok"
+
+
+def clean_completed_mean(rows: Sequence[dict[str, Any]]) -> float:
+    """Mean ``completed`` over the *clean* rows only (``outcome_class=="ok"``).
+
+    The masked-mean companion to :func:`outcome_class`: provider outages and
+    timeouts pollute answer metrics without saying anything about agent
+    behaviour, so the report carries ``completed_clean`` next to ``completed``
+    — the strict score over the environment-trustworthy subset.  The mean
+    divides by the number of clean rows (polluted rows are dropped from the
+    denominator, not averaged in as zeros — they already score ``completed``
+    0.0, so a plain mean over all rows would equal ``completed`` and carry no
+    extra signal).  Rows without an ``outcome_class`` key are treated as
+    clean (only an explicit pollution mark excludes).  No clean rows (fully
+    polluted run) → 0.0; disambiguated by the report's environment-error
+    count.
+    """
+    clean = [r for r in rows if r.get("outcome_class", "ok") == "ok"]
+    if not clean:
+        return 0.0
+    return sum(float(r.get("completed", 0.0)) for r in clean) / len(clean)
 
 
 def task_completion_metrics(
@@ -113,8 +172,12 @@ def task_completion_metrics(
 
 # Column order for the task report / aggregate.  ``n_steps`` is informational
 # (mean iterations per task), everything else is 0/1 or a fraction.
+# ``completed_clean`` is the masked mean of ``completed`` over the rows whose
+# ``outcome_class`` is ``ok`` (see ``clean_completed_mean``) — the strict
+# completion signal isolated from provider outages and wall-clock timeouts.
 TASK_METRIC_KEYS: tuple[str, ...] = (
     "completed",
+    "completed_clean",
     "tool_recall",
     "unexpected_rate",
     "within_budget",

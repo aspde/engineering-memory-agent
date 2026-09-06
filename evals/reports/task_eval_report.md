@@ -93,3 +93,24 @@ docstring 示例与 tsel-006 的自相矛盾后）、unexpected_rate 0.000，高
 run 4 里 task-002 双库、task-003 检索+写入、task-004 概念查询走记忆检索全部精确完成。
 
 **task-008 观察项升级为已知取舍**：该任务（问 EMA 自身功能）在改动后三次复测中连续零调用直接作答（改动前调 3 次 search）。已验证两个事实当前均可检索到（memory 0.675 / chunk 1.0 排第一），所以不是检索不到，而是模型判断"问我自己的功能不需要查库"。答案 groundedness 保持 1.000 无捏造（system prompt 本身描述了摄入能力，模型答得对），但严格轨迹分归零。这是停手纪律在"agent 自身功能类问题"上的副作用；若要消除，需在 prompt/docstring 强化"涉及 EMA 自身用法的问题也先搜记忆库"，属后续迭代。
+
+## 自身用法查库收口 + 环境噪声分离（2026-09-05）
+
+四轮 post-discipline 复测的逐格归因（19 个失败格子）：14 个是 provider 道歉桩/墙钟
+超时（环境噪声，与 agent 行为无关）、4 个是 task-005/008 的"EMA 自身用法不查库"
+行为缺口、1 个是 allowed-tools 口径的严格性。干净轮（run 4）的 completed 已是历史
+最高 0.625。据此两项收尾：
+
+1. **task-005/008 收口**：`agent.system` v6→v7 新增第 4 条——"操作本系统的问题
+   （摄入仓库、导入文档、workflow how-tos）也是团队知识，先搜长期记忆里记录的
+   用法"；`search_memories_tool` docstring 同向收紧（含 fallback 语义：库无记录时
+   用自身知识作答并明说）。task-005（4/4 跳过检索）与 task-008（3/4 零调用）是
+   同一缺口的两个面——两者问的都是"怎么把本地仓库导入 EMA"。改动未复测——
+   下次 `run_task_eval` 跑批时以 `completed_clean` 为准验证。
+2. **环境噪声分离**：任务报告每行带 `outcome_class`（ok / provider_error /
+   timeout），汇总表新增 `completed_clean`（只对干净行平均，污染行剔除出分母），
+   分类表下方输出环境分解，`summarize` 与 `--min-completed-clean` 门禁同步。历史
+   四轮按此口径回算：run1 **0.667**（3 个干净行）/ run2 **0.600**（5）/
+   run3 **0.750**（4）/ run4 **0.714**（7，task-001 撞墙钟剔除）——每一轮干净轮
+   完成率都高于全行均值（0.250 / 0.375 / 0.375 / 0.625），四轮波动也从 0.375 收窄
+   到 0.083。后续复测的 completed 结论以 `completed_clean` 为准。

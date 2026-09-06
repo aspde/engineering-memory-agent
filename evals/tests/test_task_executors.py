@@ -103,11 +103,13 @@ class TestAutoApproveResume:
 class TestTaskRunnerGraph:
     @pytest.mark.asyncio
     async def test_multi_step_trajectory(self, monkeypatch) -> None:
-        """search → write (gated → auto-approved) → final answer.
+        """search → write → final answer.
 
         Exercises the full production graph: ReAct loop, safe-tool
-        pass-through, approval interrupt + auto-resume, conflict node
-        pass-through, and the tool-turn final synthesis.
+        pass-through, conflict node pass-through, and the answer-reuse
+        shortcut (write_memory_tool left the chat approval set with the
+        force-write feature — the turn's last text AIMessage IS the answer,
+        no re-synthesis happens).
         """
         provider = AsyncMock()
         provider.chat_raw_stream = sequential_stream(
@@ -136,7 +138,12 @@ class TestTaskRunnerGraph:
         assert outcome.n_steps == 3
         assert outcome.within_budget is True
         assert outcome.had_error is False
-        assert outcome.answer == "向量检索后端选用了 pgvector，同时已记住该结论。"
+        # Answer-reuse: the loop's last text output is delivered as-is; the
+        # synthesis call (chat_stream) never runs on this path.
+        assert outcome.answer == "已完成搜索与写入。"
+        # Answer-reuse ran: the loop's last text output IS the answer — the
+        # synthesis call (chat_stream) never fired.
+        assert outcome.n_steps == 3
         # The search envelope's source id the model saw is available for citation.
         assert "c4a11b2e" in outcome.source_ids
         assert "Found: 选型" in outcome.context_text
@@ -176,7 +183,10 @@ class TestTaskRunnerGraph:
 
         assert outcome.had_error is False
         assert "write_memory_tool" in [c["name"] for c in outcome.tool_calls]
-        assert outcome.answer == "冲突已按保留旧记忆处理。"
+        # Answer-reuse: after the conflict resolves, the loop's last text
+        # output is the answer without a re-synthesis pass.
+        assert outcome.answer == "记忆已写入。"
+        assert outcome.n_steps == 2
 
     @pytest.mark.asyncio
     async def test_max_steps_force_terminates(self, monkeypatch) -> None:
@@ -240,7 +250,14 @@ class TestTaskRunnerGraph:
 
     @pytest.mark.asyncio
     async def test_rejected_approval_routes_back_to_llm(self, monkeypatch) -> None:
-        """A resume policy that rejects sends the LLM back to re-decide."""
+        """A resume policy that rejects sends the LLM back to re-decide.
+
+        Uses ``notify_feishu_tool`` — it is in the chat approval set (the
+        force-write feature removed ``write_memory_tool`` from it), so the
+        gate still pauses.  The rejection injects a ``[REJECTED]`` notice;
+        the answer-reuse shortcut must NOT fire on it, and the final answer
+        goes through synthesis (``chat_stream``)."""
+        from backend.agent.tools import notify_feishu_tool
         from evals.task_executors import make_task_runner as _make
 
         def _reject(payload):
@@ -251,21 +268,24 @@ class TestTaskRunnerGraph:
             tool_call_stream([
                 {
                     "id": "call_r",
-                    "name": "write_memory_tool",
-                    "args": {"content": "不该写入"},
+                    "name": "notify_feishu_tool",
+                    "args": {"message": "不该发送"},
                 },
             ]),
-            content_stream("抱歉，我不能执行这个写入。"),
+            content_stream("抱歉，我不能执行这个通知。"),
         )
-        provider.chat_stream = text_stream("已拒绝写入请求。")
+        provider.chat_stream = text_stream("已拒绝通知请求。")
         _patch_provider(monkeypatch, provider)
 
         runner = _make(
-            tools=[write_memory_tool],
+            tools=[notify_feishu_tool],
             resume=_reject,
         )
-        outcome = await runner("执行写操作")
+        outcome = await runner("发送通知")
 
-        # The write was rejected → the LLM re-decided and answered instead.
+        # The notify was rejected → the LLM re-decided and answered instead.
         assert outcome.had_error is False
-        assert outcome.answer == "已拒绝写入请求。"
+        assert outcome.answer == "已拒绝通知请求。"
+        # Synthesis ran (the [REJECTED] notice forces it): the reuse path was
+        # blocked by the notice, so chat_stream actually produced the answer.
+        assert outcome.n_steps == 2

@@ -9,7 +9,9 @@ from __future__ import annotations
 import pytest
 
 from evals.task_metrics import (
+    clean_completed_mean,
     is_apology_stub,
+    outcome_class,
     task_completion_metrics,
 )
 
@@ -130,3 +132,61 @@ class TestTaskCompletionMetrics:
         # Completed despite being wasteful — the two signals are distinct.
         assert m["completed"] == 1.0
         assert m["within_budget"] == 0.0
+
+
+class TestOutcomeClass:
+    """Environment-noise classification — the 2026-08-24 post-discipline
+    runs lost 14/19 failure cells to provider outages and wall-clock
+    timeouts; these tests pin the separation."""
+
+    def test_clean_substantive_run_is_ok(self) -> None:
+        assert outcome_class(SUBSTANTIVE, had_error=False) == "ok"
+
+    def test_apology_stub_is_provider_error(self) -> None:
+        assert outcome_class("抱歉，生成回复时出现错误，请稍后重试。", had_error=False) == (
+            "provider_error"
+        )
+
+    def test_graph_error_is_provider_error_even_with_substantive_answer(self) -> None:
+        assert outcome_class(SUBSTANTIVE, had_error=True) == "provider_error"
+
+    def test_timeout_wins_over_had_error(self) -> None:
+        assert outcome_class("", had_error=True, error="timeout") == "timeout"
+
+    def test_within_budget_does_not_affect_the_class(self) -> None:
+        # Running out of ReAct steps is agent behaviour, not environment noise.
+        assert (
+            outcome_class(SUBSTANTIVE, had_error=False, within_budget=False) == "ok"
+        )
+
+
+class TestCleanCompletedMean:
+    def test_polluted_rows_drop_out_of_denominator(self) -> None:
+        rows = [
+            {"outcome_class": "ok", "completed": 1.0},
+            {"outcome_class": "provider_error", "completed": 0.0},
+            {"outcome_class": "ok", "completed": 1.0},
+            {"outcome_class": "timeout", "completed": 0.0},
+        ]
+        assert clean_completed_mean(rows) == pytest.approx(1.0)
+
+    def test_partial_clean_mean(self) -> None:
+        rows = [
+            {"outcome_class": "ok", "completed": 1.0},
+            {"outcome_class": "ok", "completed": 0.0},
+            {"outcome_class": "provider_error", "completed": 0.0},
+        ]
+        assert clean_completed_mean(rows) == pytest.approx(0.5)
+
+    def test_no_clean_rows_yields_zero(self) -> None:
+        rows = [{"outcome_class": "provider_error", "completed": 0.0}]
+        assert clean_completed_mean(rows) == 0.0
+
+    def test_empty_rows_yield_zero(self) -> None:
+        assert clean_completed_mean([]) == 0.0
+
+    def test_row_without_outcome_class_counts_as_clean(self) -> None:
+        # A row missing the key (e.g. a crash row that never got classified)
+        # defaults to "ok" — consistent with the report's per-cell default.
+        rows = [{"completed": 1.0}]
+        assert clean_completed_mean(rows) == pytest.approx(1.0)

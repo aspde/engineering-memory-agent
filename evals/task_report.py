@@ -41,6 +41,31 @@ def _category_table(result: EvalResult) -> str:
     return category_table(result, ("n_steps", "answer_len", "ungrounded_claims"))
 
 
+def _environment_summary(result: EvalResult) -> str:
+    """Environment-noise breakdown for one result.
+
+    The 2026-08-24 post-discipline runs lost 14/19 failure cells to provider
+    outages and wall-clock timeouts that said nothing about agent behaviour.
+    This block separates the two so a future reader does not have to forens
+    each per-task cell: ``completed`` averages every row, ``completed_clean``
+    averages only rows whose outcome the environment did not disturb.
+    """
+    classes = {"ok": 0, "provider_error": 0, "timeout": 0}
+    for q in result.per_query:
+        classes[str(q.get("outcome_class", "ok"))] = (
+            classes.get(str(q.get("outcome_class", "ok")), 0) + 1
+        )
+    polluted = classes["provider_error"] + classes["timeout"]
+    if polluted == 0:
+        return "_Environment: all 8 runs clean — `completed` is directly comparable._"
+    lines = [
+        f"_Environment: {result.n_items - polluted}/{result.n_items} runs clean "
+        f"({classes['provider_error']} provider errors, {classes['timeout']} timeouts). "
+        "`completed` averages every row; `completed_clean` averages the clean subset only._"
+    ]
+    return "\n".join(lines)
+
+
 def _per_task_detail(result: EvalResult) -> str:
     lines: list[str] = [
         f"<details><summary>Per-task detail ({SUITE_TITLE})</summary>",
@@ -59,6 +84,8 @@ def _per_task_detail(result: EvalResult) -> str:
             f"completed={_fmt(q.get('completed', 0.0))}, "
             f"within_budget={_fmt(q.get('within_budget', 0.0))})"
         )
+        if q.get("outcome_class") and q.get("outcome_class") != "ok":
+            lines.append(f"- ⚠ environment: {q['outcome_class']} (excluded from completed_clean)")
         if "fact_coverage" in q:
             lines.append(
                 f"- coverage={_fmt(q.get('fact_coverage', 0.0))} "
@@ -104,6 +131,9 @@ def to_markdown(results: Sequence[EvalResult]) -> str:
         sections.append("")
         sections.append(_category_table(r))
         sections.append("")
+        env_summary = _environment_summary(r)
+        sections.append(env_summary)
+        sections.append("")
         if r.errors:
             sections.append(f"### {SUITE_TITLE} — execution errors")
             sections.append("")
@@ -138,6 +168,7 @@ def summarize(result: EvalResult) -> str:
     """One-line summary for stdout / CI logs."""
     return (
         f"[task] completed={_fmt(result.metric('completed'))} "
+        f"completed_clean={_fmt(result.metric('completed_clean'))} "
         f"tool_recall={_fmt(result.metric('tool_recall'))} "
         f"within_budget={_fmt(result.metric('within_budget'))} "
         f"coverage={_fmt(result.metric('fact_coverage'))} "

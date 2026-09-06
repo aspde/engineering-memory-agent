@@ -86,6 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     for flag, metric in (
         ("--min-completed", "completed"),
+        ("--min-completed-clean", "completed_clean"),
         ("--min-tool-recall", "tool_recall"),
         ("--min-within-budget", "within_budget"),
         ("--min-fact-coverage", "fact_coverage"),
@@ -108,6 +109,7 @@ def _build_thresholds(args: argparse.Namespace) -> dict[str, float]:
     thresholds: dict[str, float] = {}
     for metric in (
         "completed",
+        "completed_clean",
         "tool_recall",
         "within_budget",
         "fact_coverage",
